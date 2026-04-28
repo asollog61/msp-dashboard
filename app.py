@@ -1226,21 +1226,62 @@ def render_vacancy_tab():
                 'Days Vacant': days_vacant,
                 'Notes': v.get('Notes', ''),
             })
+        # Load auto-vacancy dates from Google Sheets config
+        auto_vac_dates = _read_gsheet_config('Config: Vacancy Dates') or {}
+
         for t in auto_vacant:
             key = f"{t['Building']}|{t['Space']}"
             if key not in manual_keys:
+                saved_date = auto_vac_dates.get(key, '')
+                days_vacant_auto = '—'
+                if saved_date:
+                    try:
+                        vd = datetime.strptime(saved_date, '%Y-%m-%d').date()
+                        days = (TODAY - vd).days
+                        if days < 0:
+                            days_vacant_auto = f"Starts in {-days}d"
+                        elif days < 30:
+                            days_vacant_auto = f"{days}d"
+                        elif days < 365:
+                            days_vacant_auto = f"{days // 30}mo {days % 30}d"
+                        else:
+                            days_vacant_auto = f"{days // 365}yr {(days % 365) // 30}mo"
+                    except (ValueError, TypeError):
+                        pass
                 vacant_display.append({
                     'Building': t['Building'],
                     'Space': t['Space'],
                     'Last Tenant': t['Tenant'],
                     'SF': t['SF'],
-                    'Vacant Since': '—',
-                    'Days Vacant': '—',
+                    'Vacant Since': saved_date or '—',
+                    'Days Vacant': days_vacant_auto,
                     'Notes': 'Auto-detected ($0 rent)',
                 })
 
         if vacant_display:
             show_grid(pd.DataFrame(vacant_display), key="vacant_spaces", tab_key="vacancy_current")
+
+            # Edit Vacant Since dates for auto-detected vacancies
+            auto_no_date = [v for v in vacant_display if v['Notes'] == 'Auto-detected ($0 rent)']
+            if auto_no_date:
+                with st.expander("📅 Set Vacant Since Dates"):
+                    for v in auto_no_date:
+                        vkey = f"{v['Building']}|{v['Space']}"
+                        existing = auto_vac_dates.get(vkey, '')
+                        default_date = TODAY
+                        if existing:
+                            try:
+                                default_date = datetime.strptime(existing, '%Y-%m-%d').date()
+                            except (ValueError, TypeError):
+                                pass
+                        col_label, col_date, col_btn = st.columns([4, 3, 1])
+                        col_label.write(f"**{v['Building']} — {v['Space']}** ({v['Last Tenant']})")
+                        new_date = col_date.date_input("Vacant since", value=default_date, key=f"vac_date_{vkey}", label_visibility="collapsed")
+                        if col_btn.button("Set", key=f"vac_set_{vkey}"):
+                            auto_vac_dates[vkey] = new_date.strftime('%Y-%m-%d')
+                            _write_gsheet_config('Config: Vacancy Dates', auto_vac_dates)
+                            st.success(f"Saved {v['Space']} vacant since {new_date}")
+                            st.rerun()
 
             # Remove buttons for manual entries
             if vacant_records:
