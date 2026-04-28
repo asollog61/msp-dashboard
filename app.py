@@ -683,7 +683,7 @@ def scan_coi_files():
 @st.cache_data(ttl=86400)
 def _extract_sop_content(pdf_path, cache_token):
     if not pdf_path or not HAS_PYMUPDF:
-        return []
+        return [], {}
     doc = fitz.open(pdf_path)
 
     # Extract tables from all pages
@@ -694,48 +694,35 @@ def _extract_sop_content(pdf_path, cache_token):
             for tab in tabs:
                 cells = tab.extract()
                 if cells and len(cells) > 1:
-                    # Store table with its vertical position for ordering
-                    bbox = tab.bbox
-                    all_tables.append({'page': page.number, 'y': bbox[1], 'rows': cells})
+                    all_tables.append({'page': page.number, 'y': tab.bbox[1], 'rows': cells})
         except Exception:
             pass
 
-    # Build text with table placeholders
-    full_text = ""
-    table_map = {}  # placeholder_id -> table HTML
-    tid = 0
-    for page in doc:
-        page_tables = [t for t in all_tables if t['page'] == page.number]
-        page_tables.sort(key=lambda t: t['y'])
-
-        page_text = page.get_text()
-
-        # For each table on this page, try to build HTML and insert a placeholder
-        for tbl in page_tables:
-            rows = tbl['rows']
-            header = rows[0]
-            body = rows[1:]
-            # Build HTML table
-            th = ''.join(f"<th>{c or ''}</th>" for c in header)
-            tr_list = []
-            for row in body:
-                td = ''.join(f"<td>{c or ''}</td>" for c in row)
-                tr_list.append(f"<tr>{td}</tr>")
-            html = f"<table class='sop-table'><thead><tr>{th}</tr></thead><tbody>{''.join(tr_list)}</tbody></table>"
-            placeholder = f"__TABLE_{tid}__"
-            table_map[placeholder] = html
-            tid += 1
-
-            # Remove table cell text from page_text to avoid duplication
+    # Build table HTML lookup keyed by header signature
+    table_map = {}
+    for tbl in all_tables:
+        rows = tbl['rows']
+        header = rows[0]
+        body = rows[1:]
+        th = ''.join(f"<th>{(c or '').strip()}</th>" for c in header)
+        tr_list = []
+        for row in body:
+            td = ''.join(f"<td>{(c or '').strip()}</td>" for c in row)
+            tr_list.append(f"<tr>{td}</tr>")
+        html = f"<table class='sop-table'><thead><tr>{th}</tr></thead><tbody>{''.join(tr_list)}</tbody></table>"
+        # Key by first header cell text for matching
+        key = (header[0] or '').strip().lower()
+        if key:
+            table_map[key] = {'html': html, 'cell_texts': set()}
             for row in rows:
                 for cell in row:
-                    if cell and len(cell) > 3:
-                        page_text = page_text.replace(cell, '', 1)
+                    if cell and len(cell.strip()) > 2:
+                        table_map[key]['cell_texts'].add(cell.strip())
 
-            # Insert placeholder after removing cell text
-            page_text += f"\n{placeholder}\n"
-
-        full_text += page_text + "\n"
+    # Standard text extraction
+    full_text = ""
+    for page in doc:
+        full_text += page.get_text() + "\n"
     doc.close()
 
     section_defs = [
@@ -777,6 +764,22 @@ def _extract_sop_content(pdf_path, cache_token):
     return sections, table_map
 
 
+def _match_table_for_section(lines, table_map):
+    """Check if any extracted table belongs in this section's content. Returns (table_key, set of lines to remove)."""
+    matches = []
+    for key, tbl in table_map.items():
+        cell_texts = tbl['cell_texts']
+        matched_indices = set()
+        for i, line in enumerate(lines):
+            stripped = line.strip()
+            if stripped in cell_texts or any(ct in stripped for ct in cell_texts if len(ct) > 5):
+                matched_indices.add(i)
+        # If we matched enough cells, this table belongs here
+        if len(matched_indices) >= 2:
+            matches.append((key, matched_indices))
+    return matches
+
+
 def extract_sop_content():
     if not SOP_PDF:
         return [], {}
@@ -792,120 +795,30 @@ def extract_sop_content():
 # =====================
 
 def render_sop_tab():
-    sections, table_map = extract_sop_content()
-    if not sections:
+    if not SOP_PDF:
         st.warning("SOP Manual PDF not found. Place Marion_St_SOP_Manual.pdf in the data/ folder.")
         return
 
     st.markdown("### 📋 Marion St Properties — Standard Operating Procedures")
-    st.caption("v1.0 Draft — Click any section to expand")
 
-    heading_pattern = re.compile(r'^(Purpose|Trigger|Systems & Files|Systems|Files|Persons|Owners|Frequency|Procedure|Process|Checklist|Intake|Monthly reconciliation|Standard reports|Vacancy Report|Lead Sheet|Numbering convention|Revision log|Open items)', re.IGNORECASE)
-    step_headings = {"procedure", "process", "steps", "checklist"}
+    # Read PDF and embed as base64 for in-browser viewing
+    import base64
+    with open(SOP_PDF, "rb") as f:
+        pdf_bytes = f.read()
+    b64 = base64.b64encode(pdf_bytes).decode()
 
-    def build_steps(step_buffer):
-        if not step_buffer:
-            return ""
-        items = ''.join(f"<li>{text}</li>" for text in step_buffer)
-        return f"<ol class='sop-steps'>{items}</ol>"
-
-    def build_grid(grid_dict):
-        if not grid_dict:
-            return ""
-        cards = []
-        for title, items in grid_dict.items():
-            if not items:
-                continue
-            li = ''.join(f"<li>{val}</li>" for val in items)
-            cards.append(f"<div class='sop-grid-card'><div class='sop-grid-title'>{title}</div><ul>{li}</ul></div>")
-        if not cards:
-            return ""
-        return f"<div class='sop-grid'>{''.join(cards)}</div>"
-
-    def add_to_grid(grid_dict, heading, line):
-        heading_title = heading.title()
-        values = []
-        colon_match = re.match(r'^([^:]+):\s*(.+)$', line)
-        if colon_match:
-            key = colon_match.group(1).strip()
-            val = colon_match.group(2).strip()
-            values.append(f"{key}: {val}")
-        else:
-            values.append(line.strip())
-        for val in values:
-            if val:
-                grid_dict.setdefault(heading_title, []).append(val)
-
-    for sec in sections:
-        with st.expander(f"{sec['icon']} {sec['title']}", expanded=False):
-            lines = [re.sub(r'\s+', ' ', line.strip()) for line in sec['content'].split('\n') if line.strip()]
-            step_buffer = []
-            step_mode = False
-            html_parts = []
-            grid_dict = {}
-            current_heading = None
-
-            def flush_steps():
-                nonlocal step_buffer, html_parts
-                if step_buffer:
-                    html_parts.append(build_steps(step_buffer))
-                    step_buffer = []
-
-            def flush_grid():
-                nonlocal grid_dict, html_parts
-                grid_html = build_grid(grid_dict)
-                if grid_html:
-                    html_parts.append(grid_html)
-                grid_dict = {}
-
-            current_heading = None
-            for line in lines:
-                # Render table placeholders
-                if line.startswith('__TABLE_') and line.endswith('__') and line in table_map:
-                    flush_steps()
-                    flush_grid()
-                    html_parts.append(table_map[line])
-                    continue
-
-                heading_match = heading_pattern.match(line)
-                if heading_match:
-                    flush_steps()
-                    flush_grid()
-                    html_parts.append(f"<div class='sop-heading'>{line}</div>")
-                    current_heading = heading_match.group(1).lower()
-                    step_mode = current_heading in step_headings
-                    continue
-
-                if current_heading == 'purpose':
-                    grid_match = re.match(r'^(Systems?|Files?):\s*(.+)', line, re.IGNORECASE)
-                    if grid_match:
-                        key = grid_match.group(1).title()
-                        values = [v.strip(' •-') for v in re.split(r'[,;]|\s•', grid_match.group(2)) if v.strip(' •-')]
-                        if values:
-                            grid_dict.setdefault(key, []).extend(values)
-                        continue
-
-                if current_heading and 'report' in current_heading:
-                    cleaned = line.strip(' •-')
-                    if cleaned:
-                        add_to_grid(grid_dict, current_heading, cleaned)
-                        continue
-
-                is_step_line = bool(re.match(r'^(\d+[\).]?\s+|[•\-]\s+)', line)) or step_mode
-                if is_step_line:
-                    clean = re.sub(r'^(\d+[\).]?\s+|[•\-]\s+)', '', line).strip()
-                    if clean:
-                        step_buffer.append(clean)
-                    continue
-
-                flush_steps()
-                flush_grid()
-                html_parts.append(f"<div class='sop-text'>{line}</div>")
-
-            flush_steps()
-            flush_grid()
-
-            st.markdown(f"<div class='sop-section'>{''.join(html_parts)}</div>", unsafe_allow_html=True)
+    # Embedded PDF viewer - scrollable, clickable, full-width
+    st.markdown(f"""
+        <iframe
+            src="data:application/pdf;base64,{b64}"
+            width="100%"
+            height="800px"
+            style="border: 1px solid rgba(255,255,255,0.1); border-radius: 6px;"
+        >
+            Your browser does not support PDF viewing.
+            <a href="data:application/pdf;base64,{b64}" download="Marion_St_SOP_Manual.pdf">Download PDF</a>
+        </iframe>
+    """, unsafe_allow_html=True)
 
 
 def render_tenancy_tab():
