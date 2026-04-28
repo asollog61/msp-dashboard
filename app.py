@@ -943,9 +943,9 @@ def render_tenancy_tab():
                 'Gross_PSF': 'Gross PSF',
                 'Total_Expenses': 'Total Expenses',
                 'NOI': 'NOI',
-                'TTE_Months': 'TTE (mo)',
+                'TTE_Months': 'MTE',
                 'Next Anniv': 'Next Anniversary',
-                'Anniv_Months': 'Anniv Δ (mo)',
+                'Anniv_Months': 'Anniv Δ',
                 'Next Monthly': 'New Rent',
                 'Delta Monthly': 'Δ Monthly',
                 'TTE_Label': 'TTE Label',
@@ -960,8 +960,8 @@ def render_tenancy_tab():
             display_df['Gross PSF'] = display_df['Gross PSF'].apply(lambda x: f"${x:,.2f}" if x else '$0')
             display_df['Total Expenses'] = ''
             display_df['NOI'] = ''
-            display_df['TTE (mo)'] = display_df['TTE (mo)'].fillna(0).astype(int)
-            display_df['Anniv Δ (mo)'] = display_df['Anniv Δ (mo)'].apply(
+            display_df['MTE'] = display_df['MTE'].fillna(0).astype(int)
+            display_df['Anniv Δ'] = display_df['Anniv Δ'].apply(
                 lambda x: int(x) if x is not None and not (isinstance(x, float) and pd.isna(x)) else None
             )
             display_df['Escalation'] = display_df['Escalation'].apply(lambda x: f"{x:.1%}" if x and x > 0 else '-')
@@ -986,7 +986,7 @@ def render_tenancy_tab():
                 'PSF': f"${b_wavg_psf:,.2f}", 'Gross Annual': f"${b_gross_annual:,.0f}", 'Gross PSF': '',
                 'CAM %': '', 'CAM Reimb': f"${b_cam_reimb:,.0f}",
                 'Total Expenses': f"${building_expense:,.0f}" if building_expense else '$0', 'NOI': f"${b_noi:,.0f}",
-                'TTE (mo)': '', 'Options': '', 'Escalation': '', 'Next Anniversary': '', 'Anniv Δ (mo)': '',
+                'MTE': '', 'Options': '', 'Escalation': '', 'Next Anniversary': '', 'Anniv Δ': '',
                 'New Rent': '', 'Δ Monthly': '', 'Status': '', 'TTE Label': '', 'NNN': '',
             }]
 
@@ -1003,8 +1003,8 @@ def render_tenancy_tab():
                 }
             """)
             column_configs = {
-                'TTE (mo)': {'type': ['numericColumn'], 'valueFormatter': tte_formatter},
-                'Anniv Δ (mo)': {'type': ['numericColumn'], 'valueFormatter': anniv_formatter},
+                'MTE': {'type': ['numericColumn'], 'valueFormatter': tte_formatter},
+                'Anniv Δ': {'type': ['numericColumn'], 'valueFormatter': anniv_formatter},
                 'TTE Label': {'hide': True},
                 'NNN': {'hide': True},
             }
@@ -1027,8 +1027,8 @@ def render_tenancy_tab():
     render_column_config_editor(
         'tenancy',
         ['Space', 'Tenant', 'Type', 'SF', 'Lease', 'Monthly', 'Annual', 'Gross Annual', 'PSF', 'Gross PSF',
-         'CAM %', 'CAM Reimb', 'Total Expenses', 'NOI', 'TTE (mo)', 'Options', 'Escalation',
-         'Next Anniversary', 'Anniv Δ (mo)', 'New Rent', 'Δ Monthly', 'Status']
+         'CAM %', 'CAM Reimb', 'Total Expenses', 'NOI', 'MTE', 'Options', 'Escalation',
+         'Next Anniversary', 'Anniv Δ', 'New Rent', 'Δ Monthly', 'Status']
     )
     render_expense_editor()
 
@@ -1236,12 +1236,12 @@ def render_vacancy_tab():
     if at_risk:
         import pandas as pd
         risk_df = pd.DataFrame(at_risk)[['Building', 'Space', 'Tenant', 'SF', 'Monthly', 'TTE_Months', 'Exp Date']]
-        risk_df.rename(columns={'TTE_Months': 'TTE (mo)'}, inplace=True)
+        risk_df.rename(columns={'TTE_Months': 'MTE'}, inplace=True)
         risk_df['Monthly'] = risk_df['Monthly'].apply(lambda x: f"${x:,.0f}")
         show_grid(
             risk_df,
             key="at_risk",
-            column_configs={'TTE (mo)': {'type': ['numericColumn']}},
+            column_configs={'MTE': {'type': ['numericColumn']}},
             tab_key="vacancy_risk"
         )
     else:
@@ -1408,7 +1408,7 @@ def render_vacancy_tab():
         mdf = pd.DataFrame(columns=['Space', 'Description', 'URL', 'Added By', 'Date', 'Status'])
 
     render_column_config_editor('vacancy_current', ['Building', 'Space', 'Last Tenant', 'SF', 'Vacant Since', 'Days Vacant', 'Notes'])
-    render_column_config_editor('vacancy_risk', ['Building', 'Space', 'Tenant', 'SF', 'Monthly', 'TTE (mo)', 'Exp Date'])
+    render_column_config_editor('vacancy_risk', ['Building', 'Space', 'Tenant', 'SF', 'Monthly', 'MTE', 'Exp Date'])
     render_column_config_editor('vacancy_activity', ['Date', 'Building', 'Space', 'Prospect', 'Broker', 'Type', 'Feedback', 'Added_By', 'Timestamp'])
     render_column_config_editor('marketing', list(mdf.columns))
 
@@ -1634,7 +1634,7 @@ def render_deposits_tab():
         df = pd.DataFrame(b_deps)
         display_cols = ['Display Tenant', 'Space', 'Type', 'Lease', 'Current SD Fmt', 'SD Anniversary', 'New SD Amount', 'SD Delta', 'TTE']
         display_df = df[display_cols].copy()
-        display_df.columns = ['Tenant', 'Space', 'Type', 'Lease', 'Current SD', 'SD Anniversary', 'New SD', 'Δ SD', 'TTE']
+        display_df.columns = ['Tenant', 'Space', 'Type', 'Lease', 'Current SD', 'SD Anniversary', 'New SD', 'Δ SD', 'MTE']
         display_df['SD Anniversary'] = display_df['SD Anniversary'].apply(
             lambda d: d.strftime('%m/%d/%Y') if isinstance(d, (datetime, date)) else ('-' if not d else str(d))
         )
@@ -1644,7 +1644,7 @@ def render_deposits_tab():
         )
         show_grid(display_df, key=f"dep_{building_name}", tab_key="deposits")
 
-    render_column_config_editor('deposits', ['Tenant', 'Space', 'Type', 'Lease', 'Current SD', 'SD Anniversary', 'New SD', 'Δ SD', 'TTE'])
+    render_column_config_editor('deposits', ['Tenant', 'Space', 'Type', 'Lease', 'Current SD', 'SD Anniversary', 'New SD', 'Δ SD', 'MTE'])
 
     # Portfolio total
     st.divider()
