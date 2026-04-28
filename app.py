@@ -930,7 +930,7 @@ def render_tenancy_tab():
             df['Total_Expenses'] = ''
             df['NOI'] = ''
 
-            display_cols = ['Space', 'Tenant', 'Type', 'SF', 'Lease', 'Monthly', 'Annual', 'Gross_Annual', 'PSF', 'Gross_PSF', 'CAM_Pct', 'CAM_Reimb', 'TTE_Months', 'Options', 'Escalation', 'Next Anniv', 'Anniv_Months', 'Next Monthly', 'Delta Monthly', 'Status', 'Total_Expenses', 'NOI', 'TTE_Label', 'Is_NNN']
+            display_cols = ['Space', 'Tenant', 'Type', 'SF', 'Lease', 'Monthly', 'Annual', 'Gross_Annual', 'PSF', 'Gross_PSF', 'CAM_Pct', 'CAM_Reimb', 'TTE_Months', 'Exp Date', 'Options', 'Escalation', 'Next Anniv', 'Anniv_Months', 'Next Monthly', 'Delta Monthly', 'Status', 'Total_Expenses', 'NOI', 'TTE_Label', 'Is_NNN']
 
             # Calculate building totals
             b_monthly = df['Monthly'].sum()
@@ -993,7 +993,7 @@ def render_tenancy_tab():
                 'PSF': f"${b_wavg_psf:,.2f}", 'Gross Annual': f"${b_gross_annual:,.0f}", 'Gross PSF': '',
                 'CAM %': '', 'CAM Reimb': f"${b_cam_reimb:,.0f}",
                 'Total Expenses': f"${building_expense:,.0f}" if building_expense else '$0', 'NOI': f"${b_noi:,.0f}",
-                'MTE': '', 'Options': '', 'Escalation': '', 'Next Anniversary': '', 'Anniv Δ': '',
+                'MTE': '', 'Exp Date': '', 'Options': '', 'Escalation': '', 'Next Anniversary': '', 'Anniv Δ': '',
                 'New Rent': '', 'Δ Monthly': '', 'Status': '', 'TTE Label': '', 'NNN': '',
             }]
 
@@ -1034,7 +1034,7 @@ def render_tenancy_tab():
     render_column_config_editor(
         'tenancy',
         ['Space', 'Tenant', 'Type', 'SF', 'Lease', 'Monthly', 'Annual', 'Gross Annual', 'PSF', 'Gross PSF',
-         'CAM %', 'CAM Reimb', 'Total Expenses', 'NOI', 'MTE', 'Options', 'Escalation',
+         'CAM %', 'CAM Reimb', 'Total Expenses', 'NOI', 'MTE', 'Exp Date', 'Options', 'Escalation',
          'Next Anniversary', 'Anniv Δ', 'New Rent', 'Δ Monthly', 'Status']
     )
     render_expense_editor()
