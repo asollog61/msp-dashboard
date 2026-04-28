@@ -119,6 +119,11 @@ st.markdown("""
     .sop-grid-card { border: 1px solid rgba(255,255,255,0.08); border-radius: 6px; padding: 6px 10px; background: rgba(255,255,255,0.03); }
     .sop-grid-title { font-size: 0.8rem; text-transform: uppercase; letter-spacing: 0.4px; color: #9fb7ff; margin-bottom: 4px; }
     .sop-grid-card ul { margin: 0; padding-left: 16px; line-height: 1.2; }
+    .sop-table { width: 100%; border-collapse: collapse; margin: 8px 0 12px; font-size: 0.85rem; }
+    .sop-table th { background: rgba(100,140,255,0.15); color: #c8d4ff; text-align: left; padding: 6px 10px; border: 1px solid rgba(255,255,255,0.1); font-weight: 600; }
+    .sop-table td { padding: 5px 10px; border: 1px solid rgba(255,255,255,0.08); }
+    .sop-table tr:nth-child(even) { background: rgba(255,255,255,0.03); }
+    .sop-table tr:hover { background: rgba(100,140,255,0.08); }
 </style>
 """, unsafe_allow_html=True)
 
@@ -650,9 +655,57 @@ def _extract_sop_content(pdf_path, cache_token):
     if not pdf_path or not HAS_PYMUPDF:
         return []
     doc = fitz.open(pdf_path)
-    full_text = ""
+
+    # Extract tables from all pages
+    all_tables = []
     for page in doc:
-        full_text += page.get_text() + "\n"
+        try:
+            tabs = page.find_tables()
+            for tab in tabs:
+                cells = tab.extract()
+                if cells and len(cells) > 1:
+                    # Store table with its vertical position for ordering
+                    bbox = tab.bbox
+                    all_tables.append({'page': page.number, 'y': bbox[1], 'rows': cells})
+        except Exception:
+            pass
+
+    # Build text with table placeholders
+    full_text = ""
+    table_map = {}  # placeholder_id -> table HTML
+    tid = 0
+    for page in doc:
+        page_tables = [t for t in all_tables if t['page'] == page.number]
+        page_tables.sort(key=lambda t: t['y'])
+
+        page_text = page.get_text()
+
+        # For each table on this page, try to build HTML and insert a placeholder
+        for tbl in page_tables:
+            rows = tbl['rows']
+            header = rows[0]
+            body = rows[1:]
+            # Build HTML table
+            th = ''.join(f"<th>{c or ''}</th>" for c in header)
+            tr_list = []
+            for row in body:
+                td = ''.join(f"<td>{c or ''}</td>" for c in row)
+                tr_list.append(f"<tr>{td}</tr>")
+            html = f"<table class='sop-table'><thead><tr>{th}</tr></thead><tbody>{''.join(tr_list)}</tbody></table>"
+            placeholder = f"__TABLE_{tid}__"
+            table_map[placeholder] = html
+            tid += 1
+
+            # Remove table cell text from page_text to avoid duplication
+            for row in rows:
+                for cell in row:
+                    if cell and len(cell) > 3:
+                        page_text = page_text.replace(cell, '', 1)
+
+            # Insert placeholder after removing cell text
+            page_text += f"\n{placeholder}\n"
+
+        full_text += page_text + "\n"
     doc.close()
 
     section_defs = [
@@ -691,12 +744,12 @@ def _extract_sop_content(pdf_path, cache_token):
                 continue
             clean_lines.append(line)
         sections.append({'title': title, 'icon': icon, 'content': '\n'.join(clean_lines).strip()})
-    return sections
+    return sections, table_map
 
 
 def extract_sop_content():
     if not SOP_PDF:
-        return []
+        return [], {}
     try:
         cache_token = os.path.getmtime(SOP_PDF)
     except OSError:
@@ -709,7 +762,7 @@ def extract_sop_content():
 # =====================
 
 def render_sop_tab():
-    sections = extract_sop_content()
+    sections, table_map = extract_sop_content()
     if not sections:
         st.warning("SOP Manual PDF not found. Place Marion_St_SOP_Manual.pdf in the data/ folder.")
         return
@@ -777,6 +830,13 @@ def render_sop_tab():
 
             current_heading = None
             for line in lines:
+                # Render table placeholders
+                if line.startswith('__TABLE_') and line.endswith('__') and line in table_map:
+                    flush_steps()
+                    flush_grid()
+                    html_parts.append(table_map[line])
+                    continue
+
                 heading_match = heading_pattern.match(line)
                 if heading_match:
                     flush_steps()
