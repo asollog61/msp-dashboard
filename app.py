@@ -910,7 +910,7 @@ def render_tenancy_tab():
             current_bldg = t['Building']
             bldg_tenants = [x for x in filtered if x['Building'] == current_bldg]
             bldg_annual = sum(x['Annual'] for x in bldg_tenants)
-            st.markdown(f'<div class="building-header"><strong>{current_bldg}</strong> — {len(bldg_tenants)} tenants — ${bldg_annual:,.0f}/yr</div>', unsafe_allow_html=True)
+            _bldg_header_placeholder = st.empty()
 
             import pandas as pd
             df = pd.DataFrame(bldg_tenants)
@@ -927,10 +927,8 @@ def render_tenancy_tab():
             df['Gross_PSF'] = df['PSF'] + df['CAM_PSF']
 
             df['Gross_Annual'] = df['Annual'] + df['CAM_Reimb']
-            df['Total_Expenses'] = ''
-            df['NOI'] = ''
 
-            display_cols = ['Space', 'Tenant', 'Type', 'SF', 'Lease', 'Monthly', 'Annual', 'Gross_Annual', 'PSF', 'Gross_PSF', 'CAM_Pct', 'CAM_Reimb', 'TTE_Months', 'Exp Date', 'Options', 'Escalation', 'Next Anniv', 'Anniv_Months', 'Next Monthly', 'Delta Monthly', 'Status', 'Total_Expenses', 'NOI', 'TTE_Label', 'Is_NNN']
+            display_cols = ['Space', 'Tenant', 'Type', 'SF', 'Lease', 'Monthly', 'Annual', 'Gross_Annual', 'PSF', 'Gross_PSF', 'CAM_Pct', 'CAM_Reimb', 'TTE_Months', 'Exp Date', 'Options', 'Escalation', 'Next Anniv', 'Anniv_Months', 'Next Monthly', 'Delta Monthly', 'Status', 'TTE_Label', 'Is_NNN']
 
             # Calculate building totals
             b_monthly = df['Monthly'].sum()
@@ -941,6 +939,15 @@ def render_tenancy_tab():
             b_cam_reimb = df['CAM_Reimb'].sum()
             b_noi = b_gross_annual - building_expense
 
+            _bldg_header_placeholder.markdown(
+                f'<div class="building-header"><strong>{current_bldg}</strong> — '
+                f'{len(bldg_tenants)} tenants · '
+                f'Gross Rev: ${b_gross_annual:,.0f} · '
+                f'Expenses: ${building_expense:,.0f} · '
+                f'NOI: ${b_noi:,.0f}</div>',
+                unsafe_allow_html=True
+            )
+
             # Create display dataframe
             display_df = df[display_cols].copy()
             display_df.rename(columns={
@@ -948,8 +955,6 @@ def render_tenancy_tab():
                 'CAM_Reimb': 'CAM Reimb',
                 'Gross_Annual': 'Gross Annual',
                 'Gross_PSF': 'Gross PSF',
-                'Total_Expenses': 'Total Expenses',
-                'NOI': 'NOI',
                 'TTE_Months': 'MTE',
                 'Next Anniv': 'Next Anniversary',
                 'Anniv_Months': 'Anniv Δ',
@@ -965,8 +970,6 @@ def render_tenancy_tab():
             display_df['CAM Reimb'] = display_df['CAM Reimb'].apply(lambda x: f"${x:,.0f}" if x and x != 0 else '$0')
             display_df['Gross Annual'] = display_df['Gross Annual'].apply(lambda x: f"${x:,.0f}" if x else '$0')
             display_df['Gross PSF'] = display_df['Gross PSF'].apply(lambda x: f"${x:,.2f}" if x else '$0')
-            display_df['Total Expenses'] = ''
-            display_df['NOI'] = ''
             display_df['MTE'] = display_df['MTE'].fillna(0).astype(int)
             display_df['Anniv Δ'] = display_df['Anniv Δ'].apply(
                 lambda x: int(x) if x is not None and not (isinstance(x, float) and pd.isna(x)) else None
@@ -992,7 +995,6 @@ def render_tenancy_tab():
                 'Lease': '', 'Monthly': f"${b_monthly:,.0f}", 'Annual': f"${b_annual:,.0f}",
                 'PSF': f"${b_wavg_psf:,.2f}", 'Gross Annual': f"${b_gross_annual:,.0f}", 'Gross PSF': '',
                 'CAM %': '', 'CAM Reimb': f"${b_cam_reimb:,.0f}",
-                'Total Expenses': f"${building_expense:,.0f}" if building_expense else '$0', 'NOI': f"${b_noi:,.0f}",
                 'MTE': '', 'Exp Date': '', 'Options': '', 'Escalation': '', 'Next Anniversary': '', 'Anniv Δ': '',
                 'New Rent': '', 'Δ Monthly': '', 'Status': '', 'TTE Label': '', 'NNN': '',
             }]
@@ -1034,7 +1036,7 @@ def render_tenancy_tab():
     render_column_config_editor(
         'tenancy',
         ['Space', 'Tenant', 'Type', 'SF', 'Lease', 'Monthly', 'Annual', 'Gross Annual', 'PSF', 'Gross PSF',
-         'CAM %', 'CAM Reimb', 'Total Expenses', 'NOI', 'MTE', 'Exp Date', 'Options', 'Escalation',
+         'CAM %', 'CAM Reimb', 'MTE', 'Exp Date', 'Options', 'Escalation',
          'Next Anniversary', 'Anniv Δ', 'New Rent', 'Δ Monthly', 'Status']
     )
     render_expense_editor()
