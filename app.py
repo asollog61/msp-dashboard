@@ -143,29 +143,70 @@ def ensure_json_file(path, default):
         return default
 
 
+def _read_gsheet_config(tab_name):
+    """Read a JSON config blob stored in cell A1 of a Google Sheet tab."""
+    try:
+        sheet = get_gsheet()
+        if not sheet:
+            return None
+        ws = sheet.worksheet(tab_name)
+        val = ws.acell('A1').value
+        if val:
+            return json.loads(val)
+    except Exception:
+        pass
+    return None
+
+
+def _write_gsheet_config(tab_name, data):
+    """Write a JSON config blob to cell A1 of a Google Sheet tab. Creates tab if needed."""
+    try:
+        sheet = get_gsheet()
+        if not sheet:
+            return False
+        try:
+            ws = sheet.worksheet(tab_name)
+        except Exception:
+            ws = sheet.add_worksheet(title=tab_name, rows=1, cols=1)
+        ws.update_acell('A1', json.dumps(data))
+        return True
+    except Exception:
+        return False
+
+
 def read_column_config():
+    # Try Google Sheets first (persistent across deploys), fall back to local JSON
+    data = _read_gsheet_config('Config: Columns')
+    if data and isinstance(data, dict):
+        return data
     return ensure_json_file(COLUMN_CONFIG_FILE, {})
 
 
 def write_column_config(data):
+    # Write to Google Sheets (primary) and local JSON (backup)
+    _write_gsheet_config('Config: Columns', data)
     try:
         with open(COLUMN_CONFIG_FILE, 'w', encoding='utf-8') as f:
             json.dump(data, f, indent=2)
-    except Exception as e:
-        st.error(f"Unable to save column config: {e}")
+    except Exception:
+        pass
 
 
 def read_expense_config():
     default = {name: 0 for name in BUILDING_MAP.keys()}
+    data = _read_gsheet_config('Config: Expenses')
+    if data and isinstance(data, dict):
+        return data
     return ensure_json_file(EXPENSE_CONFIG_FILE, default)
 
 
 def write_expense_config(data):
+    _write_gsheet_config('Config: Expenses', data)
     try:
         with open(EXPENSE_CONFIG_FILE, 'w', encoding='utf-8') as f:
             json.dump(data, f, indent=2)
-    except Exception as e:
-        st.error(f"Unable to save expense config: {e}")
+    except Exception:
+        pass
 
 
 def get_column_width_overrides(tab_key):
@@ -812,7 +853,7 @@ def render_sop_tab():
         <iframe
             src="data:application/pdf;base64,{b64}"
             width="100%"
-            height="800px"
+            height="1600px"
             style="border: 1px solid rgba(255,255,255,0.1); border-radius: 6px;"
         >
             Your browser does not support PDF viewing.
