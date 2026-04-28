@@ -605,19 +605,27 @@ def fuzzy_match_tenant(tenant_name, cert_name):
 @st.cache_data(ttl=3600)
 def scan_coi_files():
     coi_data = {}
-    if not ACTIVE_PROPS_ROOT:
-        return coi_data
+    # Check for COIs bundled in data/coi/{building}/ (Streamlit Cloud) or ACTIVE_PROPERTIES (local)
+    bundled_coi = Path(os.path.dirname(__file__)) / "data" / "coi"
     for building_name, mapping in BUILDING_MAP.items():
-        cert_dir = ACTIVE_PROPS_ROOT / mapping["dest_folder"] / mapping["share"] / "Certificates of Insurance"
-        if not cert_dir.exists():
-            parent = ACTIVE_PROPS_ROOT / mapping["dest_folder"] / mapping["share"]
-            if parent.exists():
-                for d in parent.iterdir():
-                    if d.is_dir() and 'certificate' in d.name.lower() and 'insurance' in d.name.lower():
-                        cert_dir = d
-                        break
+        cert_dir = None
+        # Priority 1: bundled COI folder (works on Streamlit Cloud)
+        candidate = bundled_coi / building_name
+        if candidate.exists():
+            cert_dir = candidate
+        # Priority 2: ACTIVE_PROPERTIES local path
+        elif ACTIVE_PROPS_ROOT:
+            cert_dir = ACTIVE_PROPS_ROOT / mapping["dest_folder"] / mapping["share"] / "Certificates of Insurance"
+            if not cert_dir.exists():
+                parent = ACTIVE_PROPS_ROOT / mapping["dest_folder"] / mapping["share"]
+                cert_dir = None
+                if parent.exists():
+                    for d in parent.iterdir():
+                        if d.is_dir() and 'certificate' in d.name.lower() and 'insurance' in d.name.lower():
+                            cert_dir = d
+                            break
         certs = []
-        if cert_dir.exists():
+        if cert_dir and cert_dir.exists():
             for f in sorted(cert_dir.iterdir()):
                 if not f.is_file() or f.suffix.lower() != '.pdf':
                     continue
