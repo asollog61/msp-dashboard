@@ -994,15 +994,15 @@ def render_tenancy_tab():
             display_df['Monthly'] = display_df['Monthly'].apply(lambda x: f"${x:,.0f}")
             display_df['Annual'] = display_df['Annual'].apply(lambda x: f"${x:,.0f}")
             display_df['PSF'] = display_df['PSF'].apply(lambda x: f"${x:,.2f}")
-            display_df['SF'] = display_df['SF'].apply(lambda x: f"{x:,.0f}" if x > 1 else str(x))
+            display_df['SF'] = display_df['SF'].apply(lambda x: f"{x:,.0f}" if isinstance(x, (int, float)) and x > 1 else '')
             display_df['Next Anniversary'] = display_df['Next Anniversary'].apply(
                 lambda d: d.strftime('%m/%d/%Y') if isinstance(d, (datetime, date)) else ('-' if not d else str(d))
             )
             display_df['New Rent'] = display_df['New Rent'].apply(
-                lambda x: f"${x:,.0f}" if x is not None else '$0'
+                lambda x: f"${x:,.0f}" if x is not None and not (isinstance(x, float) and pd.isna(x)) else '$0'
             )
             display_df['Δ Monthly'] = display_df['Δ Monthly'].apply(
-                lambda x: f"{'+' if x and x > 0 else ''}${x:,.0f}" if x is not None else '$0'
+                lambda x: f"{'+' if x and x > 0 else ''}${x:,.0f}" if x is not None and not (isinstance(x, float) and pd.isna(x)) else '$0'
             )
 
             # Pinned totals row
