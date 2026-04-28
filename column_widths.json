@@ -1,0 +1,31 @@
+{
+  "tenancy": {
+    "Space": 100,
+    "Tenant": 200,
+    "Type": 100,
+    "SF": 75,
+    "Lease": 75,
+    "Monthly": 75,
+    "Annual": 100,
+    "PSF": 75,
+    "TTE (mo)": 50,
+    "Options": 50,
+    "Escalation": 75,
+    "Next Anniversary": 125,
+    "Anniv \u0394 (mo)": 75,
+    "New Rent": 75,
+    "\u0394 Monthly": 75,
+    "Status": 150
+  },
+  "deposits": {
+    "Tenant": 201,
+    "Space": 50,
+    "Type": 75,
+    "Lease": 100,
+    "Current SD": 100,
+    "SD Anniversary": 150,
+    "New SD": 100,
+    "\u0394 SD": 100,
+    "TTE": 75
+  }
+}
