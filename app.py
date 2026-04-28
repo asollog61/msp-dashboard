@@ -891,11 +891,17 @@ def render_tenancy_tab():
     total_monthly = sum(t['Monthly'] for t in active)
     mtm_count = sum(1 for t in active if t.get('TTE_Label') == 'MTM')
 
-    c1, c2, c3, c4 = st.columns(4)
+    total_expenses = sum(float(expense_cfg.get(b, 0) or 0) for b in BUILDING_MAP.keys())
+    total_noi = total_annual - total_expenses
+
+    c1, c2, c3, c4, c5, c6, c7 = st.columns(7)
     c1.metric("Portfolio SF", f"{total_sf:,.0f}")
-    c2.metric("Annual Revenue", f"${total_annual:,.0f}")
-    c3.metric("Monthly Revenue", f"${total_monthly:,.0f}")
-    c4.metric("Month-to-Month", str(mtm_count))
+    c2.metric("Gross Rev (Ann)", f"${total_annual:,.0f}")
+    c3.metric("Gross Rev (Mo)", f"${total_monthly:,.0f}")
+    c4.metric("Expenses (Ann)", f"${total_expenses:,.0f}")
+    c5.metric("Expenses (Mo)", f"${total_expenses/12:,.0f}")
+    c6.metric("NOI (Ann)", f"${total_noi:,.0f}")
+    c7.metric("NOI (Mo)", f"${total_noi/12:,.0f}")
 
     # Filter
     buildings = ['All'] + sorted(set(t['Building'] for t in active))
@@ -1027,11 +1033,14 @@ def render_tenancy_tab():
     port_monthly = sum(t['Monthly'] for t in filtered if t['Tenant'] != 'Easement')
     port_annual = sum(t['Annual'] for t in filtered if t['Tenant'] != 'Easement')
     port_wavg_psf = port_annual / port_sf if port_sf > 0 else 0
-    pc1, pc2, pc3, pc4 = st.columns(4)
+    port_expenses = sum(float(expense_cfg.get(b, 0) or 0) for b in BUILDING_MAP.keys())
+    port_noi = port_annual - port_expenses
+    pc1, pc2, pc3, pc4, pc5 = st.columns(5)
     pc1.metric("Total SF", f"{port_sf:,.0f}")
-    pc2.metric("Total Monthly", f"${port_monthly:,.0f}")
-    pc3.metric("Total Annual", f"${port_annual:,.0f}")
-    pc4.metric("Wtd Avg $/SF", f"${port_wavg_psf:,.2f}")
+    pc2.metric("Gross Rev (Ann)", f"${port_annual:,.0f}")
+    pc3.metric("Expenses (Ann)", f"${port_expenses:,.0f}")
+    pc4.metric("NOI (Ann)", f"${port_noi:,.0f}")
+    pc5.metric("Wtd Avg $/SF", f"${port_wavg_psf:,.2f}")
 
     render_column_config_editor(
         'tenancy',
