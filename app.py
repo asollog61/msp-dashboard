@@ -175,11 +175,27 @@ def get_column_width_overrides(tab_key):
     cfg = data.get(tab_key, {})
     clean = {}
     for col, width in cfg.items():
+        if width == '' or width is None:
+            continue
         try:
             clean[col] = int(width)
         except (ValueError, TypeError):
             continue
     return clean
+
+
+def get_column_order(tab_key, default_cols):
+    """Return column list reordered per config. Columns in config come first (in config order),
+    then any remaining columns not in config keep their original order."""
+    if not tab_key:
+        return default_cols
+    data = read_column_config()
+    cfg = data.get(tab_key, {})
+    if not cfg:
+        return default_cols
+    config_cols = [c for c in cfg.keys() if c in default_cols]
+    remaining = [c for c in default_cols if c not in config_cols]
+    return config_cols + remaining
 
 
 def save_column_width_overrides(tab_key, overrides):
@@ -192,27 +208,37 @@ def render_column_config_editor(tab_key, columns):
     if not tab_key or not columns:
         return
     existing = read_column_config().get(tab_key, {})
+    # Show columns in config order first (preserves reordering), then any new ones
+    ordered_cols = [c for c in existing.keys() if c in columns]
+    remaining = [c for c in columns if c not in ordered_cols]
+    all_cols = ordered_cols + remaining
     default_lines = []
-    for col in columns:
+    for col in all_cols:
         width = existing.get(col, '')
         default_lines.append(f"{col},{width}")
-    with st.expander(f"⚙️ Column Width Config — {tab_key.title()}"):
-        st.write("Enter `ColumnName,width` per line. Leave width blank to use automatic sizing.")
+    with st.expander(f"⚙️ Column Config — {tab_key.title()} (order + width)"):
+        st.write("Reorder lines to change column order. Set width after comma (blank = auto). Save to apply.")
         text = st.text_area(
             "column_widths", value='\n'.join(default_lines), height=150,
             key=f"cfg_text_{tab_key}", label_visibility="collapsed"
         )
-        if st.button("Save Column Widths", key=f"cfg_save_{tab_key}"):
-            new_cfg = {}
+        if st.button("Save Column Config", key=f"cfg_save_{tab_key}"):
+            from collections import OrderedDict
+            new_cfg = OrderedDict()
             for line in text.splitlines():
-                parts = [p.strip() for p in line.split(',') if p.strip()]
-                if len(parts) >= 2:
+                parts = [p.strip() for p in line.split(',')]
+                if not parts or not parts[0]:
+                    continue
+                col_name = parts[0]
+                width = None
+                if len(parts) >= 2 and parts[1]:
                     try:
-                        new_cfg[parts[0]] = int(parts[1])
+                        width = int(parts[1])
                     except ValueError:
-                        continue
-            save_column_width_overrides(tab_key, new_cfg)
-            st.success("Saved. Reloading with new widths...")
+                        width = None
+                new_cfg[col_name] = width if width else ""
+            save_column_width_overrides(tab_key, dict(new_cfg))
+            st.success("Saved! Column order + widths updated.")
             st.rerun()
 
 
@@ -236,6 +262,10 @@ def render_expense_editor():
 def show_grid(df, key, height=None, fit_columns=True, pinned_bottom=None, column_configs=None, tab_key=None):
     """Render a DataFrame as an AG Grid with compact columns and dark theme."""
     import pandas as pd
+    # Reorder columns based on config
+    if tab_key:
+        ordered_cols = get_column_order(tab_key, list(df.columns))
+        df = df[ordered_cols]
     gb = GridOptionsBuilder.from_dataframe(df)
     gb.configure_default_column(
         sortable=True,
@@ -1042,8 +1072,9 @@ def render_tenancy_tab():
 
     render_column_config_editor(
         'tenancy',
-        ['Space', 'Tenant', 'Type', 'SF', 'Lease', 'Monthly', 'Annual', 'PSF', 'Gross PSF', 'CAM %', 'CAM Reimb',
-         'Total Expenses', 'NOI', 'TTE (mo)', 'Options', 'Escalation', 'Next Anniversary', 'Anniv Δ (mo)', 'New Rent', 'Δ Monthly', 'Status']
+        ['Space', 'Tenant', 'Type', 'SF', 'Lease', 'Monthly', 'Annual', 'Gross Annual', 'PSF', 'Gross PSF',
+         'CAM %', 'CAM Reimb', 'Total Expenses', 'NOI', 'TTE (mo)', 'Options', 'Escalation',
+         'Next Anniversary', 'Anniv Δ (mo)', 'New Rent', 'Δ Monthly', 'Status']
     )
     render_expense_editor()
 
