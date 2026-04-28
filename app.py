@@ -107,6 +107,7 @@ st.markdown("""
     .sop-card:hover { border-color: #58a6ff; }
     div[data-testid="stDataFrame"] table { font-size: 13px !important; }
     .ag-theme-streamlit .ag-header-cell-label { font-size: 12px !important; }
+    .ag-right-aligned-header .ag-header-cell-label { justify-content: flex-end !important; }
     .ag-theme-streamlit .ag-cell { font-size: 12px !important; padding: 2px 6px !important; }
     .ag-theme-streamlit .ag-row { height: 28px !important; }
     .ag-theme-streamlit .ag-header-row { height: 32px !important; }
@@ -318,6 +319,8 @@ def show_grid(df, key, height=None, fit_columns=True, pinned_bottom=None, column
         autoWidth=True,
         wrapHeaderText=True,
         autoHeaderHeight=True,
+        cellStyle={'text-align': 'right'},
+        headerClass='ag-right-aligned-header',
     )
 
     # Set narrow column widths based on content type
