@@ -143,6 +143,7 @@ def ensure_json_file(path, default):
         return default
 
 
+@st.cache_data(ttl=120)
 def _read_gsheet_config(tab_name):
     """Read a JSON config blob stored in cell A1 of a Google Sheet tab."""
     try:
@@ -169,6 +170,7 @@ def _write_gsheet_config(tab_name, data):
         except Exception:
             ws = sheet.add_worksheet(title=tab_name, rows=1, cols=1)
         ws.update_acell('A1', json.dumps(data))
+        _read_gsheet_config.clear()  # Clear read cache after write
         return True
     except Exception:
         return False
@@ -391,6 +393,7 @@ def get_gsheet():
     return gc.open_by_key(SHEET_ID)
 
 
+@st.cache_data(ttl=120)
 def get_activity_data():
     sheet = get_gsheet()
     if not sheet:
@@ -415,6 +418,7 @@ def add_activity_entry(entry):
             entry['type'], entry['feedback'], entry.get('added_by', ''),
             datetime.now().strftime('%Y-%m-%d %H:%M:%S')
         ], value_input_option='USER_ENTERED')
+        get_activity_data.clear()
         return True
     except Exception as e:
         st.error(f"Error adding entry: {e}")
@@ -429,12 +433,14 @@ def delete_activity_entry(row_idx):
     try:
         ws = sheet.worksheet('Vacancy Activity')
         ws.delete_rows(row_idx + 2)
+        get_activity_data.clear()
         return True
     except Exception as e:
         st.error(f"Error deleting: {e}")
         return False
 
 
+@st.cache_data(ttl=120)
 def get_marketing_data():
     sheet = get_gsheet()
     if not sheet:
@@ -457,6 +463,7 @@ def add_marketing_entry(entry):
             entry.get('added_by', ''), datetime.now().strftime('%Y-%m-%d'),
             'Active'
         ], value_input_option='USER_ENTERED')
+        get_marketing_data.clear()
         return True
     except Exception as e:
         st.error(f"Error: {e}")
