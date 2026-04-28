@@ -285,16 +285,20 @@ def show_grid(df, key, height=None, fit_columns=True, pinned_bottom=None, column
         row_count = len(df) + (1 if pinned_bottom else 0)
         height = min(max(row_count * 30 + 40, 100), 600)
 
-    AgGrid(
-        df,
-        gridOptions=grid_options,
-        height=height,
-        theme='streamlit',
-        update_mode=GridUpdateMode.NO_UPDATE,
-        fit_columns_on_grid_load=fit_columns,
-        key=key,
-        allow_unsafe_jscode=True,
-    )
+    try:
+        AgGrid(
+            df,
+            gridOptions=grid_options,
+            height=height,
+            theme='streamlit',
+            update_mode=GridUpdateMode.NO_UPDATE,
+            fit_columns_on_grid_load=fit_columns,
+            key=key,
+            allow_unsafe_jscode=True,
+        )
+    except Exception:
+        # Fallback to native Streamlit dataframe if AG Grid fails
+        st.dataframe(df, height=height, use_container_width=True)
 
 
 # --- GOOGLE SHEETS CONNECTION ---
