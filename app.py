@@ -360,6 +360,13 @@ def show_grid(df, key, height=None, fit_columns=True, pinned_bottom=None, column
     # Add pinned bottom row for totals
     if pinned_bottom is not None:
         grid_options['pinnedBottomRowData'] = pinned_bottom
+        grid_options['getRowStyle'] = JsCode("""
+            function(params) {
+                if (params.node.rowPinned === 'bottom') {
+                    return {'background-color': '#1a3a5c', 'font-weight': '600', 'border-top': '2px solid #58a6ff'};
+                }
+            }
+        """)
 
     # Calculate height
     if height is None:
