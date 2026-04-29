@@ -638,7 +638,7 @@ def load_tenancy():
         sec_dep = first.get('Sec Dep', 0) or 0
 
         exp_dt = first.get('Exp Dt')
-        exp_str = exp_dt.strftime('%Y-%m-%d') if isinstance(exp_dt, (datetime, date)) else str(exp_dt or 'N/A')
+        exp_str = exp_dt.strftime('%m/%d/%Y') if isinstance(exp_dt, (datetime, date)) else str(exp_dt or 'N/A')
 
         next_anniv = to_date(next_row.get('Start Date')) if next_row else None
         next_monthly = (next_row.get('Monthly') if next_row else None)
