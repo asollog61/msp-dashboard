@@ -1017,9 +1017,15 @@ def parse_yardi_rent_rolls():
                 normalized_space = normalize_space(unit, building)
                 key = f"{building}|{normalized_space}"
                 
+                # Extract security deposit (numeric_fields[1] = Tenant Deposit, after PSF)
+                deposit = 0.0
+                if len(numeric_fields) >= 2:
+                    deposit = numeric_fields[1]
+
                 yardi_data[key] = {
                     'monthly': monthly,
                     'cam': cam,
+                    'deposit': deposit,
                     'expiration': exp_date,
                     'tenant': tenant_name,
                     'raw_unit': unit,
@@ -2140,6 +2146,28 @@ def render_deposits_tab():
 
     dep_data.sort(key=lambda d: (d['Building'], d['Tenant']))
 
+    # Yardi SD comparison
+    yardi_data = parse_yardi_rent_rolls()
+    for d in dep_data:
+        key = f"{d['Building']}|{d['Space']}"
+        yardi_entry = yardi_data.get(key)
+        if not yardi_entry:
+            # Try alternate space formats
+            space = d['Space']
+            if space.isdigit() and len(space) == 1:
+                yardi_entry = yardi_data.get(f"{d['Building']}|10{space}")
+            elif space.isdigit() and len(space) == 3:
+                yardi_entry = yardi_data.get(f"{d['Building']}|{space[0]}-{space[1:]}")
+        yardi_sd = yardi_entry.get('deposit', 0) if yardi_entry else None
+        d['Yardi SD'] = yardi_sd
+        dash_sd = d['Current SD']
+        if yardi_sd is None:
+            d['SD Diff'] = 'Not in Yardi'
+        elif abs(dash_sd - yardi_sd) > 0.01:
+            d['SD Diff'] = f"${dash_sd:,.0f} vs ${yardi_sd:,.0f}"
+        else:
+            d['SD Diff'] = ''
+
     # Summary metrics
     total_deposits = sum(d['Current SD'] for d in dep_data)
     with_dep = sum(1 for d in dep_data if d['Current SD'] > 0)
@@ -2162,9 +2190,9 @@ def render_deposits_tab():
         st.markdown(f'<div class="building-header"><strong>▎ {building_name} ({code})</strong> — ${b_total:,.2f} total deposits held</div>', unsafe_allow_html=True)
 
         df = pd.DataFrame(b_deps)
-        display_cols = ['Display Tenant', 'Space', 'Type', 'Lease', 'Current SD Fmt', 'SD Anniversary', 'New SD Amount', 'SD Delta', 'TTE']
+        display_cols = ['Display Tenant', 'Space', 'Type', 'Lease', 'Current SD Fmt', 'SD Anniversary', 'New SD Amount', 'SD Delta', 'Yardi SD', 'SD Diff', 'TTE']
         display_df = df[display_cols].copy()
-        display_df.columns = ['Tenant', 'Space', 'Type', 'Lease', 'Current SD', 'SD Anniversary', 'New SD', 'Δ SD', 'MTE']
+        display_df.columns = ['Tenant', 'Space', 'Type', 'Lease', 'Current SD', 'SD Anniversary', 'New SD', 'Δ SD', 'Yardi SD', 'SD Diff', 'MTE']
         display_df['SD Anniversary'] = display_df['SD Anniversary'].apply(
             lambda d: d.strftime('%m/%d/%Y') if isinstance(d, (datetime, date)) else ('-' if not d else str(d))
         )
@@ -2172,9 +2200,12 @@ def render_deposits_tab():
         display_df['Δ SD'] = display_df['Δ SD'].apply(
             lambda x: f"{'+' if x and x > 0 else ''}${x:,.0f}" if x is not None and not (isinstance(x, float) and pd.isna(x)) else '$0'
         )
+        display_df['Yardi SD'] = display_df['Yardi SD'].apply(
+            lambda x: f"${x:,.2f}" if x is not None and not (isinstance(x, float) and pd.isna(x)) else 'N/A'
+        )
         show_grid(display_df, key=f"dep_{building_name}", tab_key="deposits")
 
-    render_column_config_editor('deposits', ['Tenant', 'Space', 'Type', 'Lease', 'Current SD', 'SD Anniversary', 'New SD', 'Δ SD', 'MTE'])
+    render_column_config_editor('deposits', ['Tenant', 'Space', 'Type', 'Lease', 'Current SD', 'SD Anniversary', 'New SD', 'Δ SD', 'Yardi SD', 'SD Diff', 'MTE'])
 
     # Portfolio total
     st.divider()
