@@ -2372,67 +2372,69 @@ def render_reconcile_tab():
         return sd
 
     # ===========================
-    # SECTION 1: LOOKUP TABLE
+    # SECTION 1: LOOKUP TABLE (compact)
     # ===========================
-    st.markdown("#### 🔗 Name Lookup Table")
-    st.caption("Match each Yardi tenant to your spreadsheet name. Saved automatically.")
+    with st.expander("🔗 Name Lookup Table", expanded=False):
+        st.caption("Match Yardi names → spreadsheet names. Changes save automatically.")
 
-    mapping_changed = False
+        # Inject compact CSS for lookup table
+        st.markdown("""<style>
+            .lookup-table { width: 100%; border-collapse: collapse; font-size: 0.8rem; margin-bottom: 0.5rem; }
+            .lookup-table th { text-align: left; padding: 2px 6px; border-bottom: 1px solid #444; color: #888; font-weight: 600; }
+            .lookup-table td { padding: 1px 6px; border-bottom: 1px solid #2a2a2a; }
+            .lookup-table .unit { color: #888; width: 50px; }
+            .lookup-table .yname { white-space: nowrap; max-width: 200px; overflow: hidden; text-overflow: ellipsis; }
+        </style>""", unsafe_allow_html=True)
 
-    for building_name in BUILDING_MAP:
-        # Get Yardi entries for this building
-        b_yardi = {k: v for k, v in yardi_data.items() if k.startswith(f"{building_name}|")}
-        if not b_yardi:
-            continue
+        mapping_changed = False
 
-        code = BUILDING_MAP[building_name]['code']
-        st.markdown(f"**{building_name} ({code})**")
+        for building_name in BUILDING_MAP:
+            b_yardi = {k: v for k, v in yardi_data.items() if k.startswith(f"{building_name}|")}
+            if not b_yardi:
+                continue
 
-        available_names = ["— Not Matched —"] + building_tenants.get(building_name, [])
+            code = BUILDING_MAP[building_name]['code']
+            st.markdown(f"<small><strong>{building_name} ({code})</strong></small>", unsafe_allow_html=True)
 
-        for yardi_key in sorted(b_yardi.keys()):
-            yardi_entry = b_yardi[yardi_key]
-            yardi_name = yardi_entry.get('tenant', '')
-            yardi_space = yardi_key.split('|', 1)[1] if '|' in yardi_key else ''
+            available_names = ["—"] + building_tenants.get(building_name, [])
 
-            # Current mapping
-            current_match = name_map.get(yardi_key, '')
+            cols = st.columns([1, 3, 3])
+            cols[0].markdown("<small>**Unit**</small>", unsafe_allow_html=True)
+            cols[1].markdown("<small>**Yardi Name**</small>", unsafe_allow_html=True)
+            cols[2].markdown("<small>**Sheet Match**</small>", unsafe_allow_html=True)
 
-            # Auto-match: try normalized space lookup if no manual mapping
-            if not current_match:
-                norm_space = normalize_space(yardi_entry.get('raw_unit', yardi_space), building_name)
-                auto_key = f"{building_name}|{norm_space}"
-                auto_tenant = sheet_by_space.get(auto_key)
-                if auto_tenant:
-                    current_match = auto_tenant.get('Tenant', '')
+            for yardi_key in sorted(b_yardi.keys()):
+                yardi_entry = b_yardi[yardi_key]
+                yardi_name = yardi_entry.get('tenant', '')
+                yardi_space = yardi_key.split('|', 1)[1] if '|' in yardi_key else ''
 
-            # Find index in dropdown
-            default_idx = 0
-            if current_match in available_names:
-                default_idx = available_names.index(current_match)
+                current_match = name_map.get(yardi_key, '')
+                if not current_match:
+                    norm_space = normalize_space(yardi_entry.get('raw_unit', yardi_space), building_name)
+                    auto_key = f"{building_name}|{norm_space}"
+                    auto_tenant = sheet_by_space.get(auto_key)
+                    if auto_tenant:
+                        current_match = auto_tenant.get('Tenant', '')
 
-            col1, col2, col3 = st.columns([2, 3, 3])
-            col1.text(f"Unit {yardi_space}")
-            col2.text(f"Yardi: {yardi_name}")
-            selected = col3.selectbox(
-                "Sheet match",
-                available_names,
-                index=default_idx,
-                key=f"lookup_{yardi_key}",
-                label_visibility="collapsed"
-            )
+                default_idx = 0
+                if current_match in available_names:
+                    default_idx = available_names.index(current_match)
 
-            new_val = '' if selected == "— Not Matched —" else selected
-            if new_val != name_map.get(yardi_key, ''):
-                name_map[yardi_key] = new_val
-                mapping_changed = True
+                c1, c2, c3 = st.columns([1, 3, 3])
+                c1.markdown(f"<small style='color:#888;padding-top:8px;display:block;'>{yardi_space}</small>", unsafe_allow_html=True)
+                c2.markdown(f"<small style='padding-top:8px;display:block;'>{yardi_name}</small>", unsafe_allow_html=True)
+                selected = c3.selectbox("m", available_names, index=default_idx,
+                                        key=f"lu_{yardi_key}", label_visibility="collapsed")
 
-    if mapping_changed:
-        # Clean empty entries
-        name_map = {k: v for k, v in name_map.items() if v}
-        _write_gsheet_config(MAPPING_TAB, _json.dumps(name_map))
-        st.success("✅ Mapping saved!")
-        st.rerun()
+                new_val = '' if selected == "—" else selected
+                if new_val != name_map.get(yardi_key, ''):
+                    name_map[yardi_key] = new_val
+                    mapping_changed = True
+
+        if mapping_changed:
+            name_map = {k: v for k, v in name_map.items() if v}
+            _write_gsheet_config(MAPPING_TAB, _json.dumps(name_map))
+            st.rerun()
 
     # ===========================
     # SECTION 2: RECONCILIATION GRID
