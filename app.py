@@ -962,11 +962,26 @@ def render_tenancy_tab():
     total_expenses = sum(float(expense_cfg.get(b, 0) or 0) for b in BUILDING_MAP.keys())
     total_noi = total_annual - total_expenses
 
-    c1, c2, c3, c4 = st.columns(4)
+    # Find closest approaching expiration (non-MTM, future dates only)
+    upcoming_exps = []
+    for t in active:
+        if t.get('TTE_Label') != 'MTM' and t.get('TTE_Months', 0) > 0:
+            exp = t.get('Exp Date', '')
+            if exp and exp != 'MTM' and exp != 'N/A':
+                upcoming_exps.append((t['Tenant'], t['Building'], t['Space'], exp, t['TTE_Months']))
+    upcoming_exps.sort(key=lambda x: x[4])
+    if upcoming_exps:
+        nearest = upcoming_exps[0]
+        nearest_str = f"{nearest[0]} ({nearest[1]} {nearest[2]}) — {nearest[3]}"
+    else:
+        nearest_str = "None"
+
+    c1, c2, c3, c4, c5 = st.columns(5)
     c1.metric("Portfolio SF", f"{total_sf:,.0f}")
     c2.metric("Gross Revenue", f"${total_annual:,.0f}")
     c3.metric("Expenses", f"${total_expenses:,.0f}")
     c4.metric("NOI", f"${total_noi:,.0f}")
+    c5.metric("Next Expiration", nearest_str)
 
     # Filter
     buildings = ['All'] + sorted(set(t['Building'] for t in active))
