@@ -404,11 +404,16 @@ def show_grid(df, key, height=None, fit_columns=True, pinned_bottom=None, column
                 gb.configure_column(col, **cfg)
 
     overrides = get_column_width_overrides(tab_key)
+    has_overrides = bool(overrides)
     for col, width in overrides.items():
         if col in df.columns:
-            gb.configure_column(col, width=width, minWidth=width)
+            gb.configure_column(col, width=width, minWidth=width, suppressSizeToFit=True)
 
     grid_options = gb.build()
+
+    # If user has configured widths, don't let fit_columns override them
+    if has_overrides:
+        fit_columns = False
 
     # Add pinned bottom row for totals
     if pinned_bottom is not None:
