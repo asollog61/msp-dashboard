@@ -2305,23 +2305,19 @@ def render_yardi_tab():
 
 
 def render_reconcile_tab():
-    """Yardi Reconciliation — side-by-side comparison of spreadsheet vs Yardi data."""
+    """Yardi Reconciliation — Yardi-driven with lookup table at top for name matching."""
     import json as _json
     st.markdown("### 🔄 Yardi Reconciliation")
 
     tenants, details, summaries = load_tenancy()
-    if not tenants:
-        st.warning("MSP Tenancy.xlsx not found.")
-        return
-
     yardi_data = parse_yardi_rent_rolls()
     if not yardi_data:
         st.warning("No Yardi rent roll data found. Place PDF files in data/Yardi/ folder.")
         return
 
-    # --- Name mapping (persisted in Google Sheets) ---
+    # --- Name mapping: Yardi key -> spreadsheet tenant name (persisted in Google Sheets) ---
     MAPPING_TAB = "Config: Yardi Names"
-    name_map = {}  # key: "Building|Space" -> yardi_name override
+    name_map = {}  # key: "Building|YardiSpace" -> spreadsheet tenant name
     try:
         raw = _read_gsheet_config(MAPPING_TAB)
         if raw:
@@ -2329,114 +2325,196 @@ def render_reconcile_tab():
     except Exception:
         pass
 
-    # Build reconciliation rows
-    active = [t for t in tenants if t['Tenant'] not in ('Easement', '-')]
-    recon_rows = []
-
+    # Build spreadsheet tenant index keyed by "Building|TenantName" for lookup
+    active = [t for t in tenants if t['Tenant'] not in ('Easement', '-')] if tenants else []
+    sheet_by_name = {}  # "Building|TenantName" -> tenant dict
+    sheet_by_space = {}  # "Building|Space" -> tenant dict
     for t in active:
-        building = t.get('Building', '').strip()
-        space = str(t.get('Space', '')).strip()
-        if not building or not space:
+        b = t.get('Building', '').strip()
+        n = t.get('Tenant', '').strip()
+        s = str(t.get('Space', '')).strip()
+        if b and n:
+            sheet_by_name[f"{b}|{n}"] = t
+        if b and s:
+            sheet_by_space[f"{b}|{s}"] = t
+
+    # Get all unique spreadsheet tenant names per building for dropdown
+    building_tenants = {}
+    for t in active:
+        b = t.get('Building', '').strip()
+        n = t.get('Tenant', '').strip()
+        if b and n:
+            building_tenants.setdefault(b, []).append(n)
+    for b in building_tenants:
+        building_tenants[b] = sorted(set(building_tenants[b]))
+
+    # Helper: get spreadsheet SD for a tenant
+    def _get_sheet_sd(building, tenant_name):
+        sd = 0
+        for dk, dv in details.items():
+            if not dv:
+                continue
+            first = dv[0]
+            if first.get('Building') == building and first.get('Tenant') == tenant_name:
+                best_end = None
+                for r in dv:
+                    start = r.get('Start Date')
+                    end = r.get('End Date')
+                    s = r.get('Sec Dep', 0) or 0
+                    if isinstance(start, (datetime, date)) and isinstance(end, (datetime, date)):
+                        start_d = start.date() if isinstance(start, datetime) else start
+                        end_d = end.date() if isinstance(end, datetime) else end
+                        if start_d <= TODAY <= end_d:
+                            if best_end is None or end_d < best_end:
+                                best_end = end_d
+                                sd = s
+                break
+        return sd
+
+    # ===========================
+    # SECTION 1: LOOKUP TABLE
+    # ===========================
+    st.markdown("#### 🔗 Name Lookup Table")
+    st.caption("Match each Yardi tenant to your spreadsheet name. Saved automatically.")
+
+    mapping_changed = False
+
+    for building_name in BUILDING_MAP:
+        # Get Yardi entries for this building
+        b_yardi = {k: v for k, v in yardi_data.items() if k.startswith(f"{building_name}|")}
+        if not b_yardi:
             continue
 
-        key = f"{building}|{space}"
-        dash_name = t.get('Tenant', '').strip()
-        dash_monthly = t.get('Monthly', 0) or 0
-        dash_exp = t.get('Exp Date', '').strip()
-        # Get SD from details
-        dash_sd = 0
-        tid_rows = details.get(f"{building}|{dash_name}", [])
-        if not tid_rows:
-            # Try alternate key formats
-            for dk, dv in details.items():
-                if dv and dv[0].get('Building') == building and str(dv[0].get('Space', '')).strip() == space:
-                    tid_rows = dv
-                    break
-        if tid_rows:
-            best_end = None
-            for r in tid_rows:
-                start = r.get('Start Date')
-                end = r.get('End Date')
-                sd = r.get('Sec Dep', 0) or 0
-                if isinstance(start, (datetime, date)) and isinstance(end, (datetime, date)):
-                    start_d = start.date() if isinstance(start, datetime) else start
-                    end_d = end.date() if isinstance(end, datetime) else end
-                    if start_d <= TODAY <= end_d:
-                        if best_end is None or end_d < best_end:
-                            best_end = end_d
-                            dash_sd = sd
+        code = BUILDING_MAP[building_name]['code']
+        st.markdown(f"**{building_name} ({code})**")
 
-        # Look up Yardi match
-        yardi_entry = yardi_data.get(key)
-        if not yardi_entry:
-            if space.isdigit() and len(space) == 1:
-                yardi_entry = yardi_data.get(f"{building}|10{space}")
-            elif space.isdigit() and len(space) == 3:
-                yardi_entry = yardi_data.get(f"{building}|{space[0]}-{space[1:]}")
+        available_names = ["— Not Matched —"] + building_tenants.get(building_name, [])
 
-        yardi_name = yardi_entry.get('tenant', '') if yardi_entry else ''
-        yardi_monthly = yardi_entry.get('monthly', 0) if yardi_entry else None
-        yardi_exp = yardi_entry.get('expiration') if yardi_entry else None
-        yardi_sd = yardi_entry.get('deposit', 0) if yardi_entry else None
+        for yardi_key in sorted(b_yardi.keys()):
+            yardi_entry = b_yardi[yardi_key]
+            yardi_name = yardi_entry.get('tenant', '')
+            yardi_space = yardi_key.split('|', 1)[1] if '|' in yardi_key else ''
 
-        # Use name mapping override if exists
-        mapped_name = name_map.get(key, '')
+            # Current mapping
+            current_match = name_map.get(yardi_key, '')
 
-        # Determine match status
-        if not yardi_entry:
-            match_status = '❌ Not Found'
-        else:
-            diffs = []
-            if dash_monthly and yardi_monthly is not None and abs(dash_monthly - yardi_monthly) > 0.01:
-                diffs.append('Rent')
-            if dash_exp and dash_exp != 'MTM' and yardi_exp:
-                try:
-                    d_exp = datetime.strptime(dash_exp, '%m/%d/%Y').date()
-                    if d_exp != yardi_exp:
-                        diffs.append('Exp')
-                except (ValueError, AttributeError):
-                    pass
-            if yardi_sd is not None and abs(dash_sd - yardi_sd) > 0.01:
-                diffs.append('SD')
-            match_status = '⚠️ ' + ', '.join(diffs) if diffs else '✅ Match'
+            # Auto-match: try normalized space lookup if no manual mapping
+            if not current_match:
+                norm_space = normalize_space(yardi_entry.get('raw_unit', yardi_space), building_name)
+                auto_key = f"{building_name}|{norm_space}"
+                auto_tenant = sheet_by_space.get(auto_key)
+                if auto_tenant:
+                    current_match = auto_tenant.get('Tenant', '')
 
-        # Format exp dates
-        yardi_exp_str = yardi_exp.strftime('%m/%d/%Y') if yardi_exp else 'N/A'
+            # Find index in dropdown
+            default_idx = 0
+            if current_match in available_names:
+                default_idx = available_names.index(current_match)
+
+            col1, col2, col3 = st.columns([2, 3, 3])
+            col1.text(f"Unit {yardi_space}")
+            col2.text(f"Yardi: {yardi_name}")
+            selected = col3.selectbox(
+                "Sheet match",
+                available_names,
+                index=default_idx,
+                key=f"lookup_{yardi_key}",
+                label_visibility="collapsed"
+            )
+
+            new_val = '' if selected == "— Not Matched —" else selected
+            if new_val != name_map.get(yardi_key, ''):
+                name_map[yardi_key] = new_val
+                mapping_changed = True
+
+    if mapping_changed:
+        # Clean empty entries
+        name_map = {k: v for k, v in name_map.items() if v}
+        _write_gsheet_config(MAPPING_TAB, _json.dumps(name_map))
+        st.success("✅ Mapping saved!")
+        st.rerun()
+
+    # ===========================
+    # SECTION 2: RECONCILIATION GRID
+    # ===========================
+    st.markdown("---")
+    st.markdown("#### 📊 Data Comparison")
+
+    recon_rows = []
+    for yardi_key, yardi_entry in sorted(yardi_data.items()):
+        building = yardi_key.split('|', 1)[0] if '|' in yardi_key else ''
+        yardi_space = yardi_key.split('|', 1)[1] if '|' in yardi_key else ''
+        yardi_name = yardi_entry.get('tenant', '')
+        yardi_monthly = yardi_entry.get('monthly', 0) or 0
+        yardi_exp = yardi_entry.get('expiration')
+        yardi_sd = yardi_entry.get('deposit', 0) or 0
+
+        # Find matched spreadsheet tenant
+        matched_name = name_map.get(yardi_key, '')
+        if not matched_name:
+            # Auto-match via normalized space
+            norm_space = normalize_space(yardi_entry.get('raw_unit', yardi_space), building)
+            auto_key = f"{building}|{norm_space}"
+            auto_t = sheet_by_space.get(auto_key)
+            if auto_t:
+                matched_name = auto_t.get('Tenant', '')
+
+        # Get spreadsheet data for matched tenant
+        sheet_t = sheet_by_name.get(f"{building}|{matched_name}") if matched_name else None
+        dash_monthly = sheet_t.get('Monthly', 0) if sheet_t else None
+        dash_exp_str = sheet_t.get('Exp Date', '') if sheet_t else ''
+        dash_sd = _get_sheet_sd(building, matched_name) if matched_name else None
+
+        # Compute diffs
+        rent_diff = ''
+        if sheet_t and dash_monthly is not None:
+            diff_val = dash_monthly - yardi_monthly
+            if abs(diff_val) > 0.01:
+                rent_diff = f"${diff_val:+,.0f}"
+
         exp_diff = ''
-        if dash_exp and dash_exp != 'MTM' and yardi_exp:
+        yardi_exp_str = yardi_exp.strftime('%m/%d/%Y') if yardi_exp else 'N/A'
+        if dash_exp_str and dash_exp_str != 'MTM' and yardi_exp:
             try:
-                d_exp = datetime.strptime(dash_exp, '%m/%d/%Y').date()
+                d_exp = datetime.strptime(dash_exp_str, '%m/%d/%Y').date()
                 if d_exp != yardi_exp:
                     delta = (d_exp - yardi_exp).days
-                    exp_diff = f"{delta:+d} days"
+                    exp_diff = f"{delta:+d}d"
             except (ValueError, AttributeError):
                 pass
 
-        rent_diff = ''
-        if yardi_monthly is not None and abs(dash_monthly - (yardi_monthly or 0)) > 0.01:
-            rent_diff = f"${dash_monthly - yardi_monthly:+,.0f}"
-
         sd_diff = ''
-        if yardi_sd is not None and abs(dash_sd - yardi_sd) > 0.01:
+        if dash_sd is not None and abs(dash_sd - yardi_sd) > 0.01:
             sd_diff = f"${dash_sd - yardi_sd:+,.0f}"
+
+        # Status
+        if not matched_name:
+            status = '❓ Unmatched'
+        else:
+            diffs = []
+            if rent_diff:
+                diffs.append('Rent')
+            if exp_diff:
+                diffs.append('Exp')
+            if sd_diff:
+                diffs.append('SD')
+            status = '⚠️ ' + ', '.join(diffs) if diffs else '✅ Match'
 
         recon_rows.append({
             'Building': building,
-            'Space': space,
-            'Spreadsheet Name': dash_name,
-            'Yardi Name': yardi_name if yardi_name else 'N/A',
-            'Mapped Name': mapped_name,
-            'Rent (Sheet)': f"${dash_monthly:,.0f}",
-            'Rent (Yardi)': f"${yardi_monthly:,.0f}" if yardi_monthly is not None else 'N/A',
+            'Space': yardi_space,
+            'Yardi Name': yardi_name,
+            'Sheet Name': matched_name or '—',
+            'Rent (Yardi)': f"${yardi_monthly:,.0f}",
+            'Rent (Sheet)': f"${dash_monthly:,.0f}" if dash_monthly is not None else '—',
             'Rent Δ': rent_diff,
-            'Exp (Sheet)': dash_exp if dash_exp else 'N/A',
             'Exp (Yardi)': yardi_exp_str,
+            'Exp (Sheet)': dash_exp_str if dash_exp_str else '—',
             'Exp Δ': exp_diff,
-            'SD (Sheet)': f"${dash_sd:,.2f}",
-            'SD (Yardi)': f"${yardi_sd:,.2f}" if yardi_sd is not None else 'N/A',
+            'SD (Yardi)': f"${yardi_sd:,.2f}",
+            'SD (Sheet)': f"${dash_sd:,.2f}" if dash_sd is not None else '—',
             'SD Δ': sd_diff,
-            'Status': match_status,
-            '_key': key,
+            'Status': status,
         })
 
     recon_rows.sort(key=lambda r: (r['Building'], r['Space']))
@@ -2445,73 +2523,38 @@ def render_reconcile_tab():
     total = len(recon_rows)
     matches = sum(1 for r in recon_rows if r['Status'] == '✅ Match')
     mismatches = sum(1 for r in recon_rows if r['Status'].startswith('⚠️'))
-    not_found = sum(1 for r in recon_rows if r['Status'] == '❌ Not Found')
+    unmatched = sum(1 for r in recon_rows if r['Status'] == '❓ Unmatched')
 
     c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Total Spaces", str(total))
+    c1.metric("Total Yardi Units", str(total))
     c2.metric("✅ Match", str(matches))
     c3.metric("⚠️ Mismatch", str(mismatches))
-    c4.metric("❌ Not in Yardi", str(not_found))
+    c4.metric("❓ Unmatched", str(unmatched))
 
     # Filter
-    filter_opt = st.radio("Show:", ["All", "Mismatches Only", "Not Found Only"], horizontal=True, key="recon_filter")
-
+    filter_opt = st.radio("Show:", ["All", "Mismatches Only", "Unmatched Only"], horizontal=True, key="recon_filter")
     filtered = recon_rows
     if filter_opt == "Mismatches Only":
         filtered = [r for r in recon_rows if r['Status'].startswith('⚠️')]
-    elif filter_opt == "Not Found Only":
-        filtered = [r for r in recon_rows if r['Status'] == '❌ Not Found']
+    elif filter_opt == "Unmatched Only":
+        filtered = [r for r in recon_rows if r['Status'] == '❓ Unmatched']
 
-    # Display by building
     for building_name in BUILDING_MAP:
         b_rows = [r for r in filtered if r['Building'] == building_name]
         if not b_rows:
             continue
         b_match = sum(1 for r in b_rows if r['Status'] == '✅ Match')
-        b_total = len(b_rows)
         code = BUILDING_MAP[building_name]['code']
-        st.markdown(f'<div class="building-header"><strong>▎ {building_name} ({code})</strong> — {b_match}/{b_total} matching</div>', unsafe_allow_html=True)
+        st.markdown(f'<div class="building-header"><strong>▎ {building_name} ({code})</strong> — {b_match}/{len(b_rows)} matching</div>', unsafe_allow_html=True)
 
         df = pd.DataFrame(b_rows)
-        display_cols = ['Space', 'Spreadsheet Name', 'Yardi Name', 'Rent (Sheet)', 'Rent (Yardi)', 'Rent Δ',
-                        'Exp (Sheet)', 'Exp (Yardi)', 'Exp Δ', 'SD (Sheet)', 'SD (Yardi)', 'SD Δ', 'Status']
+        display_cols = ['Space', 'Yardi Name', 'Sheet Name', 'Rent (Yardi)', 'Rent (Sheet)', 'Rent Δ',
+                        'Exp (Yardi)', 'Exp (Sheet)', 'Exp Δ', 'SD (Yardi)', 'SD (Sheet)', 'SD Δ', 'Status']
         display_df = df[display_cols].copy()
         show_grid(display_df, key=f"recon_{building_name}", tab_key="reconcile")
 
-    render_column_config_editor('reconcile', ['Space', 'Spreadsheet Name', 'Yardi Name', 'Rent (Sheet)', 'Rent (Yardi)', 'Rent Δ',
-                                               'Exp (Sheet)', 'Exp (Yardi)', 'Exp Δ', 'SD (Sheet)', 'SD (Yardi)', 'SD Δ', 'Status'])
-
-    # --- Name mapping editor ---
-    with st.expander("🔗 Name Mapping Editor", expanded=False):
-        st.caption("Override Yardi name matches. Use when spreadsheet and Yardi names differ slightly (LLC vs DBA, etc.)")
-        # Show current mismatched names for easy mapping
-        mismatched_names = [(r['_key'], r['Spreadsheet Name'], r['Yardi Name'])
-                           for r in recon_rows if r['Yardi Name'] != 'N/A' and r['Spreadsheet Name'].lower() != r['Yardi Name'].lower()]
-
-        if mismatched_names:
-            st.markdown("**Name differences detected:**")
-            for key, sheet_name, yardi_name in mismatched_names:
-                current_map = name_map.get(key, '')
-                col1, col2, col3 = st.columns([3, 3, 2])
-                col1.text(f"📋 {sheet_name}")
-                col2.text(f"📊 {yardi_name}")
-                if col3.button("✅ Mark OK", key=f"map_{key}"):
-                    name_map[key] = yardi_name
-                    _write_gsheet_config(MAPPING_TAB, _json.dumps(name_map))
-                    st.rerun()
-        else:
-            st.success("All matched names are consistent!")
-
-        # Manual add
-        st.markdown("---")
-        st.markdown("**Manual override:**")
-        mc1, mc2, mc3 = st.columns([2, 3, 1])
-        map_key = mc1.text_input("Building|Space key", key="map_key_input")
-        map_val = mc2.text_input("Yardi name override", key="map_val_input")
-        if mc3.button("Save", key="map_save") and map_key and map_val:
-            name_map[map_key] = map_val
-            _write_gsheet_config(MAPPING_TAB, _json.dumps(name_map))
-            st.rerun()
+    render_column_config_editor('reconcile', ['Space', 'Yardi Name', 'Sheet Name', 'Rent (Yardi)', 'Rent (Sheet)', 'Rent Δ',
+                                               'Exp (Yardi)', 'Exp (Sheet)', 'Exp Δ', 'SD (Yardi)', 'SD (Sheet)', 'SD Δ', 'Status'])
 
 
 # =====================
