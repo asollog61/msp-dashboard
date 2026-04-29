@@ -955,7 +955,7 @@ def render_sop_tab():
 
         # Render current page as image
         page = doc[page_num]
-        mat = fitz.Matrix(1, 1)  # 1x for mobile
+        mat = fitz.Matrix(1.25, 1.25)  # 1.25x for mobile
         pix = page.get_pixmap(matrix=mat)
         img_bytes = pix.tobytes("png")
         b64_img = base64.b64encode(img_bytes).decode()
