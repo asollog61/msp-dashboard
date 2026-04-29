@@ -983,14 +983,24 @@ def render_tenancy_tab():
     total_monthly = sum(t['Monthly'] for t in active)
     mtm_count = sum(1 for t in active if t.get('TTE_Label') == 'MTM')
 
+    # Calculate total CAM reimbursement across all buildings
+    total_cam_reimb = 0
+    for bldg_name in BUILDING_MAP.keys():
+        bldg_expense = float(expense_cfg.get(bldg_name, 0) or 0)
+        bldg_tenants = [t for t in active if t['Building'] == bldg_name]
+        for t in bldg_tenants:
+            if t.get('Is_NNN') and isinstance(t.get('CAM_Pct'), (int, float)):
+                total_cam_reimb += bldg_expense * t['CAM_Pct']
+
     total_expenses = sum(float(expense_cfg.get(b, 0) or 0) for b in BUILDING_MAP.keys())
-    total_noi = total_annual - total_expenses
+    total_gross_rev = total_annual + total_cam_reimb
+    total_noi = total_gross_rev - total_expenses
     wavg_net_psf = total_annual / total_sf if total_sf > 0 else 0
-    wavg_gross_psf = (total_annual + total_expenses) / total_sf if total_sf > 0 else 0
+    wavg_gross_psf = total_gross_rev / total_sf if total_sf > 0 else 0
 
     c1, c2, c3, c4, c5, c6 = st.columns(6)
     c1.metric("Portfolio SF", f"{total_sf:,.0f}")
-    c2.metric("Gross Revenue", f"${total_annual:,.0f}")
+    c2.metric("Gross Revenue", f"${total_gross_rev:,.0f}")
     c3.metric("Expenses", f"${total_expenses:,.0f}")
     c4.metric("NOI", f"${total_noi:,.0f}")
     c5.metric("Wtd Avg Gross $/SF", f"${wavg_gross_psf:,.2f}")
@@ -1154,16 +1164,21 @@ def render_tenancy_tab():
     # Portfolio totals
     st.divider()
     port_sf = sum(t['SF'] for t in filtered if t['SF'] > 1 and t['Tenant'] != 'Easement')
-    port_monthly = sum(t['Monthly'] for t in filtered if t['Tenant'] != 'Easement')
     port_annual = sum(t['Annual'] for t in filtered if t['Tenant'] != 'Easement')
-    port_wavg_psf = port_annual / port_sf if port_sf > 0 else 0
+    port_cam_reimb = 0
+    for bldg_name in BUILDING_MAP.keys():
+        bldg_expense = float(expense_cfg.get(bldg_name, 0) or 0)
+        for t in filtered:
+            if t['Building'] == bldg_name and t.get('Is_NNN') and isinstance(t.get('CAM_Pct'), (int, float)):
+                port_cam_reimb += bldg_expense * t['CAM_Pct']
+    port_gross_rev = port_annual + port_cam_reimb
     port_expenses = sum(float(expense_cfg.get(b, 0) or 0) for b in BUILDING_MAP.keys())
-    port_noi = port_annual - port_expenses
+    port_noi = port_gross_rev - port_expenses
     port_wavg_net_psf = port_annual / port_sf if port_sf > 0 else 0
-    port_wavg_gross_psf = (port_annual + port_expenses) / port_sf if port_sf > 0 else 0
+    port_wavg_gross_psf = port_gross_rev / port_sf if port_sf > 0 else 0
     pc1, pc2, pc3, pc4, pc5, pc6 = st.columns(6)
     pc1.metric("Total SF", f"{port_sf:,.0f}")
-    pc2.metric("Gross Revenue", f"${port_annual:,.0f}")
+    pc2.metric("Gross Revenue", f"${port_gross_rev:,.0f}")
     pc3.metric("Expenses", f"${port_expenses:,.0f}")
     pc4.metric("NOI", f"${port_noi:,.0f}")
     pc5.metric("Wtd Avg Gross $/SF", f"${port_wavg_gross_psf:,.2f}")
@@ -1730,12 +1745,14 @@ def render_deposits_tab():
         if tenant_name in ('Easement', '-') or not building:
             continue
 
-        # Find current SD (the row whose date range includes today)
+        # Find current SD using tightest-fit logic (smallest end date where start <= today <= end)
         current_sd = first.get('Sec Dep', 0) or 0
         next_sd = None
         next_sd_date = None
         current_year_row = None
+        best_end = None
 
+        rows_with_dates = []
         for r in rows:
             start = r.get('Start Date')
             end = r.get('End Date')
@@ -1743,12 +1760,20 @@ def render_deposits_tab():
             if isinstance(start, (datetime, date)) and isinstance(end, (datetime, date)):
                 start_d = start.date() if isinstance(start, datetime) else start
                 end_d = end.date() if isinstance(end, datetime) else end
+                rows_with_dates.append((start_d, end_d, sd, r))
                 if start_d <= TODAY <= end_d:
-                    current_sd = sd
-                    current_year_row = r
-                elif start_d > TODAY and next_sd is None:
+                    if best_end is None or end_d < best_end:
+                        best_end = end_d
+                        current_sd = sd
+                        current_year_row = r
+
+        # Next SD: find the row with the smallest end date AFTER current period's end
+        if current_year_row and best_end:
+            next_sd_date = best_end  # SD Anniversary = end of current period
+            for start_d, end_d, sd, r in sorted(rows_with_dates, key=lambda x: x[1]):
+                if end_d > best_end:
                     next_sd = sd
-                    next_sd_date = start_d
+                    break
 
         # If we didn't find current, use first row's SD
         if current_year_row is None:
@@ -1770,7 +1795,7 @@ def render_deposits_tab():
                 lease_type = t['Lease']
                 break
 
-        sd_anniv_date = next_sd_date if next_sd_date and next_sd is not None and next_sd != current_sd else None
+        sd_anniv_date = next_sd_date if next_sd_date and next_sd is not None and next_sd != current_sd and next_sd_date > TODAY else None
         sd_new_amount = next_sd if sd_anniv_date else None
         sd_delta = (next_sd - current_sd) if sd_new_amount is not None else None
 
