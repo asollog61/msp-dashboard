@@ -985,12 +985,16 @@ def render_tenancy_tab():
 
     total_expenses = sum(float(expense_cfg.get(b, 0) or 0) for b in BUILDING_MAP.keys())
     total_noi = total_annual - total_expenses
+    wavg_net_psf = total_annual / total_sf if total_sf > 0 else 0
+    wavg_gross_psf = (total_annual + total_expenses) / total_sf if total_sf > 0 else 0
 
-    c1, c2, c3, c4 = st.columns(4)
+    c1, c2, c3, c4, c5, c6 = st.columns(6)
     c1.metric("Portfolio SF", f"{total_sf:,.0f}")
     c2.metric("Gross Revenue", f"${total_annual:,.0f}")
     c3.metric("Expenses", f"${total_expenses:,.0f}")
     c4.metric("NOI", f"${total_noi:,.0f}")
+    c5.metric("Wtd Avg Gross $/SF", f"${wavg_gross_psf:,.2f}")
+    c6.metric("Wtd Avg Net $/SF", f"${wavg_net_psf:,.2f}")
 
     # Filter
     buildings = ['All'] + sorted(set(t['Building'] for t in active))
@@ -1155,12 +1159,15 @@ def render_tenancy_tab():
     port_wavg_psf = port_annual / port_sf if port_sf > 0 else 0
     port_expenses = sum(float(expense_cfg.get(b, 0) or 0) for b in BUILDING_MAP.keys())
     port_noi = port_annual - port_expenses
-    pc1, pc2, pc3, pc4, pc5 = st.columns(5)
+    port_wavg_net_psf = port_annual / port_sf if port_sf > 0 else 0
+    port_wavg_gross_psf = (port_annual + port_expenses) / port_sf if port_sf > 0 else 0
+    pc1, pc2, pc3, pc4, pc5, pc6 = st.columns(6)
     pc1.metric("Total SF", f"{port_sf:,.0f}")
-    pc2.metric("Gross Rev (Ann)", f"${port_annual:,.0f}")
-    pc3.metric("Expenses (Ann)", f"${port_expenses:,.0f}")
-    pc4.metric("NOI (Ann)", f"${port_noi:,.0f}")
-    pc5.metric("Wtd Avg $/SF", f"${port_wavg_psf:,.2f}")
+    pc2.metric("Gross Revenue", f"${port_annual:,.0f}")
+    pc3.metric("Expenses", f"${port_expenses:,.0f}")
+    pc4.metric("NOI", f"${port_noi:,.0f}")
+    pc5.metric("Wtd Avg Gross $/SF", f"${port_wavg_gross_psf:,.2f}")
+    pc6.metric("Wtd Avg Net $/SF", f"${port_wavg_net_psf:,.2f}")
 
     render_column_config_editor(
         'tenancy',
