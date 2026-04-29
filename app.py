@@ -1795,8 +1795,9 @@ def render_deposits_tab():
                 lease_type = t['Lease']
                 break
 
-        sd_anniv_date = next_sd_date if next_sd_date and next_sd is not None and next_sd != current_sd and next_sd_date > TODAY else None
-        sd_new_amount = next_sd if sd_anniv_date else None
+        # SD Anniversary = end of current period (when next term starts), shown for all tenants with future periods
+        sd_anniv_date = next_sd_date if next_sd_date and next_sd_date > TODAY else None
+        sd_new_amount = next_sd if sd_anniv_date and next_sd is not None else None
         sd_delta = (next_sd - current_sd) if sd_new_amount is not None else None
 
         space_val = str(first.get('Space', '')).strip()
