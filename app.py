@@ -955,16 +955,13 @@ def render_sop_tab():
 
         # Render current page as image
         page = doc[page_num]
-        mat = fitz.Matrix(2, 2)  # 2x zoom for readability
+        mat = fitz.Matrix(1, 1)  # 1x for mobile
         pix = page.get_pixmap(matrix=mat)
         img_bytes = pix.tobytes("png")
         b64_img = base64.b64encode(img_bytes).decode()
         doc.close()
 
-        st.markdown(f"**Page {page_num + 1} of {total_pages}**")
-        st.markdown(f'<img src="data:image/png;base64,{b64_img}" style="width:100%; border-radius:6px; border:1px solid rgba(255,255,255,0.1);">', unsafe_allow_html=True)
-
-        # Navigation buttons
+        # Navigation buttons on top
         col_prev, col_num, col_next = st.columns([1, 2, 1])
         if col_prev.button("⬅️ Prev", disabled=(page_num == 0), key="sop_prev"):
             st.session_state.sop_page = page_num - 1
@@ -973,6 +970,8 @@ def render_sop_tab():
         if col_next.button("Next ➡️", disabled=(page_num >= total_pages - 1), key="sop_next"):
             st.session_state.sop_page = page_num + 1
             st.rerun()
+
+        st.markdown(f'<img src="data:image/png;base64,{b64_img}" style="width:100%; border-radius:6px; border:1px solid rgba(255,255,255,0.1);">', unsafe_allow_html=True)
     else:
         # Desktop: embedded PDF viewer
         import base64
