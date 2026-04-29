@@ -653,6 +653,15 @@ def load_tenancy():
             diff_days = (next_anniv - TODAY).days
             anniv_months = max(0, round(diff_days / 30.44))
 
+        # Find nearest future cancel date
+        cancel_date = None
+        for r in rows:
+            cd = to_date(r.get('Cancel Date'))
+            if cd and cd > TODAY:
+                if cancel_date is None or cd < cancel_date:
+                    cancel_date = cd
+        cancel_str = cancel_date.strftime('%m/%d/%Y') if cancel_date else '—'
+
         # Get tenant type (Retail/Office/etc) from summary rows
         tenant_type = ''
         tenant_name = first.get('Tenant', '')
@@ -680,6 +689,7 @@ def load_tenancy():
             'TTE_Days': tte_days if tte_days is not None else 9999,
             'Options': f"{option_years}yr" if option_years > 0 else '-',
             'Exp Date': exp_str,
+            'Cancel Date': cancel_str,
             'Escalation': current_row.get('Escalation', 0) or 0,
             'Sec Dep': round(sec_dep, 2),
             'Next Anniv': next_anniv,
@@ -962,26 +972,11 @@ def render_tenancy_tab():
     total_expenses = sum(float(expense_cfg.get(b, 0) or 0) for b in BUILDING_MAP.keys())
     total_noi = total_annual - total_expenses
 
-    # Find closest approaching expiration (non-MTM, future dates only)
-    upcoming_exps = []
-    for t in active:
-        if t.get('TTE_Label') != 'MTM' and t.get('TTE_Months', 0) > 0:
-            exp = t.get('Exp Date', '')
-            if exp and exp != 'MTM' and exp != 'N/A':
-                upcoming_exps.append((t['Tenant'], t['Building'], t['Space'], exp, t['TTE_Months']))
-    upcoming_exps.sort(key=lambda x: x[4])
-    if upcoming_exps:
-        nearest = upcoming_exps[0]
-        nearest_str = f"{nearest[0]} ({nearest[1]} {nearest[2]}) — {nearest[3]}"
-    else:
-        nearest_str = "None"
-
-    c1, c2, c3, c4, c5 = st.columns(5)
+    c1, c2, c3, c4 = st.columns(4)
     c1.metric("Portfolio SF", f"{total_sf:,.0f}")
     c2.metric("Gross Revenue", f"${total_annual:,.0f}")
     c3.metric("Expenses", f"${total_expenses:,.0f}")
     c4.metric("NOI", f"${total_noi:,.0f}")
-    c5.metric("Next Expiration", nearest_str)
 
     # Filter
     buildings = ['All'] + sorted(set(t['Building'] for t in active))
@@ -1014,7 +1009,7 @@ def render_tenancy_tab():
 
             df['Gross_Annual'] = df['Annual'] + df['CAM_Reimb']
 
-            display_cols = ['Space', 'Tenant', 'Type', 'SF', 'Lease', 'Monthly', 'Annual', 'Gross_Annual', 'PSF', 'Gross_PSF', 'CAM_Pct', 'CAM_Reimb', 'TTE_Months', 'Exp Date', 'Options', 'Escalation', 'Next Anniv', 'Anniv_Months', 'Next Monthly', 'Delta Monthly', 'Status', 'TTE_Label', 'Is_NNN']
+            display_cols = ['Space', 'Tenant', 'Type', 'SF', 'Lease', 'Monthly', 'Annual', 'Gross_Annual', 'PSF', 'Gross_PSF', 'CAM_Pct', 'CAM_Reimb', 'TTE_Months', 'Exp Date', 'Cancel Date', 'Options', 'Escalation', 'Next Anniv', 'Anniv_Months', 'Next Monthly', 'Delta Monthly', 'Status', 'TTE_Label', 'Is_NNN']
 
             # Calculate building totals
             b_monthly = df['Monthly'].sum()
@@ -1082,7 +1077,7 @@ def render_tenancy_tab():
                 'Lease': '', 'Monthly': f"${b_monthly:,.0f}", 'Annual': f"${b_annual:,.0f}",
                 'PSF': f"${b_wavg_psf:,.2f}", 'Gross Annual': f"${b_gross_annual:,.0f}", 'Gross PSF': '',
                 'CAM %': '', 'CAM Reimb': f"${b_cam_reimb:,.0f}",
-                'MTE': '', 'Exp Date': '', 'Options': '', 'Escalation': '', 'Next Anniversary': '', 'Anniv Δ': '',
+                'MTE': '', 'Exp Date': '', 'Cancel Date': '', 'Options': '', 'Escalation': '', 'Next Anniversary': '', 'Anniv Δ': '',
                 'New Rent': '', 'Δ Monthly': '', 'Status': '', 'TTE Label': '', 'NNN': '',
             }]
 
@@ -1156,7 +1151,7 @@ def render_tenancy_tab():
     render_column_config_editor(
         'tenancy',
         ['Space', 'Tenant', 'Type', 'SF', 'Lease', 'Monthly', 'Annual', 'Gross Annual', 'PSF', 'Gross PSF',
-         'CAM %', 'CAM Reimb', 'MTE', 'Exp Date', 'Options', 'Escalation',
+         'CAM %', 'CAM Reimb', 'MTE', 'Exp Date', 'Cancel Date', 'Options', 'Escalation',
          'Next Anniversary', 'Anniv Δ', 'New Rent', 'Δ Monthly', 'Status']
     )
     render_expense_editor()
