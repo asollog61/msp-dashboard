@@ -1894,6 +1894,98 @@ def render_deposits_tab():
     st.metric("Portfolio Total Security Deposits", f"${total_deposits:,.2f}")
 
 
+def render_yardi_tab():
+    import base64
+    yardi_dir = Path(os.path.dirname(__file__)) / "data" / "Yardi"
+
+    st.markdown("### 📊 Yardi Reports")
+
+    if not yardi_dir.exists():
+        st.warning("No Yardi reports found. Place PDF files in data/Yardi/ folder.")
+        return
+
+    pdfs = sorted([f for f in yardi_dir.iterdir() if f.suffix.lower() == '.pdf'])
+    if not pdfs:
+        st.warning("No PDF files found in data/Yardi/.")
+        return
+
+    st.caption(f"{len(pdfs)} report(s) available")
+
+    # Group by building
+    building_files = {}
+    for pdf in pdfs:
+        name = pdf.stem
+        # Try to extract building name from filename
+        matched_building = None
+        for bldg_name, mapping in BUILDING_MAP.items():
+            dest = mapping['dest_folder'].lower().replace('-', '').replace(' ', '')
+            fname = name.lower().replace('-', '').replace(' ', '').replace('_', '')
+            if any(part in fname for part in [
+                dest, bldg_name.lower().replace(' ', ''),
+                mapping['code'].lower()
+            ]):
+                matched_building = bldg_name
+                break
+        if not matched_building:
+            matched_building = "Other"
+        building_files.setdefault(matched_building, []).append(pdf)
+
+    for building, files in building_files.items():
+        code = BUILDING_MAP.get(building, {}).get('code', '')
+        label = f"{building} ({code})" if code else building
+        st.markdown(f'<div class="building-header"><strong>▎ {label}</strong> — {len(files)} report(s)</div>', unsafe_allow_html=True)
+
+        for pdf in files:
+            with open(pdf, "rb") as f:
+                pdf_bytes = f.read()
+            b64 = base64.b64encode(pdf_bytes).decode()
+
+            # Clean up display name
+            display_name = pdf.stem.replace('_', ' ').replace('-', ' ')
+
+            col_name, col_dl = st.columns([6, 1])
+            col_name.markdown(f"📄 **{display_name}**")
+            col_dl.download_button(
+                "⬇️",
+                data=pdf_bytes,
+                file_name=pdf.name,
+                mime="application/pdf",
+                key=f"dl_{pdf.name}"
+            )
+
+            with st.expander(f"👁️ Preview: {display_name}", expanded=False):
+                if st.session_state.get('mobile_view', False) and HAS_PYMUPDF:
+                    # Mobile: page-by-page view
+                    doc = fitz.open(str(pdf))
+                    total_pages = len(doc)
+                    page_key = f"yardi_page_{pdf.name}"
+                    if page_key not in st.session_state:
+                        st.session_state[page_key] = 0
+                    pg = max(0, min(st.session_state[page_key], total_pages - 1))
+
+                    cp, cn_num, cn = st.columns([1, 2, 1])
+                    if cp.button("⬅️", disabled=(pg == 0), key=f"yp_{pdf.name}"):
+                        st.session_state[page_key] = pg - 1
+                        st.rerun()
+                    cn_num.markdown(f"<div style='text-align:center;padding-top:8px;'>{pg+1} / {total_pages}</div>", unsafe_allow_html=True)
+                    if cn.button("➡️", disabled=(pg >= total_pages - 1), key=f"yn_{pdf.name}"):
+                        st.session_state[page_key] = pg + 1
+                        st.rerun()
+
+                    page = doc[pg]
+                    pix = page.get_pixmap(matrix=fitz.Matrix(1.25, 1.25))
+                    img_b64 = base64.b64encode(pix.tobytes("png")).decode()
+                    doc.close()
+                    st.markdown(f'<img src="data:image/png;base64,{img_b64}" style="width:100%;border-radius:6px;">', unsafe_allow_html=True)
+                else:
+                    # Desktop: embedded PDF
+                    st.markdown(f"""
+                        <iframe src="data:application/pdf;base64,{b64}" width="100%" height="800px"
+                            style="border:1px solid rgba(255,255,255,0.1);border-radius:6px;">
+                        </iframe>
+                    """, unsafe_allow_html=True)
+
+
 # =====================
 # MAIN APP
 # =====================
@@ -1903,8 +1995,8 @@ col_title.markdown("## 🏢 MSP Property Dashboard")
 st.session_state.mobile_view = col_toggle.toggle("📱 Mobile", value=st.session_state.mobile_view)
 st.caption(f"Marion Street Properties · {TODAY.strftime('%B %d, %Y')}")
 
-tab_tenancy, tab_vacancy, tab_insurance, tab_deposits, tab_sop = st.tabs([
-    "🏠 Current Tenancy", "🏚️ Vacancy", "🛡️ Insurance", "💰 Security Deposits", "📋 SOPs"
+tab_tenancy, tab_vacancy, tab_insurance, tab_deposits, tab_yardi, tab_sop = st.tabs([
+    "🏠 Current Tenancy", "🏚️ Vacancy", "🛡️ Insurance", "💰 Security Deposits", "📊 Yardi Reports", "📋 SOPs"
 ])
 
 with tab_sop:
@@ -1921,3 +2013,6 @@ with tab_insurance:
 
 with tab_deposits:
     render_deposits_tab()
+
+with tab_yardi:
+    render_yardi_tab()
