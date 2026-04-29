@@ -637,10 +637,15 @@ def load_tenancy():
         psf = (annual / sqft) if sqft and sqft > 1 else 0
         sec_dep = first.get('Sec Dep', 0) or 0
 
-        exp_dt = first.get('Exp Dt')
-        exp_str = exp_dt.strftime('%m/%d/%Y') if isinstance(exp_dt, (datetime, date)) else str(exp_dt or 'N/A')
+        # Exp Date = last original period end date
+        exp_dt = last_orig_end
+        exp_str = exp_dt.strftime('%m/%d/%Y') if isinstance(exp_dt, (datetime, date)) else 'MTM'
 
-        next_anniv = to_date(next_row.get('Start Date')) if next_row else None
+        # Next Anniversary = end date of current period
+        current_end = to_date(current_row.get('End Date'))
+        next_anniv = current_end if current_end and current_end > TODAY else None
+
+        # Next rent = from the period AFTER current
         next_monthly = (next_row.get('Monthly') if next_row else None)
         delta_monthly = (next_monthly - monthly) if (next_row and next_monthly is not None) else None
         anniv_months = None
