@@ -2249,17 +2249,61 @@ def render_deposits_tab():
     dep_data.sort(key=lambda d: (d['Building'], d['Tenant']))
 
     # Yardi SD comparison — use Security Deposit Activity page (Deposits On Hand)
+    # Use the reconcile name mapping to bridge Yardi spaces to spreadsheet spaces
+    import json as _json_dep
     yardi_deposits = parse_yardi_deposit_activity()
+    yardi_rent_data = parse_yardi_rent_rolls()
+
+    # Load name mapping from reconcile tab (Yardi key -> spreadsheet tenant name)
+    name_map_dep = {}
+    try:
+        raw = _read_gsheet_config("Config: Yardi Names")
+        if raw:
+            name_map_dep = _json_dep.loads(raw)
+    except Exception:
+        pass
+
+    # Build reverse lookup: "Building|SheetSpace" -> yardi deposit amount
+    # Strategy: for each Yardi deposit entry, find which spreadsheet tenant it maps to
+    sheet_sd_from_yardi = {}  # "Building|SheetSpace" -> deposit amount
+
+    # First, build sheet tenant->space index
+    sheet_tenant_to_space = {}
+    for d in dep_data:
+        sheet_tenant_to_space[f"{d['Building']}|{d['Tenant']}"] = d['Space']
+
+    for yardi_key, deposit_amt in yardi_deposits.items():
+        building = yardi_key.split('|', 1)[0] if '|' in yardi_key else ''
+        yardi_space = yardi_key.split('|', 1)[1] if '|' in yardi_key else ''
+
+        # Method 1: Check name mapping (reconcile lookup table)
+        matched_tenant = name_map_dep.get(yardi_key, '')
+
+        # Method 2: Auto-match via normalized space in rent roll
+        if not matched_tenant and yardi_key in yardi_rent_data:
+            raw_unit = yardi_rent_data[yardi_key].get('raw_unit', yardi_space)
+            norm = normalize_space(raw_unit, building)
+            # Find a dep_data entry with this building+space
+            for d in dep_data:
+                if d['Building'] == building and d['Space'] == norm:
+                    matched_tenant = d['Tenant']
+                    break
+
+        # Method 3: Direct space match
+        if not matched_tenant:
+            for d in dep_data:
+                if d['Building'] == building and d['Space'] == yardi_space:
+                    matched_tenant = d['Tenant']
+                    break
+
+        if matched_tenant:
+            sheet_space = sheet_tenant_to_space.get(f"{building}|{matched_tenant}")
+            if sheet_space:
+                sheet_sd_from_yardi[f"{building}|{sheet_space}"] = deposit_amt
+
     for d in dep_data:
         key = f"{d['Building']}|{d['Space']}"
-        yardi_sd = yardi_deposits.get(key)
-        if yardi_sd is None:
-            # Try alternate space formats
-            space = d['Space']
-            if space.isdigit() and len(space) == 1:
-                yardi_sd = yardi_deposits.get(f"{d['Building']}|10{space}")
-            elif space.isdigit() and len(space) == 3:
-                yardi_sd = yardi_deposits.get(f"{d['Building']}|{space[0]}-{space[1:]}")
+        yardi_sd = sheet_sd_from_yardi.get(key)
         d['Yardi SD'] = yardi_sd
         dash_sd = d['Current SD']
         if yardi_sd is None:
