@@ -941,24 +941,56 @@ def render_sop_tab():
 
     st.markdown("### 📋 Marion St Properties — Standard Operating Procedures")
 
-    # Read PDF and embed as base64 for in-browser viewing
-    import base64
-    with open(SOP_PDF, "rb") as f:
-        pdf_bytes = f.read()
-    b64 = base64.b64encode(pdf_bytes).decode()
+    if st.session_state.get('mobile_view', False) and HAS_PYMUPDF:
+        # Mobile: page-by-page image view with navigation
+        import base64
+        doc = fitz.open(SOP_PDF)
+        total_pages = len(doc)
 
-    # Embedded PDF viewer - scrollable, clickable, full-width
-    st.markdown(f"""
-        <iframe
-            src="data:application/pdf;base64,{b64}"
-            width="100%"
-            height="1600px"
-            style="border: 1px solid rgba(255,255,255,0.1); border-radius: 6px;"
-        >
-            Your browser does not support PDF viewing.
-            <a href="data:application/pdf;base64,{b64}" download="Marion_St_SOP_Manual.pdf">Download PDF</a>
-        </iframe>
-    """, unsafe_allow_html=True)
+        if 'sop_page' not in st.session_state:
+            st.session_state.sop_page = 0
+
+        page_num = st.session_state.sop_page
+        page_num = max(0, min(page_num, total_pages - 1))
+
+        # Render current page as image
+        page = doc[page_num]
+        mat = fitz.Matrix(2, 2)  # 2x zoom for readability
+        pix = page.get_pixmap(matrix=mat)
+        img_bytes = pix.tobytes("png")
+        b64_img = base64.b64encode(img_bytes).decode()
+        doc.close()
+
+        st.markdown(f"**Page {page_num + 1} of {total_pages}**")
+        st.markdown(f'<img src="data:image/png;base64,{b64_img}" style="width:100%; border-radius:6px; border:1px solid rgba(255,255,255,0.1);">', unsafe_allow_html=True)
+
+        # Navigation buttons
+        col_prev, col_num, col_next = st.columns([1, 2, 1])
+        if col_prev.button("⬅️ Prev", disabled=(page_num == 0), key="sop_prev"):
+            st.session_state.sop_page = page_num - 1
+            st.rerun()
+        col_num.markdown(f"<div style='text-align:center; padding-top:8px;'>{page_num + 1} / {total_pages}</div>", unsafe_allow_html=True)
+        if col_next.button("Next ➡️", disabled=(page_num >= total_pages - 1), key="sop_next"):
+            st.session_state.sop_page = page_num + 1
+            st.rerun()
+    else:
+        # Desktop: embedded PDF viewer
+        import base64
+        with open(SOP_PDF, "rb") as f:
+            pdf_bytes = f.read()
+        b64 = base64.b64encode(pdf_bytes).decode()
+
+        st.markdown(f"""
+            <iframe
+                src="data:application/pdf;base64,{b64}"
+                width="100%"
+                height="1600px"
+                style="border: 1px solid rgba(255,255,255,0.1); border-radius: 6px;"
+            >
+                Your browser does not support PDF viewing.
+                <a href="data:application/pdf;base64,{b64}" download="Marion_St_SOP_Manual.pdf">Download PDF</a>
+            </iframe>
+        """, unsafe_allow_html=True)
 
 
 def render_tenancy_tab():
@@ -1797,8 +1829,8 @@ def render_deposits_tab():
 
         # SD Anniversary = end of current period (when next term starts), shown for all tenants with future periods
         sd_anniv_date = next_sd_date if next_sd_date and next_sd_date > TODAY else None
-        sd_new_amount = next_sd if sd_anniv_date and next_sd is not None else None
-        sd_delta = (next_sd - current_sd) if sd_new_amount is not None else None
+        sd_new_amount = next_sd if sd_anniv_date and next_sd is not None else 0
+        sd_delta = (sd_new_amount - current_sd) if sd_anniv_date else 0
 
         space_val = str(first.get('Space', '')).strip()
         key = f"{building}|{space_val}"
@@ -1850,9 +1882,9 @@ def render_deposits_tab():
         display_df['SD Anniversary'] = display_df['SD Anniversary'].apply(
             lambda d: d.strftime('%m/%d/%Y') if isinstance(d, (datetime, date)) else ('-' if not d else str(d))
         )
-        display_df['New SD'] = display_df['New SD'].apply(lambda x: f"${x:,.0f}" if x is not None else '$0')
+        display_df['New SD'] = display_df['New SD'].apply(lambda x: f"${x:,.0f}" if x is not None and not (isinstance(x, float) and pd.isna(x)) else '$0')
         display_df['Δ SD'] = display_df['Δ SD'].apply(
-            lambda x: f"{'+' if x and x > 0 else ''}${x:,.0f}" if x is not None else '$0'
+            lambda x: f"{'+' if x and x > 0 else ''}${x:,.0f}" if x is not None and not (isinstance(x, float) and pd.isna(x)) else '$0'
         )
         show_grid(display_df, key=f"dep_{building_name}", tab_key="deposits")
 
