@@ -851,6 +851,103 @@ def normalize_space(space_str, building=None):
 
 
 @st.cache_data(ttl=3600)
+def parse_yardi_deposit_activity():
+    """Parse Security Deposit Activity pages from Yardi PDFs.
+    Returns dict keyed by 'Building|Space' with Deposits On Hand amount."""
+    if not HAS_PYMUPDF:
+        return {}
+
+    yardi_dir = None
+    for p in [
+        os.path.join(os.path.dirname(__file__), "data", "Yardi"),
+        "/home/node/OpenClaw/Share Jason/General Procedures/msp-dashboard-src/data/Yardi/",
+    ]:
+        if os.path.exists(p):
+            yardi_dir = Path(p)
+            break
+
+    if not yardi_dir or not yardi_dir.exists():
+        return {}
+
+    filename_map = {
+        "1280-springfield": "1280 Springfield",
+        "15-south": "15 South",
+        "36-south": "36 South",
+        "114-central": "114 Central",
+    }
+
+    deposit_data = {}
+
+    for pdf_path in sorted(yardi_dir.glob("*.pdf")):
+        filename_lower = pdf_path.stem.lower()
+        building = None
+        for key, name in filename_map.items():
+            if key in filename_lower:
+                building = name
+                break
+        if not building:
+            continue
+
+        try:
+            doc = fitz.open(str(pdf_path))
+            for page in doc:
+                text = page.get_text()
+                if 'Security Deposit Activity' not in text:
+                    continue
+
+                lines = [l.strip() for l in text.split('\n') if l.strip()]
+                i_line = 0
+                while i_line < len(lines):
+                    line = lines[i_line]
+                    if '(Current)' in line or '(Past)' in line:
+                        tenant_name = line
+                        # Collect numeric values following the tenant line
+                        nums = []
+                        j = i_line + 1
+                        while j < len(lines) and len(nums) < 7:
+                            try:
+                                val = float(lines[j].replace(',', ''))
+                                nums.append(val)
+                                j += 1
+                            except (ValueError, AttributeError):
+                                break
+
+                        # Find unit number - look backwards for short alphanumeric token
+                        unit = ''
+                        skip_words = {'avenue', 'st', 'st.', 'south', 'central', 'ave', 'ave.',
+                                      'd', '36', '15', '1280', '114', 'springfiel', 'property',
+                                      'unit', 'tenant', 'prior', 'current', 'deposits', 'total',
+                                      'on', 'hand', 'billed', 'receipts', 'forfeited', 'deposit'}
+                        for k in range(i_line - 1, max(i_line - 6, 0), -1):
+                            candidate = lines[k].strip()
+                            if (re.match(r'^[A-Za-z0-9-]+$', candidate) and
+                                    len(candidate) <= 6 and
+                                    candidate.lower() not in skip_words):
+                                unit = candidate
+                                break
+
+                        if unit and len(nums) >= 5:
+                            deposits_on_hand = nums[4]
+                            normalized = normalize_space(unit, building)
+                            key = f"{building}|{normalized}"
+                            # Only use (Current) entries, or add to existing if (Past)
+                            if '(Current)' in tenant_name:
+                                deposit_data[key] = deposits_on_hand
+                            elif key not in deposit_data:
+                                deposit_data[key] = deposits_on_hand
+
+                        i_line = j
+                    else:
+                        i_line += 1
+
+            doc.close()
+        except Exception:
+            pass
+
+    return deposit_data
+
+
+@st.cache_data(ttl=3600)
 def parse_yardi_rent_rolls():
     """Parse Yardi monthly statement PDFs from data/Yardi/ folder.
     Returns dict keyed by "Building|Space" with {monthly, cam, expiration, tenant}.
@@ -2151,19 +2248,18 @@ def render_deposits_tab():
 
     dep_data.sort(key=lambda d: (d['Building'], d['Tenant']))
 
-    # Yardi SD comparison
-    yardi_data = parse_yardi_rent_rolls()
+    # Yardi SD comparison — use Security Deposit Activity page (Deposits On Hand)
+    yardi_deposits = parse_yardi_deposit_activity()
     for d in dep_data:
         key = f"{d['Building']}|{d['Space']}"
-        yardi_entry = yardi_data.get(key)
-        if not yardi_entry:
+        yardi_sd = yardi_deposits.get(key)
+        if yardi_sd is None:
             # Try alternate space formats
             space = d['Space']
             if space.isdigit() and len(space) == 1:
-                yardi_entry = yardi_data.get(f"{d['Building']}|10{space}")
+                yardi_sd = yardi_deposits.get(f"{d['Building']}|10{space}")
             elif space.isdigit() and len(space) == 3:
-                yardi_entry = yardi_data.get(f"{d['Building']}|{space[0]}-{space[1:]}")
-        yardi_sd = yardi_entry.get('deposit', 0) if yardi_entry else None
+                yardi_sd = yardi_deposits.get(f"{d['Building']}|{space[0]}-{space[1:]}")
         d['Yardi SD'] = yardi_sd
         dash_sd = d['Current SD']
         if yardi_sd is None:
@@ -2447,6 +2543,9 @@ def render_reconcile_tab():
     st.markdown("---")
     st.markdown("#### 📊 Data Comparison")
 
+    # Get Yardi deposit activity (Deposits On Hand) for SD comparison
+    yardi_deposits = parse_yardi_deposit_activity()
+
     recon_rows = []
     for yardi_key, yardi_entry in sorted(yardi_data.items()):
         building = yardi_key.split('|', 1)[0] if '|' in yardi_key else ''
@@ -2454,7 +2553,7 @@ def render_reconcile_tab():
         yardi_name = yardi_entry.get('tenant', '')
         yardi_monthly = yardi_entry.get('monthly', 0) or 0
         yardi_exp = yardi_entry.get('expiration')
-        yardi_sd = yardi_entry.get('deposit', 0) or 0
+        yardi_sd = yardi_deposits.get(yardi_key, 0) or 0
 
         # Find matched spreadsheet tenant
         matched_name = name_map.get(yardi_key, '')
