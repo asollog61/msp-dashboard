@@ -962,14 +962,11 @@ def render_tenancy_tab():
     total_expenses = sum(float(expense_cfg.get(b, 0) or 0) for b in BUILDING_MAP.keys())
     total_noi = total_annual - total_expenses
 
-    c1, c2, c3, c4, c5, c6, c7 = st.columns(7)
+    c1, c2, c3, c4 = st.columns(4)
     c1.metric("Portfolio SF", f"{total_sf:,.0f}")
-    c2.metric("Gross Rev (Ann)", f"${total_annual:,.0f}")
-    c3.metric("Gross Rev (Mo)", f"${total_monthly:,.0f}")
-    c4.metric("Expenses (Ann)", f"${total_expenses:,.0f}")
-    c5.metric("Expenses (Mo)", f"${total_expenses/12:,.0f}")
-    c6.metric("NOI (Ann)", f"${total_noi:,.0f}")
-    c7.metric("NOI (Mo)", f"${total_noi/12:,.0f}")
+    c2.metric("Gross Revenue", f"${total_annual:,.0f}")
+    c3.metric("Expenses", f"${total_expenses:,.0f}")
+    c4.metric("NOI", f"${total_noi:,.0f}")
 
     # Filter
     buildings = ['All'] + sorted(set(t['Building'] for t in active))
