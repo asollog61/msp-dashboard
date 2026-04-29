@@ -125,8 +125,46 @@ st.markdown("""
     .sop-table td { padding: 5px 10px; border: 1px solid rgba(255,255,255,0.08); }
     .sop-table tr:nth-child(even) { background: rgba(255,255,255,0.03); }
     .sop-table tr:hover { background: rgba(100,140,255,0.08); }
+    .mobile-card { background: #161b22; border: 1px solid #2d333b; border-radius: 8px; padding: 12px 16px; margin-bottom: 8px; }
+    .mobile-card-header { font-size: 15px; font-weight: 700; color: #58a6ff; margin-bottom: 6px; border-bottom: 1px solid #2d333b; padding-bottom: 6px; }
+    .mobile-card-row { display: flex; justify-content: space-between; padding: 2px 0; font-size: 13px; }
+    .mobile-card-label { color: #8b949e; }
+    .mobile-card-value { color: #e6edf3; font-weight: 500; text-align: right; }
+    .mobile-card-vacant { border-left: 3px solid #f85149; }
 </style>
 """, unsafe_allow_html=True)
+
+# --- MOBILE VIEW TOGGLE ---
+if 'mobile_view' not in st.session_state:
+    st.session_state.mobile_view = False
+
+
+def show_mobile_cards(df, key_col=None, header_col='Tenant', highlight_cols=None, skip_cols=None):
+    """Render a DataFrame as stacked mobile-friendly cards."""
+    if skip_cols is None:
+        skip_cols = set()
+    if highlight_cols is None:
+        highlight_cols = ['Monthly', 'Annual', 'MTE', 'Status']
+    for _, row in df.iterrows():
+        header = str(row.get(header_col, ''))
+        is_vacant = 'VACANT' in header.upper() if header else False
+        card_class = 'mobile-card mobile-card-vacant' if is_vacant else 'mobile-card'
+        rows_html = []
+        for col in df.columns:
+            if col == header_col or col in skip_cols:
+                continue
+            val = row[col]
+            if val is None or (isinstance(val, float) and pd.isna(val)) or str(val).strip() in ('', '-', '—'):
+                continue
+            bold = 'font-weight:700;' if col in highlight_cols else ''
+            rows_html.append(
+                f'<div class="mobile-card-row">'
+                f'<span class="mobile-card-label">{col}</span>'
+                f'<span class="mobile-card-value" style="{bold}">{val}</span>'
+                f'</div>'
+            )
+        html = f'<div class="{card_class}"><div class="mobile-card-header">{header}</div>{"".join(rows_html)}</div>'
+        st.markdown(html, unsafe_allow_html=True)
 
 
 def ensure_json_file(path, default):
@@ -310,6 +348,14 @@ def show_grid(df, key, height=None, fit_columns=True, pinned_bottom=None, column
     if tab_key:
         ordered_cols = get_column_order(tab_key, list(df.columns))
         df = df[ordered_cols]
+
+    # Mobile view: render cards instead of grid
+    if st.session_state.get('mobile_view', False):
+        header_col = 'Tenant' if 'Tenant' in df.columns else ('Last Tenant' if 'Last Tenant' in df.columns else df.columns[0])
+        skip = {'TTE Label', 'NNN', 'Is_NNN'}
+        show_mobile_cards(df, header_col=header_col, skip_cols=skip)
+        return
+
     gb = GridOptionsBuilder.from_dataframe(df)
     gb.configure_default_column(
         sortable=True,
@@ -1724,7 +1770,9 @@ def render_deposits_tab():
 # MAIN APP
 # =====================
 
-st.markdown("## 🏢 MSP Property Dashboard")
+col_title, col_toggle = st.columns([8, 2])
+col_title.markdown("## 🏢 MSP Property Dashboard")
+st.session_state.mobile_view = col_toggle.toggle("📱 Mobile", value=st.session_state.mobile_view)
 st.caption(f"Marion Street Properties · {TODAY.strftime('%B %d, %Y')}")
 
 tab_sop, tab_tenancy, tab_vacancy, tab_insurance, tab_deposits = st.tabs([
