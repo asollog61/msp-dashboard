@@ -182,9 +182,11 @@ def ensure_json_file(path, default):
         return default
 
 
-@st.cache_data(ttl=120)
 def _read_gsheet_config(tab_name):
-    """Read a JSON config blob stored in cell A1 of a Google Sheet tab."""
+    """Read a JSON config blob stored in cell A1 of a Google Sheet tab. Uses session_state cache."""
+    cache_key = f"_gsheet_cfg_{tab_name}"
+    if cache_key in st.session_state:
+        return st.session_state[cache_key]
     try:
         sheet = get_gsheet()
         if not sheet:
@@ -192,7 +194,9 @@ def _read_gsheet_config(tab_name):
         ws = sheet.worksheet(tab_name)
         val = ws.acell('A1').value
         if val:
-            return json.loads(val)
+            data = json.loads(val)
+            st.session_state[cache_key] = data
+            return data
     except Exception:
         pass
     return None
@@ -209,7 +213,10 @@ def _write_gsheet_config(tab_name, data):
         except Exception:
             ws = sheet.add_worksheet(title=tab_name, rows=1, cols=1)
         ws.update_acell('A1', json.dumps(data))
-        _read_gsheet_config.clear()  # Clear read cache after write
+        # Clear session_state cache for this tab
+        cache_key = f"_gsheet_cfg_{tab_name}"
+        if cache_key in st.session_state:
+            del st.session_state[cache_key]
         return True
     except Exception:
         return False
@@ -1104,6 +1111,7 @@ def render_tenancy_tab():
                 }
             """)
             column_configs = {
+                'Space': {'type': ['textColumn']},
                 'MTE': {'type': ['numericColumn'], 'valueFormatter': tte_formatter, 'cellStyle': mte_cell_style},
                 'Anniv Δ': {'type': ['numericColumn'], 'valueFormatter': anniv_formatter},
                 'TTE Label': {'hide': True},
