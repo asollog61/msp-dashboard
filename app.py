@@ -1040,6 +1040,7 @@ def render_tenancy_tab():
             display_df['Monthly'] = display_df['Monthly'].apply(lambda x: f"${x:,.0f}")
             display_df['Annual'] = display_df['Annual'].apply(lambda x: f"${x:,.0f}")
             display_df['PSF'] = display_df['PSF'].apply(lambda x: f"${x:,.2f}")
+            display_df['Space'] = display_df['Space'].astype(str)
             display_df['SF'] = display_df['SF'].apply(lambda x: f"{x:,.0f}" if isinstance(x, (int, float)) and x > 1 else '')
             display_df['Next Anniversary'] = display_df['Next Anniversary'].apply(
                 lambda d: d.strftime('%m/%d/%Y') if isinstance(d, (datetime, date)) else ('-' if not d else str(d))
@@ -1067,6 +1068,35 @@ def render_tenancy_tab():
                     return params.value.toString();
                 }
             """)
+            mte_cell_style = JsCode("""
+                function(params) {
+                    if (params.value === null || params.value === undefined || params.node.rowPinned) {
+                        return {'text-align': 'right'};
+                    }
+                    var v = parseInt(params.value);
+                    if (isNaN(v)) return {'text-align': 'right'};
+                    var maxMte = 120;
+                    var ratio = Math.min(v / maxMte, 1.0);
+                    var r, g, b;
+                    if (ratio <= 0.5) {
+                        var t = ratio / 0.5;
+                        r = Math.round(200 - t * 100);
+                        g = Math.round(50 + t * 100);
+                        b = Math.round(50);
+                    } else {
+                        var t = (ratio - 0.5) / 0.5;
+                        r = Math.round(100 - t * 70);
+                        g = Math.round(150 + t * 55);
+                        b = Math.round(50 + t * 20);
+                    }
+                    return {
+                        'background-color': 'rgba(' + r + ',' + g + ',' + b + ',0.35)',
+                        'color': '#e6edf3',
+                        'font-weight': '600',
+                        'text-align': 'right'
+                    };
+                }
+            """)
             anniv_formatter = JsCode("""
                 function(params) {
                     if (params.value === null || params.value === undefined) { return '-'; }
@@ -1074,7 +1104,7 @@ def render_tenancy_tab():
                 }
             """)
             column_configs = {
-                'MTE': {'type': ['numericColumn'], 'valueFormatter': tte_formatter},
+                'MTE': {'type': ['numericColumn'], 'valueFormatter': tte_formatter, 'cellStyle': mte_cell_style},
                 'Anniv Δ': {'type': ['numericColumn'], 'valueFormatter': anniv_formatter},
                 'TTE Label': {'hide': True},
                 'NNN': {'hide': True},
@@ -1775,8 +1805,8 @@ col_title.markdown("## 🏢 MSP Property Dashboard")
 st.session_state.mobile_view = col_toggle.toggle("📱 Mobile", value=st.session_state.mobile_view)
 st.caption(f"Marion Street Properties · {TODAY.strftime('%B %d, %Y')}")
 
-tab_sop, tab_tenancy, tab_vacancy, tab_insurance, tab_deposits = st.tabs([
-    "📋 SOPs", "🏠 Current Tenancy", "🏚️ Vacancy", "🛡️ Insurance", "💰 Security Deposits"
+tab_tenancy, tab_vacancy, tab_insurance, tab_deposits, tab_sop = st.tabs([
+    "🏠 Current Tenancy", "🏚️ Vacancy", "🛡️ Insurance", "💰 Security Deposits", "📋 SOPs"
 ])
 
 with tab_sop:
