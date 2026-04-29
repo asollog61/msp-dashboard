@@ -565,7 +565,7 @@ def load_tenancy():
             summaries.append(row)
 
     # Term detail rows (45+)
-    detail_header = [ws.cell(45, c).value for c in range(1, 23)]
+    detail_header = [ws.cell(45, c).value for c in range(1, 24)]
     details = {}
     for r in range(46, ws.max_row + 1):
         row = {}
@@ -595,14 +595,28 @@ def load_tenancy():
         rows_sorted = sorted(rows, key=lambda r: to_date(r.get('Start Date')) or date.min)
         current_row = rows_sorted[0]
         next_row = None
+        # Find current period: tightest fit (start <= TODAY <= end with smallest end date)
+        best_end = None
         for r in rows_sorted:
             start = to_date(r.get('Start Date'))
             end = to_date(r.get('End Date'))
             if start and end and start <= TODAY <= end:
-                current_row = r
-            elif start and start > TODAY:
-                if not next_row or start < to_date(next_row.get('Start Date')):
-                    next_row = r
+                if best_end is None or end < best_end:
+                    best_end = end
+                    current_row = r
+        # Find next row: the period starting right after current_row's end
+        current_end = to_date(current_row.get('End Date'))
+        for r in rows_sorted:
+            start = to_date(r.get('Start Date'))
+            end = to_date(r.get('End Date'))
+            if end and current_end and end > current_end:
+                if start and start <= TODAY:
+                    # This is a future year with start=commencement — use end date ordering
+                    if not next_row or end < to_date(next_row.get('End Date')):
+                        next_row = r
+                elif start and start > TODAY:
+                    if not next_row or start < to_date(next_row.get('Start Date')):
+                        next_row = r
 
         last_orig_end = None
         for r in rows:
