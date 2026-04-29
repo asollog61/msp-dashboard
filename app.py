@@ -819,6 +819,288 @@ def scan_coi_files():
     return coi_data
 
 
+# --- YARDI PDF PARSING ---
+def normalize_space(space_str, building=None):
+    """Normalize Yardi space format to dashboard format.
+    For 114 Central: 102->2, 104->4, 106->6, 108->8 (first floor even units)
+    For 2-X format: 2-1->201, 2-2->202, etc.
+    For other formats: keep as-is (101, 201, 1286, A-1, etc.)
+    """
+    s = str(space_str).strip()
+    
+    # Handle 2-1 format (second floor units)
+    if '-' in s:
+        parts = s.split('-')
+        if len(parts) == 2 and parts[0].isdigit() and parts[1].isdigit():
+            return f"{parts[0]}{parts[1].zfill(2)}"
+    
+    # Handle 3-digit units like 102, 104, 106, 108 (only even last digit)
+    # Only strip leading "10" if it's 102, 104, 106, or 108 (first-floor even units)
+    if len(s) == 3 and s.isdigit() and s.startswith('10'):
+        last_digit = int(s[-1])
+        if last_digit % 2 == 0:  # Even number (2, 4, 6, 8)
+            return s[-1]
+    
+    # For other formats (101, 201, 1286, A-1, O-1, etc.), keep as-is
+    return s
+
+
+@st.cache_data(ttl=3600)
+def parse_yardi_rent_rolls():
+    """Parse Yardi monthly statement PDFs from data/Yardi/ folder.
+    Returns dict keyed by "Building|Space" with {monthly, cam, expiration, tenant}.
+    """
+    if not HAS_PYMUPDF:
+        return {}
+    
+    yardi_dir = None
+    for p in [
+        os.path.join(os.path.dirname(__file__), "data", "Yardi"),
+        "/home/node/OpenClaw/Share Jason/General Procedures/msp-dashboard-src/data/Yardi/",
+    ]:
+        if os.path.exists(p):
+            yardi_dir = Path(p)
+            break
+    
+    if not yardi_dir or not yardi_dir.exists():
+        return {}
+    
+    # Building name mapping from filenames
+    filename_map = {
+        "1280-springfield": "1280 Springfield",
+        "15-south": "15 South",
+        "36-south": "36 South",
+        "114-central": "114 Central",
+    }
+    
+    yardi_data = {}
+    
+    for pdf_path in sorted(yardi_dir.glob("*.pdf")):
+        # Extract building name from filename
+        filename_lower = pdf_path.stem.lower()
+        building = None
+        for key, name in filename_map.items():
+            if key in filename_lower:
+                building = name
+                break
+        
+        if not building:
+            continue
+        
+        try:
+            doc = fitz.open(str(pdf_path))
+            
+            # Page 3 (0-indexed page 2) is the Monthly Rent Roll
+            if len(doc) < 3:
+                doc.close()
+                continue
+            
+            page = doc[2]
+            
+            # Check if this is the Monthly Rent Roll page
+            text = page.get_text()
+            if "Rent Roll Monthly" not in text:
+                doc.close()
+                continue
+            
+            # Extract text blocks - each tenant is a block
+            blocks = page.get_text("blocks")
+            
+            for block in blocks:
+                if block[6] != 0:  # Not a text block
+                    continue
+                
+                content = block[4].strip()
+                lines = [l.strip() for l in content.split('\n') if l.strip()]
+                
+                if len(lines) < 5:
+                    continue
+                
+                # First line should be unit number
+                unit = lines[0]
+                
+                # Skip header rows, totals, and summary sections
+                if unit.upper() in ('UNIT', 'TOTAL', 'SUMMARY', 'CURRENT/NOTICE/VACANT', 'FUTURE', 'OCCUPIED', 'TOTALS:', 'GROUPS'):
+                    continue
+                
+                # Skip if doesn't look like a unit number
+                if not any(c.isdigit() for c in unit):
+                    continue
+                
+                # Parse the tenant line
+                # Expected format: Unit, SqFt, Tenant Name (may be multi-line), Monthly, ..., CAM, ..., dates
+                
+                # Second item should be SqFt (numeric with .00)
+                if len(lines) < 3:
+                    continue
+                
+                # Verify second item looks like a number (SqFt)
+                sqft_str = lines[1]
+                try:
+                    sqft = float(sqft_str.replace(',', ''))
+                except (ValueError, AttributeError):
+                    continue
+                
+                # Extract tenant name (may span multiple lines for d/b/a)
+                # Start from index 2, stop when we hit monthly rent (a larger number)
+                tenant_lines = []
+                idx = 2
+                while idx < len(lines):
+                    line = lines[idx]
+                    # Check if this looks like the monthly rent (larger number, usually 3+ digits before decimal)
+                    if re.match(r'^[\d,]+\.\d{2}$', line):
+                        try:
+                            val = float(line.replace(',', ''))
+                            # If it's > 100, likely monthly rent; if < 100, might be part of tenant name
+                            if val >= 100 or (idx > 2 and val > 0):
+                                break
+                        except (ValueError, AttributeError):
+                            pass
+                    tenant_lines.append(line)
+                    idx += 1
+                
+                tenant_name = ' '.join(tenant_lines).strip()
+                
+                # Skip VACANT units
+                if tenant_name.upper() == 'VACANT':
+                    continue
+                
+                # Skip if tenant name is empty or looks like garbage
+                if not tenant_name or len(tenant_name) < 2:
+                    continue
+                
+                # Now extract monthly rent (next item after tenant name)
+                if idx >= len(lines):
+                    continue
+                
+                monthly_str = lines[idx]
+                try:
+                    monthly = float(monthly_str.replace(',', ''))
+                    # Sanity check - monthly rent should be > 0
+                    if monthly <= 0:
+                        continue
+                except (ValueError, AttributeError):
+                    continue
+                
+                # Find CAM amount - typically the 5th numeric field after monthly rent
+                # Format: Monthly, PSF, Tenant_Deposit, Other_Deposit, CAM, CAM_PSF, Misc, dates
+                # Look for a reasonable CAM value (skip PSF which is small, skip deposits which might be 0)
+                cam = 0.0
+                numeric_fields = []
+                for i in range(idx + 1, min(idx + 10, len(lines))):
+                    try:
+                        val = float(lines[i].replace(',', ''))
+                        numeric_fields.append(val)
+                    except (ValueError, AttributeError):
+                        continue
+                
+                # CAM is typically at index 3 or 4 in numeric_fields (after PSF, 2 deposits)
+                # Look for the first value > 10 that's reasonable relative to monthly rent
+                for val in numeric_fields[2:6]:  # Skip first 2 (PSF, first deposit), check next 4
+                    if val > 10 and val < monthly * 3:
+                        cam = val
+                        break
+                
+                # Find lease expiration date (format: MM/DD/YYYY)
+                exp_date = None
+                for i in range(idx + 1, len(lines)):
+                    match = re.search(r'(\d{2}/\d{2}/\d{4})', lines[i])
+                    if match:
+                        date_str = match.group(1)
+                        try:
+                            exp_date = datetime.strptime(date_str, '%m/%d/%Y').date()
+                            # Take the LAST date found (lease expiration, not move-in)
+                        except ValueError:
+                            pass
+                
+                # Normalize space number
+                normalized_space = normalize_space(unit, building)
+                key = f"{building}|{normalized_space}"
+                
+                yardi_data[key] = {
+                    'monthly': monthly,
+                    'cam': cam,
+                    'expiration': exp_date,
+                    'tenant': tenant_name,
+                    'raw_unit': unit,
+                }
+            
+            doc.close()
+            
+        except Exception as e:
+            # Silently skip problematic PDFs
+            pass
+    
+    return yardi_data
+
+
+def compute_yardi_diffs(tenants, yardi_data):
+    """Compare dashboard tenants with Yardi data.
+    Returns dict keyed by "Building|Space" with comma-separated diff string.
+    """
+    diffs = {}
+    
+    for tenant in tenants:
+        building = tenant.get('Building', '').strip()
+        space = str(tenant.get('Space', '')).strip()
+        
+        if not building or not space:
+            continue
+        
+        key = f"{building}|{space}"
+        
+        # Look up in Yardi data
+        yardi_entry = yardi_data.get(key)
+        
+        if not yardi_entry:
+            # Try alternate space formats
+            # If space is "2", try "102"
+            if space.isdigit() and len(space) == 1:
+                alt_key = f"{building}|10{space}"
+                yardi_entry = yardi_data.get(alt_key)
+            # If space is "201", try "2-1"
+            elif space.isdigit() and len(space) == 3:
+                first = space[0]
+                rest = space[1:]
+                alt_key = f"{building}|{first}-{rest}"
+                yardi_entry = yardi_data.get(alt_key)
+        
+        if not yardi_entry:
+            diffs[key] = "Not in Yardi"
+            continue
+        
+        # Compare monthly rent, CAM, and expiration
+        diff_parts = []
+        
+        # Monthly rent
+        dash_monthly = tenant.get('Monthly', 0) or 0
+        yardi_monthly = yardi_entry.get('monthly', 0) or 0
+        if abs(dash_monthly - yardi_monthly) > 0.01:
+            diff_parts.append(f"Monthly: ${dash_monthly:,.0f} vs ${yardi_monthly:,.0f}")
+        
+        # CAM amount
+        # Dashboard stores CAM as percentage of building expenses, Yardi stores actual monthly CAM
+        # For comparison, we need building expenses
+        # For now, just show if there's a CAM difference
+        # We'll calculate actual CAM reimbursement in render function
+        
+        # Expiration date
+        dash_exp_str = tenant.get('Exp Date', '').strip()
+        yardi_exp = yardi_entry.get('expiration')
+        
+        if dash_exp_str and dash_exp_str != 'MTM' and yardi_exp:
+            try:
+                dash_exp = datetime.strptime(dash_exp_str, '%m/%d/%Y').date()
+                if dash_exp != yardi_exp:
+                    diff_parts.append(f"Exp: {dash_exp.strftime('%m/%d/%Y')} vs {yardi_exp.strftime('%m/%d/%Y')}")
+            except (ValueError, AttributeError):
+                pass
+        
+        diffs[key] = ', '.join(diff_parts) if diff_parts else ''
+    
+    return diffs
+
+
 # --- SOP EXTRACTION ---
 @st.cache_data(ttl=86400)
 def _extract_sop_content(pdf_path, cache_token):
@@ -1003,12 +1285,17 @@ def render_tenancy_tab():
     # Get vacant spaces to flag in tenancy view
     vacant_keys, _vacant_meta = build_vacancy_lookup(tenants, include_auto=True)
 
+    # Parse Yardi data and compute diffs
+    yardi_data = parse_yardi_rent_rolls()
+    yardi_diffs = compute_yardi_diffs(tenants, yardi_data)
+
     # Summary metrics
     active = [t for t in tenants if t['Tenant'] != 'Easement']
-    # Add vacancy status
+    # Add vacancy status and Yardi diff
     for t in active:
         key = f"{t['Building']}|{t['Space']}"
         t['Status'] = '🔴 VACANT' if key in vacant_keys else ''
+        t['Yardi Diff'] = yardi_diffs.get(key, '')
     total_sf = sum(t['SF'] for t in active if t['SF'] > 1)
     total_annual = sum(t['Annual'] for t in active)
     total_monthly = sum(t['Monthly'] for t in active)
@@ -1068,7 +1355,7 @@ def render_tenancy_tab():
 
             df['Gross_Annual'] = df['Annual'] + df['CAM_Reimb']
 
-            display_cols = ['Space', 'Tenant', 'Type', 'SF', 'Lease', 'Monthly', 'Annual', 'Gross_Annual', 'PSF', 'Gross_PSF', 'CAM_Pct', 'CAM_Reimb', 'TTE_Months', 'Exp Date', 'Cancel Date', 'Options', 'Escalation', 'Next Anniv', 'Anniv_Months', 'Next Monthly', 'Delta Monthly', 'Status', 'TTE_Label', 'Is_NNN']
+            display_cols = ['Space', 'Tenant', 'Type', 'SF', 'Lease', 'Monthly', 'Annual', 'Gross_Annual', 'PSF', 'Gross_PSF', 'CAM_Pct', 'CAM_Reimb', 'TTE_Months', 'Exp Date', 'Cancel Date', 'Options', 'Escalation', 'Next Anniv', 'Anniv_Months', 'Next Monthly', 'Delta Monthly', 'Status', 'Yardi Diff', 'TTE_Label', 'Is_NNN']
 
             # Calculate building totals
             b_monthly = df['Monthly'].sum()
@@ -1137,7 +1424,7 @@ def render_tenancy_tab():
                 'PSF': f"${b_wavg_psf:,.2f}", 'Gross Annual': f"${b_gross_annual:,.0f}", 'Gross PSF': '',
                 'CAM %': '', 'CAM Reimb': f"${b_cam_reimb:,.0f}",
                 'MTE': '', 'Exp Date': '', 'Cancel Date': '', 'Options': '', 'Escalation': '', 'Next Anniversary': '', 'Anniv Δ': '',
-                'New Rent': '', 'Δ Monthly': '', 'Status': '', 'TTE Label': '', 'NNN': '',
+                'New Rent': '', 'Δ Monthly': '', 'Status': '', 'Yardi Diff': '', 'TTE Label': '', 'NNN': '',
             }]
 
             tte_formatter = JsCode("""
@@ -1219,7 +1506,7 @@ def render_tenancy_tab():
         'tenancy',
         ['Space', 'Tenant', 'Type', 'SF', 'Lease', 'Monthly', 'Annual', 'Gross Annual', 'PSF', 'Gross PSF',
          'CAM %', 'CAM Reimb', 'MTE', 'Exp Date', 'Cancel Date', 'Options', 'Escalation',
-         'Next Anniversary', 'Anniv Δ', 'New Rent', 'Δ Monthly', 'Status']
+         'Next Anniversary', 'Anniv Δ', 'New Rent', 'Δ Monthly', 'Status', 'Yardi Diff']
     )
     render_expense_editor()
 
@@ -1973,7 +2260,7 @@ def render_yardi_tab():
                         st.rerun()
 
                     page = doc[pg]
-                    pix = page.get_pixmap(matrix=fitz.Matrix(1.25, 1.25))
+                    pix = page.get_pixmap(matrix=fitz.Matrix(0.9, 0.9))
                     img_b64 = base64.b64encode(pix.tobytes("png")).decode()
                     doc.close()
                     st.markdown(f'<img src="data:image/png;base64,{img_b64}" style="width:100%;border-radius:6px;">', unsafe_allow_html=True)
