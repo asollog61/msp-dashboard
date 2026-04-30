@@ -1630,10 +1630,19 @@ def render_tenancy_tab():
                     return params.value.toString();
                 }
             """)
+            yardi_diff_style = JsCode("""
+                function(params) {
+                    if (params.value && params.value.trim() !== '') {
+                        return {'background-color': 'rgba(255, 200, 0, 0.35)', 'color': '#fff'};
+                    }
+                    return {};
+                }
+            """)
             column_configs = {
                 'Space': {'type': ['textColumn']},
                 'MTE': {'type': ['numericColumn'], 'valueFormatter': tte_formatter, 'cellStyle': mte_cell_style},
                 'Anniv Δ': {'type': ['numericColumn'], 'valueFormatter': anniv_formatter},
+                'Yardi Diff': {'cellStyle': yardi_diff_style},
                 'TTE Label': {'hide': True},
                 'NNN': {'hide': True},
             }
