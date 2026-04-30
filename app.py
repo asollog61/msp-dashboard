@@ -790,9 +790,13 @@ def scan_coi_files():
     for building_name, mapping in BUILDING_MAP.items():
         cert_dir = None
         # Priority 1: bundled COI folder (works on Streamlit Cloud)
+        # Try both the short name (e.g. "114 Central") and dest_folder name (e.g. "114 Central Westfield")
         candidate = bundled_coi / building_name
+        candidate_dest = bundled_coi / mapping["dest_folder"]
         if candidate.exists():
             cert_dir = candidate
+        elif candidate_dest.exists():
+            cert_dir = candidate_dest
         # Priority 2: ACTIVE_PROPERTIES local path
         elif ACTIVE_PROPS_ROOT:
             cert_dir = ACTIVE_PROPS_ROOT / mapping["dest_folder"] / mapping["share"] / "Certificates of Insurance"
