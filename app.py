@@ -1636,7 +1636,8 @@ def render_tenancy_tab():
             """)
             yardi_diff_style = JsCode("""
                 function(params) {
-                    if (params.value && params.value.trim() !== '') {
+                    if (params.node.rowPinned) return {};
+                    if (params.value && String(params.value).trim() !== '') {
                         return {'background-color': 'rgba(255, 200, 0, 0.35)', 'color': '#fff'};
                     }
                     return {};
@@ -1644,8 +1645,9 @@ def render_tenancy_tab():
             """)
             yardi_monthly_style = JsCode("""
                 function(params) {
-                    var diff = params.data && params.data['Yardi Diff'];
-                    if (diff && diff.indexOf('Monthly') !== -1) {
+                    if (!params.data || params.node.rowPinned) return {};
+                    var diff = params.data['Yardi Diff'] || '';
+                    if (diff.indexOf('Monthly') !== -1) {
                         return {'background-color': 'rgba(255, 200, 0, 0.35)', 'color': '#fff'};
                     }
                     return {};
@@ -1653,8 +1655,9 @@ def render_tenancy_tab():
             """)
             yardi_exp_style = JsCode("""
                 function(params) {
-                    var diff = params.data && params.data['Yardi Diff'];
-                    if (diff && diff.indexOf('Exp') !== -1) {
+                    if (!params.data || params.node.rowPinned) return {};
+                    var diff = params.data['Yardi Diff'] || '';
+                    if (diff.indexOf('Exp') !== -1) {
                         return {'background-color': 'rgba(255, 200, 0, 0.35)', 'color': '#fff'};
                     }
                     return {};
