@@ -1919,10 +1919,10 @@ def render_vacancy_tab():
     else:
         st.success("✅ No currently vacant spaces — 100% occupied!")
 
-    # At risk — exclude spaces already marked vacant (manual only)
+    # At risk — exclude spaces already shown as vacant (manual + auto)
     st.markdown("### 🟡 At Risk — Expiring Within 12 Months")
     at_risk = [t for t in active if (t.get('TTE_Label') == 'MTM' or (0 < t['TTE_Days'] <= 365))
-               and f"{t['Building']}|{t['Space']}" not in manual_keys]
+               and f"{t['Building']}|{t['Space']}" not in all_vacant_keys]
     if at_risk:
         import pandas as pd
         risk_df = pd.DataFrame(at_risk)[['Building', 'Space', 'Tenant', 'SF', 'Monthly', 'TTE_Months', 'Exp Date']]
