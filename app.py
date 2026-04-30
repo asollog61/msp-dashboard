@@ -1145,21 +1145,43 @@ def parse_yardi_rent_rolls():
 def compute_yardi_diffs(tenants, yardi_data):
     """Compare dashboard tenants with Yardi data.
     Returns dict keyed by "Building|Space" with comma-separated diff string.
+    Uses the Google Sheets lookup table (Config: Yardi Names) as the PRIMARY
+    matching method — same table that drives the Yardi Reconcile tab.
+    Falls back to direct space match and fuzzy name match only if no lookup entry.
     """
+    import json as _json
     diffs = {}
 
-    # Build a reverse lookup by building -> list of (key, entry) for fuzzy matching
+    # --- Load the authoritative lookup table (Yardi key -> spreadsheet tenant name) ---
+    name_map = {}  # "Building|YardiSpace" -> spreadsheet tenant name
+    try:
+        raw = _read_gsheet_config("Config: Yardi Names")
+        if raw:
+            name_map = _json.loads(raw)
+    except Exception:
+        pass
+
+    # Build reverse map: "Building|TenantName" -> yardi_entry
+    # so we can go from spreadsheet tenant name back to the Yardi data
+    yardi_by_key = yardi_data  # already keyed by "Building|YardiSpace"
+
+    # Build index: spreadsheet tenant name -> list of yardi entries matched via lookup
+    reverse_lookup = {}  # "Building|SheetTenantName" -> yardi_entry
+    for yardi_key, sheet_name in name_map.items():
+        if sheet_name and yardi_key in yardi_by_key:
+            building = yardi_key.split('|')[0]
+            reverse_lookup[f"{building}|{sheet_name}"] = yardi_by_key[yardi_key]
+
+    # Build fallback: fuzzy tenant name matching
     building_yardi = {}
     for yk, yv in yardi_data.items():
         bld = yk.split('|')[0]
         building_yardi.setdefault(bld, []).append((yk, yv))
 
     def _fuzzy_tenant_match(tenant_name, building):
-        """Fall back to matching by tenant name when space numbers don't align."""
         if not tenant_name or 'VACANT' in tenant_name.upper():
             return None
         t_lower = tenant_name.lower()
-        # Extract significant words (skip common filler)
         skip = {'llc', 'inc', 'corp', 'dba', 'd/b/a', 'the', 'of', 'and', '&'}
         t_words = set(w for w in re.split(r'[\s_\-\.,/]+', t_lower) if w not in skip and len(w) > 2)
         best_match = None
@@ -1179,47 +1201,32 @@ def compute_yardi_diffs(tenants, yardi_data):
     for tenant in tenants:
         building = tenant.get('Building', '').strip()
         space = str(tenant.get('Space', '')).strip()
-        
+        tenant_name = (tenant.get('Tenant', '') or '').strip()
+
         if not building or not space:
             continue
-        
+
         key = f"{building}|{space}"
-        tenant_name = tenant.get('Tenant', '') or ''
-        
-        # Skip vacant units entirely
+
+        # Skip vacant units
         if 'VACANT' in tenant_name.upper():
             continue
 
-        # Look up in Yardi data — try direct key first
-        yardi_entry = yardi_data.get(key)
-        
-        if not yardi_entry:
-            # Try alternate space formats
-            alt_keys = []
-            if space.isdigit() and len(space) == 1:
-                # Dashboard "1" might be Yardi "101", "102", "10{space}", "A-1", "O-1", "EXTERIOR", "ROOF"
-                alt_keys.append(f"{building}|10{space}")
-                alt_keys.append(f"{building}|A-{space}")
-                alt_keys.append(f"{building}|O-{space}")
-            elif space.isdigit() and len(space) == 3:
-                # Dashboard "201" might be Yardi "2-1" or "2-01"
-                first = space[0]
-                rest = space[1:]
-                alt_keys.append(f"{building}|{first}-{rest}")
-                alt_keys.append(f"{building}|{first}-{rest.lstrip('0') or '0'}")
-            elif space.isdigit() and len(space) == 4:
-                # Dashboard "1286" might just be "1286" (already tried direct)
-                pass
+        yardi_entry = None
 
-            for alt_key in alt_keys:
-                yardi_entry = yardi_data.get(alt_key)
-                if yardi_entry:
-                    break
+        # METHOD 1 (primary): Use the lookup table — match by tenant name via reverse_lookup
+        if tenant_name:
+            lookup_key = f"{building}|{tenant_name}"
+            yardi_entry = reverse_lookup.get(lookup_key)
 
+        # METHOD 2 (fallback): Direct space key match
         if not yardi_entry:
-            # Last resort: fuzzy match by tenant name within same building
+            yardi_entry = yardi_data.get(key)
+
+        # METHOD 3 (last resort): Fuzzy tenant name match
+        if not yardi_entry:
             yardi_entry = _fuzzy_tenant_match(tenant_name, building)
-        
+
         if not yardi_entry:
             diffs[key] = "Not in Yardi"
             continue
