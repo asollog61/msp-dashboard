@@ -1638,10 +1638,30 @@ def render_tenancy_tab():
                     return {};
                 }
             """)
+            yardi_monthly_style = JsCode("""
+                function(params) {
+                    var diff = params.data && params.data['Yardi Diff'];
+                    if (diff && diff.indexOf('Monthly') !== -1) {
+                        return {'background-color': 'rgba(255, 200, 0, 0.35)', 'color': '#fff'};
+                    }
+                    return {};
+                }
+            """)
+            yardi_exp_style = JsCode("""
+                function(params) {
+                    var diff = params.data && params.data['Yardi Diff'];
+                    if (diff && diff.indexOf('Exp') !== -1) {
+                        return {'background-color': 'rgba(255, 200, 0, 0.35)', 'color': '#fff'};
+                    }
+                    return {};
+                }
+            """)
             column_configs = {
                 'Space': {'type': ['textColumn']},
                 'MTE': {'type': ['numericColumn'], 'valueFormatter': tte_formatter, 'cellStyle': mte_cell_style},
                 'Anniv Δ': {'type': ['numericColumn'], 'valueFormatter': anniv_formatter},
+                'Monthly': {'cellStyle': yardi_monthly_style},
+                'Exp Date': {'cellStyle': yardi_exp_style},
                 'Yardi Diff': {'cellStyle': yardi_diff_style},
                 'TTE Label': {'hide': True},
                 'NNN': {'hide': True},
