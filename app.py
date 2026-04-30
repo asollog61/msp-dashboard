@@ -551,7 +551,7 @@ def delete_marketing_entry(row_idx):
 
 
 # --- TENANCY DATA ---
-@st.cache_data(ttl=3600)
+@st.cache_data(ttl=300)
 def load_tenancy():
     if not TENANCY_FILE:
         return [], {}, []
@@ -782,7 +782,7 @@ def fuzzy_match_tenant(tenant_name, cert_name):
     return len(set(t_words) & set(c_words)) >= 1
 
 
-@st.cache_data(ttl=3600)
+@st.cache_data(ttl=300)
 def scan_coi_files():
     coi_data = {}
     # Check for COIs bundled in data/coi/{building}/ (Streamlit Cloud) or ACTIVE_PROPERTIES (local)
@@ -854,7 +854,7 @@ def normalize_space(space_str, building=None):
     return s
 
 
-@st.cache_data(ttl=3600)
+@st.cache_data(ttl=300)
 def parse_yardi_deposit_activity():
     """Parse Security Deposit Activity pages from Yardi PDFs.
     Returns dict keyed by 'Building|Space' with Deposits On Hand amount."""
@@ -951,7 +951,7 @@ def parse_yardi_deposit_activity():
     return deposit_data
 
 
-@st.cache_data(ttl=3600)
+@st.cache_data(ttl=300)
 def parse_yardi_rent_rolls():
     """Parse Yardi monthly statement PDFs from data/Yardi/ folder.
     Returns dict keyed by "Building|Space" with {monthly, cam, expiration, tenant}.
@@ -1268,7 +1268,7 @@ def compute_yardi_diffs(tenants, yardi_data):
 
 
 # --- SOP EXTRACTION ---
-@st.cache_data(ttl=86400)
+@st.cache_data(ttl=300)
 def _extract_sop_content(pdf_path, cache_token):
     if not pdf_path or not HAS_PYMUPDF:
         return [], {}
