@@ -1395,23 +1395,42 @@ def render_sop_tab():
 
         st.markdown(f'<img src="data:image/png;base64,{b64_img}" style="width:100%; border-radius:6px; border:1px solid rgba(255,255,255,0.1);">', unsafe_allow_html=True)
     else:
-        # Desktop: embedded PDF viewer
+        # Desktop: page-by-page image view (same as mobile, higher res)
         import base64
-        with open(SOP_PDF, "rb") as f:
-            pdf_bytes = f.read()
-        b64 = base64.b64encode(pdf_bytes).decode()
+        if HAS_PYMUPDF:
+            doc = fitz.open(SOP_PDF)
+            total_pages = len(doc)
 
-        st.markdown(f"""
-            <iframe
-                src="data:application/pdf;base64,{b64}"
-                width="100%"
-                height="1600px"
-                style="border: 1px solid rgba(255,255,255,0.1); border-radius: 6px;"
-            >
-                Your browser does not support PDF viewing.
-                <a href="data:application/pdf;base64,{b64}" download="Marion_St_SOP_Manual.pdf">Download PDF</a>
-            </iframe>
-        """, unsafe_allow_html=True)
+            if 'sop_page' not in st.session_state:
+                st.session_state.sop_page = 0
+
+            page_num = st.session_state.sop_page
+            page_num = max(0, min(page_num, total_pages - 1))
+
+            page = doc[page_num]
+            mat = fitz.Matrix(1.5, 1.5)
+            pix = page.get_pixmap(matrix=mat)
+            img_bytes = pix.tobytes("png")
+            b64_img = base64.b64encode(img_bytes).decode()
+            doc.close()
+
+            col_prev, col_num, col_next, col_dl = st.columns([1, 2, 1, 2])
+            if col_prev.button("⬅️ Prev", disabled=(page_num == 0), key="sop_prev_d"):
+                st.session_state.sop_page = page_num - 1
+                st.rerun()
+            col_num.markdown(f"<div style='text-align:center; padding-top:8px;'>{page_num + 1} / {total_pages}</div>", unsafe_allow_html=True)
+            if col_next.button("Next ➡️", disabled=(page_num >= total_pages - 1), key="sop_next_d"):
+                st.session_state.sop_page = page_num + 1
+                st.rerun()
+            with open(SOP_PDF, "rb") as f:
+                col_dl.download_button("⬇️ Download PDF", data=f.read(), file_name="Marion_St_SOP_Manual.pdf", mime="application/pdf", key="sop_dl")
+
+            st.markdown(f'<img src="data:image/png;base64,{b64_img}" style="width:100%; border-radius:6px; border:1px solid rgba(255,255,255,0.1);">', unsafe_allow_html=True)
+        else:
+            with open(SOP_PDF, "rb") as f:
+                pdf_bytes = f.read()
+            b64 = base64.b64encode(pdf_bytes).decode()
+            st.markdown(f'<iframe src="data:application/pdf;base64,{b64}" width="100%" height="1600px" style="border:1px solid rgba(255,255,255,0.1);border-radius:6px;"></iframe>', unsafe_allow_html=True)
 
 
 def render_tenancy_tab():
@@ -2450,14 +2469,9 @@ def render_yardi_tab():
             else:
                 display_name = pdf.stem.replace('_', ' ').replace('-', ' ')
 
-            col_name, col_view, col_dl = st.columns([4, 1, 1])
-            col_name.markdown(f"<div style='padding-top:4px;margin-bottom:-8px;'>📄 <b>{display_name}</b></div>", unsafe_allow_html=True)
-            view_key = f"view_{pdf.name}"
-            if col_view.button("👁️", key=view_key, help="Preview"):
-                st.session_state[f"preview_{pdf.name}"] = not st.session_state.get(f"preview_{pdf.name}", False)
-            col_dl.download_button("⬇️", data=pdf_bytes, file_name=pdf.name, mime="application/pdf", key=f"dl_{pdf.name}")
-
-            if st.session_state.get(f"preview_{pdf.name}", False):
+            with st.expander(f"📄 {display_name}", expanded=False):
+                col_dl_inner, col_spacer = st.columns([2, 5])
+                col_dl_inner.download_button("⬇️ Download", data=pdf_bytes, file_name=pdf.name, mime="application/pdf", key=f"dl_{pdf.name}")
                 if st.session_state.get('mobile_view', False) and HAS_PYMUPDF:
                     doc = fitz.open(str(pdf))
                     total_pages = len(doc)
