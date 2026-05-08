@@ -2436,7 +2436,7 @@ def render_yardi_tab():
     for building, files in building_files.items():
         code = BUILDING_MAP.get(building, {}).get('code', '')
         label = f"{building} ({code})" if code else building
-        st.markdown(f'<div class="building-header"><strong>▎ {label}</strong> — {len(files)} report(s)</div>', unsafe_allow_html=True)
+        st.markdown(f'<div style="margin:8px 0 2px 0;font-size:0.95em;"><strong>▎ {label}</strong> — {len(files)} report(s)</div>', unsafe_allow_html=True)
 
         for pdf in files:
             with open(pdf, "rb") as f:
@@ -2450,15 +2450,36 @@ def render_yardi_tab():
             else:
                 display_name = pdf.stem.replace('_', ' ').replace('-', ' ')
 
-            col_name, col_btn = st.columns([5, 2])
-            col_name.markdown(f"📄 **{display_name}**")
-            col_btn.download_button(
-                "⬇️ Download",
-                data=pdf_bytes,
-                file_name=pdf.name,
-                mime="application/pdf",
-                key=f"dl_{pdf.name}"
-            )
+            col_name, col_view, col_dl = st.columns([4, 1, 1])
+            col_name.markdown(f"<div style='padding-top:4px;margin-bottom:-8px;'>📄 <b>{display_name}</b></div>", unsafe_allow_html=True)
+            view_key = f"view_{pdf.name}"
+            if col_view.button("👁️", key=view_key, help="Preview"):
+                st.session_state[f"preview_{pdf.name}"] = not st.session_state.get(f"preview_{pdf.name}", False)
+            col_dl.download_button("⬇️", data=pdf_bytes, file_name=pdf.name, mime="application/pdf", key=f"dl_{pdf.name}")
+
+            if st.session_state.get(f"preview_{pdf.name}", False):
+                if st.session_state.get('mobile_view', False) and HAS_PYMUPDF:
+                    doc = fitz.open(str(pdf))
+                    total_pages = len(doc)
+                    page_key = f"yardi_page_{pdf.name}"
+                    if page_key not in st.session_state:
+                        st.session_state[page_key] = 0
+                    pg = max(0, min(st.session_state[page_key], total_pages - 1))
+                    cp, cn_num, cn = st.columns([1, 2, 1])
+                    if cp.button("⬅️", disabled=(pg == 0), key=f"yp_{pdf.name}"):
+                        st.session_state[page_key] = pg - 1
+                        st.rerun()
+                    cn_num.markdown(f"<div style='text-align:center;padding-top:8px;'>{pg+1} / {total_pages}</div>", unsafe_allow_html=True)
+                    if cn.button("➡️", disabled=(pg >= total_pages - 1), key=f"yn_{pdf.name}"):
+                        st.session_state[page_key] = pg + 1
+                        st.rerun()
+                    page = doc[pg]
+                    pix = page.get_pixmap(matrix=fitz.Matrix(0.9, 0.9))
+                    img_b64 = base64.b64encode(pix.tobytes("png")).decode()
+                    doc.close()
+                    st.markdown(f'<img src="data:image/png;base64,{img_b64}" style="width:100%;border-radius:6px;">', unsafe_allow_html=True)
+                else:
+                    st.markdown(f'<iframe src="data:application/pdf;base64,{b64}" width="100%" height="600px" style="border:1px solid rgba(255,255,255,0.1);border-radius:6px;"></iframe>', unsafe_allow_html=True)
 
 
 def render_reconcile_tab():
