@@ -551,7 +551,7 @@ def delete_marketing_entry(row_idx):
 
 
 # --- TENANCY DATA ---
-@st.cache_data(ttl=300)
+@st.cache_data(ttl=3600)
 def load_tenancy():
     if not TENANCY_FILE:
         return [], {}, []
@@ -782,7 +782,7 @@ def fuzzy_match_tenant(tenant_name, cert_name):
     return len(set(t_words) & set(c_words)) >= 1
 
 
-@st.cache_data(ttl=300)
+@st.cache_data(ttl=3600)
 def scan_coi_files():
     coi_data = {}
     # Check for COIs bundled in data/coi/{building}/ (Streamlit Cloud) or ACTIVE_PROPERTIES (local)
@@ -790,13 +790,9 @@ def scan_coi_files():
     for building_name, mapping in BUILDING_MAP.items():
         cert_dir = None
         # Priority 1: bundled COI folder (works on Streamlit Cloud)
-        # Try both the short name (e.g. "114 Central") and dest_folder name (e.g. "114 Central Westfield")
         candidate = bundled_coi / building_name
-        candidate_dest = bundled_coi / mapping["dest_folder"]
         if candidate.exists():
             cert_dir = candidate
-        elif candidate_dest.exists():
-            cert_dir = candidate_dest
         # Priority 2: ACTIVE_PROPERTIES local path
         elif ACTIVE_PROPS_ROOT:
             cert_dir = ACTIVE_PROPS_ROOT / mapping["dest_folder"] / mapping["share"] / "Certificates of Insurance"
@@ -854,35 +850,77 @@ def normalize_space(space_str, building=None):
     return s
 
 
-@st.cache_data(ttl=300)
-def parse_yardi_deposit_activity():
-    """Parse Security Deposit Activity pages from Yardi PDFs.
-    Returns dict keyed by 'Building|Space' with Deposits On Hand amount."""
-    if not HAS_PYMUPDF:
-        return {}
-
-    yardi_dir = None
+@st.cache_data(ttl=3600)
+def _get_yardi_dir():
+    """Return the Yardi PDF directory path, or None."""
     for p in [
         os.path.join(os.path.dirname(__file__), "data", "Yardi"),
         "/home/node/OpenClaw/Share Jason/General Procedures/msp-dashboard-src/data/Yardi/",
     ]:
         if os.path.exists(p):
-            yardi_dir = Path(p)
-            break
+            return Path(p)
+    return None
 
+
+YARDI_FILENAME_MAP = {
+    "1280-springfield": "1280 Springfield",
+    "15-south": "15 South",
+    "36-south": "36 South",
+    "114-central": "114 Central",
+}
+
+MONTH_ORDER = {
+    'jan': 1, 'feb': 2, 'mar': 3, 'apr': 4, 'may': 5, 'jun': 6,
+    'jul': 7, 'aug': 8, 'sep': 9, 'oct': 10, 'nov': 11, 'dec': 12,
+}
+
+
+def _filter_latest_per_building(pdfs):
+    """Given a list of PDF paths, return only the most recent per building.
+    Filenames start with Mon-YYYY (e.g., May-2026_...). Returns list of Paths."""
+    building_best = {}  # building_key -> (sort_key, path)
+    for pdf_path in pdfs:
+        fname = pdf_path.stem.lower()
+        # Identify building
+        building_key = None
+        for key in YARDI_FILENAME_MAP:
+            if key in fname:
+                building_key = key
+                break
+        if not building_key:
+            continue
+        # Parse date from filename: Mon-YYYY
+        match = re.match(r'^([a-z]{3})-(\d{4})', fname)
+        if match:
+            mon_str, year_str = match.group(1), match.group(2)
+            sort_key = int(year_str) * 100 + MONTH_ORDER.get(mon_str, 0)
+        else:
+            sort_key = 0
+        prev = building_best.get(building_key)
+        if not prev or sort_key > prev[0]:
+            building_best[building_key] = (sort_key, pdf_path)
+    return [v[1] for v in building_best.values()]
+
+
+def parse_yardi_deposit_activity(latest_only=True):
+    """Parse Security Deposit Activity pages from Yardi PDFs.
+    Returns dict keyed by 'Building|Space' with Deposits On Hand amount.
+    If latest_only=True, only parses the most recent report per building."""
+    if not HAS_PYMUPDF:
+        return {}
+
+    yardi_dir = _get_yardi_dir()
     if not yardi_dir or not yardi_dir.exists():
         return {}
 
-    filename_map = {
-        "1280-springfield": "1280 Springfield",
-        "15-south": "15 South",
-        "36-south": "36 South",
-        "114-central": "114 Central",
-    }
+    filename_map = YARDI_FILENAME_MAP
 
     deposit_data = {}
 
-    for pdf_path in sorted(yardi_dir.glob("*.pdf")):
+    all_pdfs = sorted(yardi_dir.glob("*.pdf"))
+    pdf_list = _filter_latest_per_building(all_pdfs) if latest_only else all_pdfs
+
+    for pdf_path in pdf_list:
         filename_lower = pdf_path.stem.lower()
         building = None
         for key, name in filename_map.items():
@@ -951,37 +989,27 @@ def parse_yardi_deposit_activity():
     return deposit_data
 
 
-@st.cache_data(ttl=300)
-def parse_yardi_rent_rolls():
+@st.cache_data(ttl=3600)
+def parse_yardi_rent_rolls(latest_only=True):
     """Parse Yardi monthly statement PDFs from data/Yardi/ folder.
     Returns dict keyed by "Building|Space" with {monthly, cam, expiration, tenant}.
+    If latest_only=True, only parses the most recent report per building.
     """
     if not HAS_PYMUPDF:
         return {}
     
-    yardi_dir = None
-    for p in [
-        os.path.join(os.path.dirname(__file__), "data", "Yardi"),
-        "/home/node/OpenClaw/Share Jason/General Procedures/msp-dashboard-src/data/Yardi/",
-    ]:
-        if os.path.exists(p):
-            yardi_dir = Path(p)
-            break
-    
+    yardi_dir = _get_yardi_dir()
     if not yardi_dir or not yardi_dir.exists():
         return {}
     
-    # Building name mapping from filenames
-    filename_map = {
-        "1280-springfield": "1280 Springfield",
-        "15-south": "15 South",
-        "36-south": "36 South",
-        "114-central": "114 Central",
-    }
+    filename_map = YARDI_FILENAME_MAP
     
     yardi_data = {}
     
-    for pdf_path in sorted(yardi_dir.glob("*.pdf")):
+    all_pdfs = sorted(yardi_dir.glob("*.pdf"))
+    pdf_list = _filter_latest_per_building(all_pdfs) if latest_only else all_pdfs
+
+    for pdf_path in pdf_list:
         # Extract building name from filename
         filename_lower = pdf_path.stem.lower()
         building = None
@@ -1030,9 +1058,7 @@ def parse_yardi_rent_rolls():
                     continue
                 
                 # Skip if doesn't look like a unit number
-                # Allow named units like EXTERIOR, ROOF, PARKING (Yardi uses these)
-                known_named_units = {'EXTERIOR', 'ROOF', 'PARKING', 'BASEMENT', 'GARAGE', 'STORAGE'}
-                if not any(c.isdigit() for c in unit) and unit.upper() not in known_named_units:
+                if not any(c.isdigit() for c in unit):
                     continue
                 
                 # Parse the tenant line
@@ -1084,7 +1110,9 @@ def parse_yardi_rent_rolls():
                 monthly_str = lines[idx]
                 try:
                     monthly = float(monthly_str.replace(',', ''))
-                    # Allow $0 rent tenants (e.g. Verizon roof leases) — they still need matching
+                    # Sanity check - monthly rent should be > 0
+                    if monthly <= 0:
+                        continue
                 except (ValueError, AttributeError):
                     continue
                 
@@ -1149,88 +1177,34 @@ def parse_yardi_rent_rolls():
 def compute_yardi_diffs(tenants, yardi_data):
     """Compare dashboard tenants with Yardi data.
     Returns dict keyed by "Building|Space" with comma-separated diff string.
-    Uses the Google Sheets lookup table (Config: Yardi Names) as the PRIMARY
-    matching method — same table that drives the Yardi Reconcile tab.
-    Falls back to direct space match and fuzzy name match only if no lookup entry.
     """
-    import json as _json
     diffs = {}
-
-    # --- Load the authoritative lookup table (Yardi key -> spreadsheet tenant name) ---
-    name_map = {}  # "Building|YardiSpace" -> spreadsheet tenant name
-    try:
-        raw = _read_gsheet_config("Config: Yardi Names")
-        if raw:
-            name_map = _json.loads(raw)
-    except Exception:
-        pass
-
-    # Build reverse map: "Building|TenantName" -> yardi_entry
-    # so we can go from spreadsheet tenant name back to the Yardi data
-    yardi_by_key = yardi_data  # already keyed by "Building|YardiSpace"
-
-    # Build index: spreadsheet tenant name -> list of yardi entries matched via lookup
-    reverse_lookup = {}  # "Building|SheetTenantName" -> yardi_entry
-    for yardi_key, sheet_name in name_map.items():
-        if sheet_name and yardi_key in yardi_by_key:
-            building = yardi_key.split('|')[0]
-            reverse_lookup[f"{building}|{sheet_name}"] = yardi_by_key[yardi_key]
-
-    # Build fallback: fuzzy tenant name matching
-    building_yardi = {}
-    for yk, yv in yardi_data.items():
-        bld = yk.split('|')[0]
-        building_yardi.setdefault(bld, []).append((yk, yv))
-
-    def _fuzzy_tenant_match(tenant_name, building):
-        if not tenant_name or 'VACANT' in tenant_name.upper():
-            return None
-        t_lower = tenant_name.lower()
-        skip = {'llc', 'inc', 'corp', 'dba', 'd/b/a', 'the', 'of', 'and', '&'}
-        t_words = set(w for w in re.split(r'[\s_\-\.,/]+', t_lower) if w not in skip and len(w) > 2)
-        best_match = None
-        best_score = 0
-        for yk, yv in building_yardi.get(building, []):
-            y_name = (yv.get('tenant') or '').lower()
-            y_words = set(w for w in re.split(r'[\s_\-\.,/]+', y_name) if w not in skip and len(w) > 2)
-            if not t_words or not y_words:
-                continue
-            overlap = len(t_words & y_words)
-            score = overlap / max(len(t_words), len(y_words))
-            if score > best_score and score >= 0.3:
-                best_score = score
-                best_match = yv
-        return best_match
-
+    
     for tenant in tenants:
         building = tenant.get('Building', '').strip()
         space = str(tenant.get('Space', '')).strip()
-        tenant_name = (tenant.get('Tenant', '') or '').strip()
-
+        
         if not building or not space:
             continue
-
+        
         key = f"{building}|{space}"
-
-        # Skip vacant units
-        if 'VACANT' in tenant_name.upper():
-            continue
-
-        yardi_entry = None
-
-        # METHOD 1 (primary): Use the lookup table — match by tenant name via reverse_lookup
-        if tenant_name:
-            lookup_key = f"{building}|{tenant_name}"
-            yardi_entry = reverse_lookup.get(lookup_key)
-
-        # METHOD 2 (fallback): Direct space key match
+        
+        # Look up in Yardi data
+        yardi_entry = yardi_data.get(key)
+        
         if not yardi_entry:
-            yardi_entry = yardi_data.get(key)
-
-        # METHOD 3 (last resort): Fuzzy tenant name match
-        if not yardi_entry:
-            yardi_entry = _fuzzy_tenant_match(tenant_name, building)
-
+            # Try alternate space formats
+            # If space is "2", try "102"
+            if space.isdigit() and len(space) == 1:
+                alt_key = f"{building}|10{space}"
+                yardi_entry = yardi_data.get(alt_key)
+            # If space is "201", try "2-1"
+            elif space.isdigit() and len(space) == 3:
+                first = space[0]
+                rest = space[1:]
+                alt_key = f"{building}|{first}-{rest}"
+                yardi_entry = yardi_data.get(alt_key)
+        
         if not yardi_entry:
             diffs[key] = "Not in Yardi"
             continue
@@ -1268,7 +1242,7 @@ def compute_yardi_diffs(tenants, yardi_data):
 
 
 # --- SOP EXTRACTION ---
-@st.cache_data(ttl=300)
+@st.cache_data(ttl=86400)
 def _extract_sop_content(pdf_path, cache_token):
     if not pdf_path or not HAS_PYMUPDF:
         return [], {}
@@ -1634,42 +1608,10 @@ def render_tenancy_tab():
                     return params.value.toString();
                 }
             """)
-            yardi_diff_style = JsCode("""
-                function(params) {
-                    if (params.node.rowPinned) return {};
-                    if (params.value && String(params.value).trim() !== '') {
-                        return {'background-color': 'rgba(255, 200, 0, 0.35)', 'color': '#fff'};
-                    }
-                    return {};
-                }
-            """)
-            yardi_monthly_style = JsCode("""
-                function(params) {
-                    if (!params.data || params.node.rowPinned) return {};
-                    var diff = params.data['Yardi Diff'] || '';
-                    if (diff.indexOf('Monthly') !== -1) {
-                        return {'background-color': 'rgba(255, 200, 0, 0.35)', 'color': '#fff'};
-                    }
-                    return {};
-                }
-            """)
-            yardi_exp_style = JsCode("""
-                function(params) {
-                    if (!params.data || params.node.rowPinned) return {};
-                    var diff = params.data['Yardi Diff'] || '';
-                    if (diff.indexOf('Exp') !== -1) {
-                        return {'background-color': 'rgba(255, 200, 0, 0.35)', 'color': '#fff'};
-                    }
-                    return {};
-                }
-            """)
             column_configs = {
                 'Space': {'type': ['textColumn']},
                 'MTE': {'type': ['numericColumn'], 'valueFormatter': tte_formatter, 'cellStyle': mte_cell_style},
                 'Anniv Δ': {'type': ['numericColumn'], 'valueFormatter': anniv_formatter},
-                'Monthly': {'cellStyle': yardi_monthly_style},
-                'Exp Date': {'cellStyle': yardi_exp_style},
-                'Yardi Diff': {'cellStyle': yardi_diff_style},
                 'TTE Label': {'hide': True},
                 'NNN': {'hide': True},
             }
@@ -1946,10 +1888,10 @@ def render_vacancy_tab():
     else:
         st.success("✅ No currently vacant spaces — 100% occupied!")
 
-    # At risk — exclude spaces already shown as vacant (manual + auto)
+    # At risk — exclude spaces already marked vacant (manual only)
     st.markdown("### 🟡 At Risk — Expiring Within 12 Months")
     at_risk = [t for t in active if (t.get('TTE_Label') == 'MTM' or (0 < t['TTE_Days'] <= 365))
-               and f"{t['Building']}|{t['Space']}" not in all_vacant_keys]
+               and f"{t['Building']}|{t['Space']}" not in manual_keys]
     if at_risk:
         import pandas as pd
         risk_df = pd.DataFrame(at_risk)[['Building', 'Space', 'Tenant', 'SF', 'Monthly', 'TTE_Months', 'Exp Date']]
