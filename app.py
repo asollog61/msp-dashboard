@@ -1408,9 +1408,26 @@ def render_sop_tab():
             page_num = max(0, min(page_num, total_pages - 1))
 
             page = doc[page_num]
-            mat = fitz.Matrix(1.5, 1.5)
+            mat = fitz.Matrix(2.0, 2.0)
             pix = page.get_pixmap(matrix=mat)
+            # Crop whitespace/margins from the rendered page
             img_bytes = pix.tobytes("png")
+            # Use fitz to detect content bbox and crop
+            try:
+                content_rect = page.get_text("dict", flags=0).get("width", 0)
+                # Simpler: use CropBox or trim via pixmap
+                # Get the actual content bounding box
+                clip = page.rect
+                # Try trimming margins: typical PDF has ~72pt margins on letter (612x792)
+                pw, ph = page.rect.width, page.rect.height
+                margin_x = pw * 0.06  # ~6% margins
+                margin_top = ph * 0.04
+                margin_bot = ph * 0.04
+                trimmed = fitz.Rect(margin_x, margin_top, pw - margin_x, ph - margin_bot)
+                pix2 = page.get_pixmap(matrix=mat, clip=trimmed)
+                img_bytes = pix2.tobytes("png")
+            except Exception:
+                pass  # Fall back to full page render
             b64_img = base64.b64encode(img_bytes).decode()
             doc.close()
 
@@ -1425,7 +1442,7 @@ def render_sop_tab():
             with open(SOP_PDF, "rb") as f:
                 col_dl.download_button("⬇️ Download PDF", data=f.read(), file_name="Marion_St_SOP_Manual.pdf", mime="application/pdf", key="sop_dl")
 
-            st.markdown(f'<img src="data:image/png;base64,{b64_img}" style="width:100%; border-radius:6px; border:1px solid rgba(255,255,255,0.1);">', unsafe_allow_html=True)
+            st.markdown(f'<img src="data:image/png;base64,{b64_img}" style="width:100%; max-width:900px; border-radius:6px; border:1px solid rgba(255,255,255,0.1); display:block; margin:0 auto;">', unsafe_allow_html=True)
         else:
             with open(SOP_PDF, "rb") as f:
                 pdf_bytes = f.read()
