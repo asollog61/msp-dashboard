@@ -1032,8 +1032,9 @@ def parse_yardi_rent_rolls(latest_only=True):
             page = doc[2]
             
             # Check if this is the Monthly Rent Roll page
+            # Look for key headers: "Unit", "Tenant Name", "Actual Rent"
             text = page.get_text()
-            if "Rent Roll Monthly" not in text:
+            if not all(keyword in text for keyword in ["Unit", "Tenant Name", "Actual Rent"]):
                 doc.close()
                 continue
             
