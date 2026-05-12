@@ -1058,8 +1058,9 @@ def parse_yardi_rent_rolls(latest_only=True):
                 if unit.upper() in ('UNIT', 'TOTAL', 'SUMMARY', 'CURRENT/NOTICE/VACANT', 'FUTURE', 'OCCUPIED', 'TOTALS:', 'GROUPS'):
                     continue
                 
-                # Skip if doesn't look like a unit number
-                if not any(c.isdigit() for c in unit):
+                # Skip if doesn't look like a unit number (allow named units like EXTERIOR, ROOF, PARKING)
+                NAMED_UNITS = {'EXTERIOR', 'ROOF', 'PARKING', 'ATM', 'PAD', 'BASEMENT', 'STORAGE', 'SIGN', 'BILLBOARD'}
+                if not any(c.isdigit() for c in unit) and unit.upper() not in NAMED_UNITS:
                     continue
                 
                 # Parse the tenant line
