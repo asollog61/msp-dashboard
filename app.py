@@ -576,7 +576,8 @@ def load_tenancy():
         row = {}
         for c, h in enumerate(detail_header, 1):
             if h:
-                row[h] = ws.cell(r, c).value
+                val = ws.cell(r, c).value
+                row[h] = val.strip() if isinstance(val, str) else val
         tid = row.get('ID')
         if not tid or tid == '-':
             continue
