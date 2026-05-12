@@ -2126,7 +2126,7 @@ def render_insurance_tab():
         name = s.get('Tenant Name', '')
         ttype = s.get('Type', '')
         unit = s.get('Unit', '')
-        if not b or not name or name == 'Easement':
+        if not b or not name:
             continue
         if ttype and 'apartment' in str(ttype).lower():
             continue
