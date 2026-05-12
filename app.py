@@ -1060,7 +1060,7 @@ def parse_yardi_rent_rolls(latest_only=True):
                     continue
                 
                 # Skip if doesn't look like a unit number (allow named units like EXTERIOR, ROOF, PARKING)
-                NAMED_UNITS = {'EXTERIOR', 'ROOF', 'PARKING', 'ATM', 'PAD', 'BASEMENT', 'STORAGE', 'SIGN', 'BILLBOARD'}
+                NAMED_UNITS = {'EXTERIOR', 'ROOF', 'PARKING', 'ATM', 'PAD', 'BASEMENT', 'STORAGE', 'SIGN', 'BILLBOARD', 'EASEMENT'}
                 if not any(c.isdigit() for c in unit) and unit.upper() not in NAMED_UNITS:
                     continue
                 
@@ -1469,7 +1469,7 @@ def render_tenancy_tab():
     yardi_diffs = compute_yardi_diffs(tenants, yardi_data)
 
     # Summary metrics
-    active = [t for t in tenants if t['Tenant'] != 'Easement']
+    active = [t for t in tenants]
     # Add vacancy status and Yardi diff
     for t in active:
         key = f"{t['Building']}|{t['Space']}"
@@ -1725,9 +1725,7 @@ def build_vacancy_lookup(tenants=None, include_auto=True):
 
     if include_auto and tenants:
         for t in tenants:
-            if t.get('Tenant') == 'Easement':
-                continue
-            auto_flag = (t.get('Monthly') == 0 and t.get('Annual') == 0) or t.get('Status') == '🔴 VACANT'
+            auto_flag = (t.get('Monthly') == 0 and t.get('Annual') == 0 and t.get('Tenant') != 'Easement') or t.get('Status') == '🔴 VACANT'
             if not auto_flag:
                 continue
             b = (t.get('Building') or '').strip()
@@ -1775,7 +1773,7 @@ def remove_vacant_space(row_idx):
 
 def render_vacancy_tab():
     tenants, _, _ = load_tenancy()
-    active = [t for t in tenants if t['Tenant'] not in ('Easement',)]
+    active = [t for t in tenants]
 
     # Get vacant lookup (manual + auto)
     vacant_keys, vacant_meta = build_vacancy_lookup(active, include_auto=True)
@@ -2538,7 +2536,7 @@ def render_reconcile_tab():
         pass
 
     # Build spreadsheet tenant index keyed by "Building|TenantName" for lookup
-    active = [t for t in tenants if t['Tenant'] not in ('Easement', '-')] if tenants else []
+    active = [t for t in tenants if t['Tenant'] not in ('-',)] if tenants else []
     sheet_by_name = {}  # "Building|TenantName" -> tenant dict
     sheet_by_space = {}  # "Building|Space" -> tenant dict
     for t in active:
