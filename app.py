@@ -2771,6 +2771,59 @@ def render_reconcile_tab():
     render_column_config_editor('reconcile', ['Space', 'Yardi Name', 'Sheet Name', 'Rent (Yardi)', 'Rent (Sheet)', 'Rent Δ',
                                                'Exp (Yardi)', 'Exp (Sheet)', 'Exp Δ', 'SD (Yardi)', 'SD (Sheet)', 'SD Δ', 'Status'])
 
+    # ===========================
+    # SECTION 3: SHEET-ONLY TENANTS (not in Yardi)
+    # ===========================
+    # Find spreadsheet tenants that have no Yardi match
+    matched_sheet_keys = set()
+    for r in recon_rows:
+        if r['Sheet Name'] and r['Sheet Name'] != '—':
+            matched_sheet_keys.add(f"{r['Building']}|{r['Sheet Name']}")
+    # Also check reverse name_map
+    for yk, sn in name_map.items():
+        b = yk.split('|', 1)[0] if '|' in yk else ''
+        if b and sn:
+            matched_sheet_keys.add(f"{b}|{sn}")
+
+    sheet_only = [t for t in active if f"{t.get('Building', '')}|{t.get('Tenant', '')}" not in matched_sheet_keys
+                  and t.get('Tenant', '') not in ('-', '') and 'VACANT' not in t.get('Tenant', '').upper()]
+
+    if sheet_only:
+        st.markdown("---")
+        st.markdown("#### 📋 Sheet-Only Tenants (not in Yardi)")
+        st.caption("These tenants exist in the spreadsheet but have no matching Yardi rent roll entry.")
+        so_rows = []
+        for t in sheet_only:
+            so_rows.append({
+                'Building': t.get('Building', ''),
+                'Space': t.get('Space', ''),
+                'Tenant': t.get('Tenant', ''),
+                'Monthly': f"${t.get('Monthly', 0):,.0f}",
+                'Annual': f"${t.get('Annual', 0):,.0f}",
+                'Exp Date': t.get('Exp Date', ''),
+                'Type': t.get('Type', ''),
+            })
+        so_rows.sort(key=lambda r: (r['Building'], str(r['Space'])))
+
+        # Deduplicate by Building|Space|Tenant
+        seen = set()
+        unique_so = []
+        for r in so_rows:
+            k = f"{r['Building']}|{r['Space']}|{r['Tenant']}"
+            if k not in seen:
+                seen.add(k)
+                unique_so.append(r)
+
+        for building_name in BUILDING_MAP:
+            b_rows = [r for r in unique_so if r['Building'] == building_name]
+            if not b_rows:
+                continue
+            code = BUILDING_MAP[building_name]['code']
+            st.markdown(f'<div class="building-header"><strong>▎ {building_name} ({code})</strong> — {len(b_rows)} sheet-only</div>', unsafe_allow_html=True)
+            df = pd.DataFrame(b_rows)
+            display_cols = ['Space', 'Tenant', 'Monthly', 'Annual', 'Exp Date', 'Type']
+            show_grid(df[display_cols], key=f"sheet_only_{building_name}", tab_key="reconcile")
+
 
 # =====================
 # MAIN APP
