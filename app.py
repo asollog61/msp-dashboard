@@ -652,8 +652,9 @@ def load_tenancy():
             tte_label = 'MTM'
 
         option_years = len([r for r in rows if r.get('Term', '').startswith('Option')])
-        monthly = current_row.get('Monthly', 0) or 0
-        annual = current_row.get('Annual', 0) or 0
+        gross_mod = current_row.get('Gross Mod', 0) or 0
+        monthly = (current_row.get('Monthly', 0) or 0) + gross_mod
+        annual = (current_row.get('Annual', 0) or 0) + (gross_mod * 12)
         sqft = first.get('Sqft', 0) or 0
         psf = (annual / sqft) if sqft and sqft > 1 else 0
         sec_dep = first.get('Sec Dep', 0) or 0
@@ -667,7 +668,8 @@ def load_tenancy():
         next_anniv = current_end if current_end and current_end > TODAY else None
 
         # Next rent = from the period AFTER current
-        next_monthly = (next_row.get('Monthly') if next_row else None)
+        next_gross_mod = (next_row.get('Gross Mod', 0) or 0) if next_row else 0
+        next_monthly = ((next_row.get('Monthly', 0) or 0) + next_gross_mod) if next_row else None
         delta_monthly = (next_monthly - monthly) if (next_row and next_monthly is not None) else None
         anniv_months = None
         if next_anniv:
@@ -960,8 +962,8 @@ def parse_yardi_deposit_activity(latest_only=True):
                                       'on', 'hand', 'billed', 'receipts', 'forfeited', 'deposit'}
                         for k in range(i_line - 1, max(i_line - 6, 0), -1):
                             candidate = lines[k].strip()
-                            if (re.match(r'^[A-Za-z0-9-]+$', candidate) and
-                                    len(candidate) <= 6 and
+                            if (re.match(r'^[A-Za-z0-9_-]+$', candidate) and
+                                    len(candidate) <= 8 and
                                     candidate.lower() not in skip_words):
                                 unit = candidate
                                 break
