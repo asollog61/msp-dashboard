@@ -954,19 +954,28 @@ def parse_yardi_deposit_activity(latest_only=True):
                             except (ValueError, AttributeError):
                                 break
 
-                        # Find unit number - look backwards for short alphanumeric token
+                        # Find unit number - first try inline (unit + tenant on same line)
                         unit = ''
-                        skip_words = {'avenue', 'st', 'st.', 'south', 'central', 'ave', 'ave.',
-                                      'd', '36', '15', '1280', '114', 'springfiel', 'property',
-                                      'unit', 'tenant', 'prior', 'current', 'deposits', 'total',
-                                      'on', 'hand', 'billed', 'receipts', 'forfeited', 'deposit'}
-                        for k in range(i_line - 1, max(i_line - 6, 0), -1):
-                            candidate = lines[k].strip()
-                            if (re.match(r'^[A-Za-z0-9_-]+$', candidate) and
-                                    len(candidate) <= 8 and
-                                    candidate.lower() not in skip_words):
+                        inline_match = re.match(r'^([A-Za-z0-9_-]+)\s+', line)
+                        if inline_match:
+                            candidate = inline_match.group(1)
+                            # Verify it's a unit-like token (has digits or is short)
+                            if len(candidate) <= 8 and any(c.isdigit() for c in candidate):
                                 unit = candidate
-                                break
+
+                        # Fallback: look backwards for short alphanumeric token on prior line
+                        if not unit:
+                            skip_words = {'avenue', 'st', 'st.', 'south', 'central', 'ave', 'ave.',
+                                          'd', '36', '15', '1280', '114', 'springfiel', 'property',
+                                          'unit', 'tenant', 'prior', 'current', 'deposits', 'total',
+                                          'on', 'hand', 'billed', 'receipts', 'forfeited', 'deposit'}
+                            for k in range(i_line - 1, max(i_line - 6, 0), -1):
+                                candidate = lines[k].strip()
+                                if (re.match(r'^[A-Za-z0-9_-]+$', candidate) and
+                                        len(candidate) <= 8 and
+                                        candidate.lower() not in skip_words):
+                                    unit = candidate
+                                    break
 
                         if unit and len(nums) >= 5:
                             deposits_on_hand = nums[4]
