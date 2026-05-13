@@ -840,12 +840,8 @@ def normalize_space(space_str, building=None):
         if len(parts) == 2 and parts[0].isdigit() and parts[1].isdigit():
             return f"{parts[0]}{parts[1].zfill(2)}"
     
-    # Handle 3-digit units like 102, 104, 106, 108 (only even last digit)
-    # Only strip leading "10" if it's 102, 104, 106, or 108 (first-floor even units)
-    if len(s) == 3 and s.isdigit() and s.startswith('10'):
-        last_digit = int(s[-1])
-        if last_digit % 2 == 0:  # Even number (2, 4, 6, 8)
-            return s[-1]
+    # Keep 3-digit units as-is (102, 104, 106, 108, 201, etc.)
+    # Previously stripped leading "10" but spreadsheet now uses full 3-digit format
     
     # For other formats (101, 201, 1286, A-1, O-1, etc.), keep as-is
     return s
