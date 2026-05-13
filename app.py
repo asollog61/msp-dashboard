@@ -551,7 +551,7 @@ def delete_marketing_entry(row_idx):
 
 
 # --- TENANCY DATA ---
-@st.cache_data(ttl=3600)
+@st.cache_data(ttl=300)
 def load_tenancy():
     if not TENANCY_FILE:
         return [], {}, []
@@ -986,7 +986,7 @@ def parse_yardi_deposit_activity(latest_only=True):
     return deposit_data
 
 
-@st.cache_data(ttl=3600)
+@st.cache_data(ttl=300)
 def parse_yardi_rent_rolls(latest_only=True):
     """Parse Yardi monthly statement PDFs from data/Yardi/ folder.
     Returns dict keyed by "Building|Space" with {monthly, cam, expiration, tenant}.
