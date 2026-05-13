@@ -1113,8 +1113,8 @@ def parse_yardi_rent_rolls(latest_only=True):
                 monthly_str = lines[idx]
                 try:
                     monthly = float(monthly_str.replace(',', ''))
-                    # Sanity check - monthly rent should be > 0
-                    if monthly <= 0:
+                    # Sanity check - monthly rent should be > 0 (allow named units like easements with $0)
+                    if monthly <= 0 and unit.upper() not in NAMED_UNITS:
                         continue
                 except (ValueError, AttributeError):
                     continue
