@@ -2845,20 +2845,45 @@ def load_lead_sheet():
     if not rows:
         return pd.DataFrame(), pd.DataFrame()
 
-    # Retail cols 0-11: Tenant, Date Contacted, Building, Unit, Sqft, Broker, Phone, Email, Showing, Date Shown, LOI, Date LOI
-    # Col 12 = blank separator
-    # Office cols 13-24: same structure
-    col_names = ["Tenant", "Date Contacted", "Building", "Unit", "Sqft", "Broker", "Phone", "Email", "Showing", "Date Shown", "LOI", "Date LOI"]
-    date_cols = {"Date Contacted": "Contact Age", "Date Shown": "Show Age", "Date LOI": "LOI Age"}
+    # Dynamically read column layout from header row
+    header = rows[0]
 
-    def parse_rows(rows_data, start_col, end_col):
+    # Find the blank separator column between retail and office
+    sep_col = None
+    for i, h in enumerate(header):
+        if i > 0 and not h.strip():
+            # Check if previous cols had data and next col looks like a header
+            if i + 1 < len(header) and header[i + 1].strip():
+                sep_col = i
+                break
+
+    if sep_col is None:
+        # Fallback: assume no office section
+        sep_col = len(header)
+
+    retail_headers = [h.strip() for h in header[:sep_col]]
+    office_headers = [h.strip() for h in header[sep_col + 1:]] if sep_col < len(header) - 1 else []
+
+    # Normalize office headers to match retail (strip "Office "/"Retail " prefix from first col)
+    # Use retail headers as canonical column names, replacing first col name
+    col_names = list(retail_headers)
+    col_names[0] = "Tenant"
+
+    date_cols = {}
+    for c in col_names:
+        if 'date' in c.lower():
+            # Create age column name: "Date Contacted" -> "Contact Age", "Date Shown" -> "Show Age", "Date LOI" -> "LOI Age"
+            age_name = c.replace("Date ", "").replace("Date", "").strip() + " Age"
+            date_cols[c] = age_name
+
+    def parse_rows(rows_data, start_col, num_cols):
         parsed = []
         for row in rows_data[1:]:
-            cells = row[start_col:end_col] if len(row) > start_col else []
+            cells = row[start_col:start_col + num_cols] if len(row) > start_col else []
             # Pad if short
-            while len(cells) < len(col_names):
+            while len(cells) < num_cols:
                 cells.append('')
-            cells = [c.strip() for c in cells[:len(col_names)]]
+            cells = [c.strip() for c in cells[:num_cols]]
             if any(c for c in cells):
                 parsed.append(cells)
         return parsed
@@ -2882,11 +2907,21 @@ def load_lead_sheet():
             df.insert(idx, age_col, ages)
         return df
 
-    retail_rows = parse_rows(rows, 0, 12)
-    office_rows = parse_rows(rows, 13, 25)
+    retail_rows = parse_rows(rows, 0, len(retail_headers))
+    office_cols_count = len(office_headers) if office_headers else len(retail_headers)
+    office_rows = parse_rows(rows, sep_col + 1, office_cols_count)
+
+    # Office headers may differ slightly; normalize to match retail col_names
+    office_col_names = list(col_names)
+    if office_headers:
+        office_col_names = list(office_headers)
+        office_col_names[0] = "Tenant"
+    # Ensure same length
+    while len(office_col_names) < office_cols_count:
+        office_col_names.append(f"Col_{len(office_col_names)}")
 
     retail_df = pd.DataFrame(retail_rows, columns=col_names) if retail_rows else pd.DataFrame(columns=col_names)
-    office_df = pd.DataFrame(office_rows, columns=col_names) if office_rows else pd.DataFrame(columns=col_names)
+    office_df = pd.DataFrame(office_rows, columns=office_col_names[:office_cols_count]) if office_rows else pd.DataFrame(columns=col_names)
 
     retail_df = add_age_columns(retail_df)
     office_df = add_age_columns(office_df)
@@ -2932,9 +2967,9 @@ def render_lead_sheet_tab():
     else:
         st.info("No office leads.")
 
-    render_column_config_editor('leads', ["Tenant", "Date Contacted", "Contact Age", "Building", "Unit", "Sqft",
-                                          "Broker", "Phone", "Email", "Showing", "Date Shown", "Show Age",
-                                          "LOI", "Date LOI", "LOI Age"])
+    # Use retail columns (with age cols) as the config source
+    all_cols = list(retail_df.columns) if not retail_df.empty else list(office_df.columns)
+    render_column_config_editor('leads', all_cols)
 
     if st.button("🔄 Refresh Lead Sheet", key="refresh_leads"):
         load_lead_sheet.clear()
