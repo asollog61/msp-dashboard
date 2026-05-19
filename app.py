@@ -450,7 +450,7 @@ def show_grid(df, key, height=None, fit_columns=True, pinned_bottom=None, column
 
 # --- GOOGLE SHEETS CONNECTION ---
 @st.cache_resource(ttl=300)
-def get_gsheet():
+def get_gspread_client():
     scopes = ['https://www.googleapis.com/auth/spreadsheets', 'https://www.googleapis.com/auth/drive']
     if SERVICE_ACCOUNT_FILE:
         creds = Credentials.from_service_account_file(SERVICE_ACCOUNT_FILE, scopes=scopes)
@@ -458,7 +458,13 @@ def get_gsheet():
         creds = Credentials.from_service_account_info(SERVICE_ACCOUNT_INFO, scopes=scopes)
     else:
         return None
-    gc = gspread.authorize(creds)
+    return gspread.authorize(creds)
+
+@st.cache_resource(ttl=300)
+def get_gsheet():
+    gc = get_gspread_client()
+    if gc is None:
+        return None
     return gc.open_by_key(SHEET_ID)
 
 
@@ -2824,16 +2830,10 @@ LEAD_SHEET_GID = 1762616490
 @st.cache_data(ttl=300)
 def load_lead_sheet():
     """Load lead sheet from Google Sheets and return retail_df, office_df."""
-    scopes = ['https://www.googleapis.com/auth/spreadsheets.readonly', 'https://www.googleapis.com/auth/drive']
-    creds = None
-    if SERVICE_ACCOUNT_FILE:
-        creds = Credentials.from_service_account_file(SERVICE_ACCOUNT_FILE, scopes=scopes)
-    elif SERVICE_ACCOUNT_INFO:
-        creds = Credentials.from_service_account_info(SERVICE_ACCOUNT_INFO, scopes=scopes)
-    if creds is None:
+    client = get_gspread_client()
+    if client is None:
         st.error("No Google service account configured.")
         return pd.DataFrame(), pd.DataFrame()
-    client = gspread.authorize(creds)
     try:
         sheet = client.open_by_key(LEAD_SHEET_ID)
         ws = sheet.get_worksheet_by_id(LEAD_SHEET_GID)
@@ -2845,21 +2845,51 @@ def load_lead_sheet():
     if not rows:
         return pd.DataFrame(), pd.DataFrame()
 
-    # Columns: 0-6 = Retail, 8-14 = Office (col 7 is blank separator)
-    col_names = ["Tenant", "Space / Sq Ft", "Broker", "Phone", "Email", "Showing", "LOI"]
+    # Retail cols 0-11: Tenant, Date Contacted, Building, Unit, Sqft, Broker, Phone, Email, Showing, Date Shown, LOI, Date LOI
+    # Col 12 = blank separator
+    # Office cols 13-24: same structure
+    col_names = ["Tenant", "Date Contacted", "Building", "Unit", "Sqft", "Broker", "Phone", "Email", "Showing", "Date Shown", "LOI", "Date LOI"]
+    date_cols = {"Date Contacted": "Contact Age", "Date Shown": "Show Age", "Date LOI": "LOI Age"}
 
-    retail_rows = []
-    office_rows = []
-    for row in rows[1:]:  # skip header
-        # Retail side (cols 0-6)
-        if len(row) > 0 and any(c.strip() for c in row[:7]):
-            retail_rows.append([c.strip() for c in row[:7]])
-        # Office side (cols 8-14)
-        if len(row) > 8 and any(c.strip() for c in row[8:15]):
-            office_rows.append([c.strip() for c in row[8:15]])
+    def parse_rows(rows_data, start_col, end_col):
+        parsed = []
+        for row in rows_data[1:]:
+            cells = row[start_col:end_col] if len(row) > start_col else []
+            # Pad if short
+            while len(cells) < len(col_names):
+                cells.append('')
+            cells = [c.strip() for c in cells[:len(col_names)]]
+            if any(c for c in cells):
+                parsed.append(cells)
+        return parsed
+
+    def add_age_columns(df):
+        today = date.today()
+        for date_col, age_col in date_cols.items():
+            ages = []
+            for val in df[date_col]:
+                if val:
+                    try:
+                        dt = pd.to_datetime(val, format='mixed', dayfirst=False).date()
+                        delta = (today - dt).days
+                        ages.append(f"{delta}d")
+                    except Exception:
+                        ages.append("")
+                else:
+                    ages.append("")
+            # Insert age column right after its date column
+            idx = df.columns.get_loc(date_col) + 1
+            df.insert(idx, age_col, ages)
+        return df
+
+    retail_rows = parse_rows(rows, 0, 12)
+    office_rows = parse_rows(rows, 13, 25)
 
     retail_df = pd.DataFrame(retail_rows, columns=col_names) if retail_rows else pd.DataFrame(columns=col_names)
     office_df = pd.DataFrame(office_rows, columns=col_names) if office_rows else pd.DataFrame(columns=col_names)
+
+    retail_df = add_age_columns(retail_df)
+    office_df = add_age_columns(office_df)
 
     return retail_df, office_df
 
@@ -2889,8 +2919,7 @@ def render_lead_sheet_tab():
     # Retail section
     st.markdown('<div class="building-header">🏪 Retail Leads</div>', unsafe_allow_html=True)
     if not retail_df.empty:
-        show_grid(retail_df, key="leads_retail", tab_key="leads_retail")
-        render_column_config_editor('leads_retail', list(retail_df.columns))
+        show_grid(retail_df, key="leads_retail", tab_key="leads")
     else:
         st.info("No retail leads.")
 
@@ -2899,10 +2928,13 @@ def render_lead_sheet_tab():
     # Office section
     st.markdown('<div class="building-header">🏢 Office Leads</div>', unsafe_allow_html=True)
     if not office_df.empty:
-        show_grid(office_df, key="leads_office", tab_key="leads_office")
-        render_column_config_editor('leads_office', list(office_df.columns))
+        show_grid(office_df, key="leads_office", tab_key="leads")
     else:
         st.info("No office leads.")
+
+    render_column_config_editor('leads', ["Tenant", "Date Contacted", "Contact Age", "Building", "Unit", "Sqft",
+                                          "Broker", "Phone", "Email", "Showing", "Date Shown", "Show Age",
+                                          "LOI", "Date LOI", "LOI Age"])
 
     if st.button("🔄 Refresh Lead Sheet", key="refresh_leads"):
         load_lead_sheet.clear()
