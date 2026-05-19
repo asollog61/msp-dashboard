@@ -2869,12 +2869,14 @@ def load_lead_sheet():
     col_names = list(retail_headers)
     col_names[0] = "Tenant"
 
+    # Map date columns to age column names, preserving order
+    _age_name_map = {"Contacted": "Contact", "Shown": "Show"}
     date_cols = {}
     for c in col_names:
         if 'date' in c.lower():
-            # Create age column name: "Date Contacted" -> "Contact Age", "Date Shown" -> "Show Age", "Date LOI" -> "LOI Age"
-            age_name = c.replace("Date ", "").replace("Date", "").strip() + " Age"
-            date_cols[c] = age_name
+            raw = c.replace("Date ", "").replace("Date", "").strip()
+            friendly = _age_name_map.get(raw, raw)
+            date_cols[c] = f"{friendly} Age"
 
     def parse_rows(rows_data, start_col, num_cols):
         parsed = []
