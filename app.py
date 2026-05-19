@@ -2816,6 +2816,100 @@ def render_reconcile_tab():
 
 
 # =====================
+# LEAD SHEET
+# =====================
+LEAD_SHEET_ID = "1Gbl7FM-C4dN_BHVwT_1dRbkODEZW57MdymzBMDvPrCw"
+LEAD_SHEET_GID = 1762616490
+
+@st.cache_data(ttl=300)
+def load_lead_sheet():
+    """Load lead sheet from Google Sheets and return retail_df, office_df."""
+    scopes = ['https://www.googleapis.com/auth/spreadsheets.readonly', 'https://www.googleapis.com/auth/drive']
+    creds = None
+    if SERVICE_ACCOUNT_FILE:
+        creds = Credentials.from_service_account_file(SERVICE_ACCOUNT_FILE, scopes=scopes)
+    elif SERVICE_ACCOUNT_INFO:
+        creds = Credentials.from_service_account_info(SERVICE_ACCOUNT_INFO, scopes=scopes)
+    if creds is None:
+        st.error("No Google service account configured.")
+        return pd.DataFrame(), pd.DataFrame()
+    client = gspread.authorize(creds)
+    try:
+        sheet = client.open_by_key(LEAD_SHEET_ID)
+        ws = sheet.get_worksheet_by_id(LEAD_SHEET_GID)
+        rows = ws.get_all_values()
+    except Exception as e:
+        st.error(f"Failed to load lead sheet: {e}")
+        return pd.DataFrame(), pd.DataFrame()
+
+    if not rows:
+        return pd.DataFrame(), pd.DataFrame()
+
+    # Columns: 0-6 = Retail, 8-14 = Office (col 7 is blank separator)
+    col_names = ["Tenant", "Space / Sq Ft", "Broker", "Phone", "Email", "Showing", "LOI"]
+
+    retail_rows = []
+    office_rows = []
+    for row in rows[1:]:  # skip header
+        # Retail side (cols 0-6)
+        if len(row) > 0 and any(c.strip() for c in row[:7]):
+            retail_rows.append([c.strip() for c in row[:7]])
+        # Office side (cols 8-14)
+        if len(row) > 8 and any(c.strip() for c in row[8:15]):
+            office_rows.append([c.strip() for c in row[8:15]])
+
+    retail_df = pd.DataFrame(retail_rows, columns=col_names) if retail_rows else pd.DataFrame(columns=col_names)
+    office_df = pd.DataFrame(office_rows, columns=col_names) if office_rows else pd.DataFrame(columns=col_names)
+
+    return retail_df, office_df
+
+
+def render_lead_sheet_tab():
+    """Render the Lead Sheet tab with Retail and Office sections."""
+    st.markdown("### 📋 Lead Sheet")
+    st.caption("Prospect leads from Google Sheets · Auto-refreshes every 5 minutes")
+
+    retail_df, office_df = load_lead_sheet()
+
+    if retail_df.empty and office_df.empty:
+        st.warning("No lead data found. Check Google Sheets connection.")
+        return
+
+    # Summary metrics
+    c1, c2, c3, c4 = st.columns(4)
+    c1.markdown(f'<div class="metric-card"><div class="metric-value">{len(retail_df)}</div><div class="metric-label">Retail Leads</div></div>', unsafe_allow_html=True)
+    c2.markdown(f'<div class="metric-card"><div class="metric-value">{len(office_df)}</div><div class="metric-label">Office Leads</div></div>', unsafe_allow_html=True)
+    showing_count = sum(1 for _, r in pd.concat([retail_df, office_df]).iterrows() if r.get("Showing", "").strip().lower() == "yes")
+    loi_count = sum(1 for _, r in pd.concat([retail_df, office_df]).iterrows() if r.get("LOI", "").strip().lower() == "yes")
+    c3.markdown(f'<div class="metric-card"><div class="metric-value">{showing_count}</div><div class="metric-label">Showings Done</div></div>', unsafe_allow_html=True)
+    c4.markdown(f'<div class="metric-card"><div class="metric-value">{loi_count}</div><div class="metric-label">LOIs Received</div></div>', unsafe_allow_html=True)
+
+    st.markdown("")
+
+    # Retail section
+    st.markdown('<div class="building-header">🏪 Retail Leads</div>', unsafe_allow_html=True)
+    if not retail_df.empty:
+        show_grid(retail_df, key="leads_retail", tab_key="leads_retail")
+        render_column_config_editor('leads_retail', list(retail_df.columns))
+    else:
+        st.info("No retail leads.")
+
+    st.markdown("")
+
+    # Office section
+    st.markdown('<div class="building-header">🏢 Office Leads</div>', unsafe_allow_html=True)
+    if not office_df.empty:
+        show_grid(office_df, key="leads_office", tab_key="leads_office")
+        render_column_config_editor('leads_office', list(office_df.columns))
+    else:
+        st.info("No office leads.")
+
+    if st.button("🔄 Refresh Lead Sheet", key="refresh_leads"):
+        load_lead_sheet.clear()
+        st.rerun()
+
+
+# =====================
 # MAIN APP
 # =====================
 
@@ -2824,8 +2918,8 @@ col_title.markdown("## 🏢 MSP Property Dashboard")
 st.session_state.mobile_view = col_toggle.toggle("📱 Mobile", value=st.session_state.mobile_view)
 st.caption(f"Marion Street Properties · {TODAY.strftime('%B %d, %Y')}")
 
-tab_tenancy, tab_vacancy, tab_insurance, tab_deposits, tab_reconcile, tab_yardi, tab_sop = st.tabs([
-    "🏠 Current Tenancy", "🏚️ Vacancy", "🛡️ Insurance", "💰 Security Deposits", "🔄 Yardi Reconcile", "📊 Yardi Reports", "📋 SOPs"
+tab_tenancy, tab_vacancy, tab_leads, tab_insurance, tab_deposits, tab_reconcile, tab_yardi, tab_sop = st.tabs([
+    "🏠 Current Tenancy", "🏚️ Vacancy", "📋 Lead Sheet", "🛡️ Insurance", "💰 Security Deposits", "🔄 Yardi Reconcile", "📊 Yardi Reports", "📋 SOPs"
 ])
 
 with tab_sop:
@@ -2836,6 +2930,9 @@ with tab_tenancy:
 
 with tab_vacancy:
     render_vacancy_tab()
+
+with tab_leads:
+    render_lead_sheet_tab()
 
 with tab_insurance:
     render_insurance_tab()
