@@ -1739,7 +1739,10 @@ def build_vacancy_lookup(tenants=None, include_auto=True):
 
     if include_auto and tenants:
         for t in tenants:
-            auto_flag = (t.get('Monthly') == 0 and t.get('Annual') == 0 and t.get('Tenant') != 'Easement') or t.get('Status') == '🔴 VACANT'
+            # Never flag easements as vacant
+            if 'easement' in (t.get('Tenant') or '').lower():
+                continue
+            auto_flag = (t.get('Monthly', 0) <= 0.01 and t.get('Annual', 0) <= 0.01) or t.get('Status') == '🔴 VACANT'
             if not auto_flag:
                 continue
             b = (t.get('Building') or '').strip()
