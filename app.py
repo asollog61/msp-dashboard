@@ -1872,7 +1872,7 @@ def render_vacancy_tab():
         if vacant_display:
             vdf = pd.DataFrame(vacant_display)
             vdf['Space'] = vdf['Space'].astype(str)
-            show_grid(vdf, key="vacant_spaces", tab_key="vacancy_current")
+            show_grid(vdf, key="vacant_spaces", tab_key="vacancy")
 
             # Remove buttons for manual entries
             st.caption("Remove a manually marked space:")
@@ -1899,7 +1899,7 @@ def render_vacancy_tab():
             risk_df,
             key="at_risk",
             column_configs={'MTE': {'type': ['numericColumn']}},
-            tab_key="vacancy_risk"
+            tab_key="vacancy"
         )
     else:
         st.success("✅ No tenants expiring within 12 months.")
@@ -2006,9 +2006,7 @@ def render_vacancy_tab():
         st.info("No marketing entries yet.")
         mdf = pd.DataFrame(columns=['Space', 'Description', 'URL', 'Added By', 'Date', 'Status'])
 
-    render_column_config_editor('vacancy_current', ['Building', 'Space', 'Last Tenant', 'SF', 'Vacant Since', 'Days Vacant', 'Notes'])
-    render_column_config_editor('vacancy_risk', ['Building', 'Space', 'Tenant', 'SF', 'Monthly', 'MTE', 'Exp Date'])
-    render_column_config_editor('vacancy_activity', ['Date', 'Building', 'Space', 'Prospect', 'Broker', 'Type', 'Feedback', 'Added_By', 'Timestamp'])
+    render_column_config_editor('vacancy', ['Building', 'Space', 'Tenant', 'SF', 'Monthly', 'MTE', 'Exp Date', 'Last Tenant', 'Vacant Since', 'Days Vacant', 'Notes'])
     render_column_config_editor('marketing', list(mdf.columns))
 
 
