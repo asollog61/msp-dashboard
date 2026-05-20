@@ -1476,7 +1476,7 @@ def render_tenancy_tab():
     expense_cfg = read_expense_config()
 
     # Get vacant spaces to flag in tenancy view
-    vacant_keys, _vacant_meta = build_vacancy_lookup(tenants, include_auto=True)
+    vacant_keys, _vacant_meta = build_vacancy_lookup(tenants, include_auto=False)
 
     # Parse Yardi data and compute diffs
     yardi_data = parse_yardi_rent_rolls()
@@ -1792,12 +1792,10 @@ def render_vacancy_tab():
     tenants, _, _ = load_tenancy()
     active = [t for t in tenants]
 
-    # Get vacant lookup (manual + auto)
-    vacant_keys, vacant_meta = build_vacancy_lookup(active, include_auto=True)
+    # Get vacant lookup (manual only)
+    vacant_keys, vacant_meta = build_vacancy_lookup(active, include_auto=False)
     vacant_records = get_vacant_spaces()
     manual_keys = set(f"{v.get('Building', '')}|{v.get('Space', '')}" for v in vacant_records)
-    auto_vacant = [t for t in active if t['Monthly'] == 0 and t['Annual'] == 0 and t.get('Tenant') != 'Easement']
-    all_vacant_keys = vacant_keys
 
     # --- Mark space vacant ---
     st.markdown("### ✏️ Mark a Space Vacant")
@@ -1840,7 +1838,7 @@ def render_vacancy_tab():
     # --- Currently Vacant ---
     st.markdown("### 🔴 Currently Vacant Spaces")
 
-    if vacant_records or auto_vacant:
+    if vacant_records:
         import pandas as pd
         vacant_display = []
         for v in vacant_records:
@@ -1870,84 +1868,26 @@ def render_vacancy_tab():
                 'Days Vacant': days_vacant,
                 'Notes': v.get('Notes', ''),
             })
-        # Load auto-vacancy dates from Google Sheets config
-        auto_vac_dates = _read_gsheet_config('Config: Vacancy Dates') or {}
-
-        for t in auto_vacant:
-            key = f"{t['Building']}|{t['Space']}"
-            if key not in manual_keys:
-                saved_date = auto_vac_dates.get(key, '')
-                days_vacant_auto = '—'
-                if saved_date:
-                    try:
-                        vd = datetime.strptime(saved_date, '%Y-%m-%d').date()
-                        days = (TODAY - vd).days
-                        if days < 0:
-                            days_vacant_auto = f"Starts in {-days}d"
-                        elif days < 30:
-                            days_vacant_auto = f"{days}d"
-                        elif days < 365:
-                            days_vacant_auto = f"{days // 30}mo {days % 30}d"
-                        else:
-                            days_vacant_auto = f"{days // 365}yr {(days % 365) // 30}mo"
-                    except (ValueError, TypeError):
-                        pass
-                vacant_display.append({
-                    'Building': t['Building'],
-                    'Space': t['Space'],
-                    'Last Tenant': t['Tenant'],
-                    'SF': t['SF'],
-                    'Vacant Since': saved_date or '—',
-                    'Days Vacant': days_vacant_auto,
-                    'Notes': 'Auto-detected ($0 rent)',
-                })
 
         if vacant_display:
             show_grid(pd.DataFrame(vacant_display), key="vacant_spaces", tab_key="vacancy_current")
 
-            # Edit Vacant Since dates for auto-detected vacancies
-            auto_no_date = [v for v in vacant_display if v['Notes'] == 'Auto-detected ($0 rent)']
-            if auto_no_date:
-                with st.expander("📅 Set Vacant Since Dates"):
-                    for v in auto_no_date:
-                        vkey = f"{v['Building']}|{v['Space']}"
-                        existing = auto_vac_dates.get(vkey, '')
-                        default_date = TODAY
-                        if existing:
-                            try:
-                                default_date = datetime.strptime(existing, '%Y-%m-%d').date()
-                            except (ValueError, TypeError):
-                                pass
-                        col_label, col_date, col_btn = st.columns([4, 3, 1])
-                        col_label.write(f"**{v['Building']} — {v['Space']}** ({v['Last Tenant']})")
-                        new_date = col_date.date_input("Vacant since", value=default_date, key=f"vac_date_{vkey}", label_visibility="collapsed")
-                        if col_btn.button("Set", key=f"vac_set_{vkey}"):
-                            auto_vac_dates[vkey] = new_date.strftime('%Y-%m-%d')
-                            _write_gsheet_config('Config: Vacancy Dates', auto_vac_dates)
-                            st.success(f"Saved {v['Space']} vacant since {new_date}")
-                            st.rerun()
-
             # Remove buttons for manual entries
-            if vacant_records:
-                st.caption("Remove a manually marked space:")
-                for i, v in enumerate(vacant_records):
-                    col1, col2 = st.columns([8, 1])
-                    col1.text(f"{v.get('Building', '')} #{v.get('Space', '')} — {v.get('Tenant', '')}")
-                    if col2.button("✅ Leased / Not Vacant", key=f"unvacant_{i}"):
-                        remove_vacant_space(i)
-                        st.cache_resource.clear()
-                        st.rerun()
-        else:
-            st.success("✅ No currently vacant spaces — 100% occupied!")
+            st.caption("Remove a manually marked space:")
+            for i, v in enumerate(vacant_records):
+                col1, col2 = st.columns([8, 1])
+                col1.text(f"{v.get('Building', '')} #{v.get('Space', '')} — {v.get('Tenant', '')}")
+                if col2.button("✅ Leased / Not Vacant", key=f"unvacant_{i}"):
+                    remove_vacant_space(i)
+                    st.cache_resource.clear()
+                    st.rerun()
     else:
         st.success("✅ No currently vacant spaces — 100% occupied!")
 
-    # At risk — exclude spaces already shown in Currently Vacant (manual + auto)
-    auto_vacant_keys = {f"{t['Building']}|{t['Space']}" for t in auto_vacant}
-    all_vacant_keys = manual_keys | auto_vacant_keys
+    # At risk — exclude spaces already shown in Currently Vacant
     st.markdown("### 🟡 At Risk — Expiring Within 12 Months")
     at_risk = [t for t in active if (t.get('TTE_Label') == 'MTM' or (0 < t['TTE_Days'] <= 365))
-               and f"{t['Building']}|{t['Space']}" not in all_vacant_keys]
+               and f"{t['Building']}|{t['Space']}" not in manual_keys]
     if at_risk:
         import pandas as pd
         risk_df = pd.DataFrame(at_risk)[['Building', 'Space', 'Tenant', 'SF', 'Monthly', 'TTE_Months', 'Exp Date']]
@@ -2074,7 +2014,7 @@ def render_insurance_tab():
     tenants, _, summaries = load_tenancy()
     coi_data = scan_coi_files()
     today_dt = datetime.now()
-    vacant_keys, vacant_meta = build_vacancy_lookup(tenants, include_auto=True)
+    vacant_keys, vacant_meta = build_vacancy_lookup(tenants, include_auto=False)
 
     st.markdown("### 🛡️ Certificate of Insurance Reconciliation")
 
@@ -2186,7 +2126,7 @@ def render_deposits_tab():
     tenants, details, summaries = load_tenancy()
     active = [t for t in tenants if t['Tenant'] not in ('Easement',)]
     today_dt = datetime.now()
-    vacant_keys, vacant_meta = build_vacancy_lookup(tenants, include_auto=True)
+    vacant_keys, vacant_meta = build_vacancy_lookup(tenants, include_auto=False)
 
     st.markdown("### 💰 Security Deposit Reconciliation")
 
