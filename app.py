@@ -1796,7 +1796,7 @@ def render_vacancy_tab():
     vacant_keys, vacant_meta = build_vacancy_lookup(active, include_auto=True)
     vacant_records = get_vacant_spaces()
     manual_keys = set(f"{v.get('Building', '')}|{v.get('Space', '')}" for v in vacant_records)
-    auto_vacant = [t for t in active if t['Monthly'] == 0 and t['Annual'] == 0]
+    auto_vacant = [t for t in active if t['Monthly'] == 0 and t['Annual'] == 0 and t.get('Tenant') != 'Easement']
     all_vacant_keys = vacant_keys
 
     # --- Mark space vacant ---
@@ -1942,10 +1942,12 @@ def render_vacancy_tab():
     else:
         st.success("✅ No currently vacant spaces — 100% occupied!")
 
-    # At risk — exclude spaces already marked vacant (manual only)
+    # At risk — exclude spaces already shown in Currently Vacant (manual + auto)
+    auto_vacant_keys = {f"{t['Building']}|{t['Space']}" for t in auto_vacant}
+    all_vacant_keys = manual_keys | auto_vacant_keys
     st.markdown("### 🟡 At Risk — Expiring Within 12 Months")
     at_risk = [t for t in active if (t.get('TTE_Label') == 'MTM' or (0 < t['TTE_Days'] <= 365))
-               and f"{t['Building']}|{t['Space']}" not in manual_keys]
+               and f"{t['Building']}|{t['Space']}" not in all_vacant_keys]
     if at_risk:
         import pandas as pd
         risk_df = pd.DataFrame(at_risk)[['Building', 'Space', 'Tenant', 'SF', 'Monthly', 'TTE_Months', 'Exp Date']]
@@ -1960,66 +1962,8 @@ def render_vacancy_tab():
     else:
         st.success("✅ No tenants expiring within 12 months.")
 
-    st.divider()
-
-    # --- VACANCY ACTIVITY LOG (Google Sheets) ---
-    st.markdown("### 📋 Vacancy Activity Log")
-    st.caption("Shared across all users via Google Sheets")
-
+    # all_spaces used by Marketing section below
     all_spaces = sorted(set(f"{t['Building']} #{t['Space']}" for t in active))
-
-    with st.form("add_activity", clear_on_submit=True):
-        st.markdown("**Add New Entry**")
-        ac1, ac2 = st.columns(2)
-        activity_date = ac1.date_input("Date", value=date.today())
-        activity_space = ac2.selectbox("Space", [""] + all_spaces)
-        ac3, ac4 = st.columns(2)
-        prospect = ac3.text_input("Prospect Name")
-        broker = ac4.text_input("Broker")
-        ac5, ac6 = st.columns(2)
-        activity_type = ac5.selectbox("Type", ["Showing", "Inquiry", "LOI", "Application", "Lease Signed", "Follow-up"])
-        added_by = ac6.text_input("Your Name")
-        feedback = st.text_area("Feedback / Notes")
-        submitted = st.form_submit_button("➕ Add Entry", type="primary")
-
-        if submitted and activity_space:
-            success = add_activity_entry({
-                'date': str(activity_date),
-                'space': activity_space,
-                'prospect': prospect,
-                'broker': broker,
-                'type': activity_type,
-                'feedback': feedback,
-                'added_by': added_by,
-            })
-            if success:
-                st.success("Entry added!")
-                st.cache_resource.clear()
-                st.rerun()
-
-    # Show existing entries
-    activities = get_activity_data()
-    if activities:
-        import pandas as pd
-        df = pd.DataFrame(activities)
-        display_cols = ['Date', 'Building', 'Space', 'Prospect', 'Broker', 'Type', 'Feedback', 'Added By', 'Timestamp']
-        for col in display_cols:
-            if col not in df.columns:
-                df[col] = ''
-        df = df[display_cols]
-        df.rename(columns={'Added By': 'Added_By'}, inplace=True)
-        show_grid(df, key="vacancy_activity", tab_key="vacancy_activity")
-
-        # Delete controls
-        st.caption("Delete an entry:")
-        for idx, a in enumerate(activities):
-            entry_label = f"{a.get('Date', '')} — {a.get('Space', '')} ({a.get('Type', '')})"
-            if st.button(f"🗑️ {entry_label}", key=f"del_act_{idx}"):
-                delete_activity_entry(idx)
-                st.cache_resource.clear()
-                st.rerun()
-    else:
-        st.info("No activity entries yet. Add one above!")
 
     st.divider()
 
