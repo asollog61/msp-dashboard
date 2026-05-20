@@ -1861,7 +1861,7 @@ def render_vacancy_tab():
 
             vacant_display.append({
                 'Building': v.get('Building', ''),
-                'Space': v.get('Space', ''),
+                'Space': str(v.get('Space', '')),
                 'Last Tenant': v.get('Tenant', ''),
                 'SF': v.get('SF', ''),
                 'Vacant Since': vac_date_str,
@@ -1870,7 +1870,9 @@ def render_vacancy_tab():
             })
 
         if vacant_display:
-            show_grid(pd.DataFrame(vacant_display), key="vacant_spaces", tab_key="vacancy_current")
+            vdf = pd.DataFrame(vacant_display)
+            vdf['Space'] = vdf['Space'].astype(str)
+            show_grid(vdf, key="vacant_spaces", tab_key="vacancy_current")
 
             # Remove buttons for manual entries
             st.caption("Remove a manually marked space:")
