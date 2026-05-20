@@ -2715,6 +2715,40 @@ LEAD_SHEET_ID = "1Gbl7FM-C4dN_BHVwT_1dRbkODEZW57MdymzBMDvPrCw"
 LEAD_SHEET_GID = 1762616490
 
 @st.cache_data(ttl=300)
+def _load_lead_changelog():
+    """Load the Lead Sheet Changelog and return dict of {(section, row): (timestamp, user)} for most recent edit per row."""
+    try:
+        sheet = get_gsheet()
+        if not sheet:
+            return {}
+        ws = sheet.worksheet('Lead Sheet Changelog')
+        records = ws.get_all_records()
+    except Exception:
+        # Try the lead sheet's own spreadsheet
+        try:
+            client = get_gspread_client()
+            if not client:
+                return {}
+            ss = client.open_by_key(LEAD_SHEET_ID)
+            ws = ss.worksheet('Lead Sheet Changelog')
+            records = ws.get_all_records()
+        except Exception:
+            return {}
+
+    latest = {}
+    for r in records:
+        section = r.get('Section', 'Retail')
+        row = r.get('Row', 0)
+        ts = r.get('Timestamp', '')
+        user = r.get('User', '')
+        key = (section, row)
+        # Keep the latest timestamp per row
+        if key not in latest or str(ts) > str(latest[key][0]):
+            latest[key] = (ts, user)
+    return latest
+
+
+@st.cache_data(ttl=300)
 def load_lead_sheet():
     """Load lead sheet from Google Sheets and return retail_df, office_df."""
     client = get_gspread_client()
@@ -2814,6 +2848,26 @@ def load_lead_sheet():
 
     retail_df = add_age_columns(retail_df)
     office_df = add_age_columns(office_df)
+
+    # Merge changelog data (last modified + modified by)
+    changelog = _load_lead_changelog()
+    for section, df in [('Retail', retail_df), ('Office', office_df)]:
+        last_mod = []
+        mod_by = []
+        for i in range(len(df)):
+            sheet_row = i + 2  # row 1 is header, data starts at row 2
+            entry = changelog.get((section, sheet_row))
+            if entry:
+                ts_str = str(entry[0])
+                # Shorten email to just the name part
+                user = entry[1].split('@')[0] if '@' in entry[1] else entry[1]
+                last_mod.append(ts_str)
+                mod_by.append(user)
+            else:
+                last_mod.append('')
+                mod_by.append('')
+        df['Last Modified'] = last_mod
+        df['Modified By'] = mod_by
 
     return retail_df, office_df
 
