@@ -1,0 +1,173 @@
+═══════════════════════════════════════════════════════════════════════════════
+                    MSP PROPERTIES LEASE AUDIT - QUICK REFERENCE
+═══════════════════════════════════════════════════════════════════════════════
+
+AUDIT DATE: May 27, 2026
+PROPERTIES: 4 active buildings
+LEASES ANALYZED: 22 tenants
+SUCCESS RATE: 82% fully extracted
+
+═══════════════════════════════════════════════════════════════════════════════
+                                START HERE
+═══════════════════════════════════════════════════════════════════════════════
+
+📄 READ FIRST: EXECUTIVE_SUMMARY_Lease_Audit.md (10 KB)
+   → Big picture overview
+   → Risk assessment
+   → Strategic recommendations
+
+✅ TAKE ACTION: ACTION_CHECKLIST_Lease_Audit.md (8 KB)
+   → Immediate tasks with checkboxes
+   → Status verification list
+   → Follow-up tracking
+
+📊 DATA VIEW: lease_covenant_summary_updated.csv (4 KB)
+   → Open in Excel
+   → Filter/sort by provision type
+   → Track updates
+
+═══════════════════════════════════════════════════════════════════════════════
+                            🚨 CRITICAL ALERTS
+═══════════════════════════════════════════════════════════════════════════════
+
+PRIORITY 1: Your Kids Urgent Care / SLK Enterprises (1280-86 Springfield)
+   Status: IMAGE-BASED PDF - REQUIRES PROFESSIONAL OCR
+   Action: Engage OCR service IMMEDIATELY
+   Files: 34-page lease + personal guarantee + assignment
+   
+PRIORITY 2: Jenny Madden Design LLC (114 Central, Unit 2-5 & 9)
+   Status: LEASE EXPIRED 6/30/2024
+   Action: VERIFY TENANT STATUS - in occupancy or vacated?
+   Next: Locate renewal/extension if active
+   
+PRIORITY 3: Store 3 - Uppleside Down (1280-86 Springfield)
+   Status: 60-month term may have expired ~7/1/2024
+   Action: Verify renewal/extension exists
+   Risk: May be month-to-month without documentation
+   
+PRIORITY 4: Rentokil North America (114 Central, Unit 2-3)
+   Status: Only commencement memo analyzed
+   Action: OCR full 3.2MB lease for complete provisions
+   Expires: 5/31/2027
+
+═══════════════════════════════════════════════════════════════════════════════
+                          📋 PROVISION SCORECARD
+═══════════════════════════════════════════════════════════════════════════════
+
+Provision Type          | Found  | Not Found | Need Review
+------------------------|--------|-----------|------------
+Renewal Options         |   19   |     0     |     3
+Non-Compete Clauses     |    1   |    17     |     4
+Tenant Cancel Rights    |   10   |     8     |     4
+Landlord Cancel Rights  |   10   |     8     |     4
+Right of First Refusal  |    2   |    16     |     4
+Exclusive Use Clauses   |    8   |    10     |     4
+Personal Guarantees     |    1*  |    17     |     4
+
+* Only 1 confirmed with separate document - folder audit needed for others
+
+═══════════════════════════════════════════════════════════════════════════════
+                          📅 EXPIRATION ALERTS
+═══════════════════════════════════════════════════════════════════════════════
+
+IMMEDIATE (2025):
+   ✱ Skin Savvy - Extension expires 12/31/2025 (7 months)
+   
+VERIFY STATUS:
+   ✱ Jenny Madden - Expired 6/30/2024 (VERIFY STATUS)
+   ✱ Store 3 Uppleside - May have expired 7/1/2024 (VERIFY)
+   ✱ Longo Architects - Cancellation letter 5/25/2025 (VERIFY)
+
+NEAR TERM (2026-2027):
+   → Rentokil - 5/31/2027
+   → Multiple renewals in 2026 (see detailed report)
+
+═══════════════════════════════════════════════════════════════════════════════
+                          📊 BY BUILDING SUMMARY
+═══════════════════════════════════════════════════════════════════════════════
+
+114 CENTRAL WESTFIELD (10 units)
+   ✅ Analyzed: 8 full leases + 1 draft (Chez Alice)
+   ⚠️  Issues: 2 need OCR (Rentokil, Jenny Madden)
+   🚨 Action: Verify Jenny Madden status (expired 6/30/24)
+
+1280-86 SPRINGFIELD AVE (7 units)
+   ✅ Analyzed: 6 leases
+   🚨 Critical: Your Kids/SLK needs OCR (Priority #1)
+   ⚠️  Action: Verify Store 3 status (may be expired)
+
+15 SOUTH STREET (2 tenants)
+   ✅ Analyzed: Summit Health (most comprehensive)
+   ⚠️  Action: Get Wells Fargo full lease (have commencement only)
+
+36 SOUTH STREET (3 tenants)
+   ⚠️  All 3 need full leases (analyzed commencement/drafts only)
+   🚨 Action: Verify Longo status (cancellation letter 5/25/25)
+
+═══════════════════════════════════════════════════════════════════════════════
+                          💰 BUDGET ESTIMATE
+═══════════════════════════════════════════════════════════════════════════════
+
+OCR Services (professional):
+   - Your Kids 34-page lease: $50-100
+   - Your Kids personal guarantee: $20-40
+   - Your Kids assignment (6.8MB): $75-150
+   - Rentokil 3.2MB lease: $75-150
+   - Jenny Madden 3.2MB lease: $75-150
+   
+   TOTAL OCR ESTIMATE: $295-590
+
+Legal Review (estimated):
+   - Attorney consultation (2 hours): $500-1,000
+   - Document review: $300-600 per lease
+   
+   RECOMMENDED INITIAL: $800-1,600
+
+═══════════════════════════════════════════════════════════════════════════════
+                          📂 FILE LOCATIONS
+═══════════════════════════════════════════════════════════════════════════════
+
+All deliverables in: /home/node/.openclaw/workspace/
+
+   README_Lease_Audit.md ..................... Master guide (this tells you what to read)
+   EXECUTIVE_SUMMARY_Lease_Audit.md .......... Start here (executive overview)
+   ACTION_CHECKLIST_Lease_Audit.md ........... Do this (actionable tasks)
+   lease_covenant_audit.md ................... Full details (62 KB with excerpts)
+   lease_covenant_summary_updated.csv ........ Excel data (all tenants)
+   lease_audit_appendix.md ................... Technical notes & issues
+
+Original PDFs:
+   /home/node/OpenClaw/Share Jason/ACTIVE PROPERTIES/[Building]/Leases/
+
+═══════════════════════════════════════════════════════════════════════════════
+                          📞 IMMEDIATE ACTIONS (THIS WEEK)
+═══════════════════════════════════════════════════════════════════════════════
+
+[ ] Call Jenny Madden - verify if still tenant (expired 6/30/24)
+[ ] Call Store 3 Uppleside - verify renewal exists (~expired 7/1/24)
+[ ] Call/email Longo - verify if vacated (cancellation 5/25/25)
+[ ] Contact OCR vendor - quote for Your Kids lease package
+[ ] Retrieve Wells Fargo full lease
+[ ] Retrieve Wonder full lease
+[ ] Verify Verizon amendment execution status
+[ ] Schedule attorney meeting - review high-risk findings
+
+═══════════════════════════════════════════════════════════════════════════════
+                          ✅ WHAT WAS ACCOMPLISHED
+═══════════════════════════════════════════════════════════════════════════════
+
+✅ Analyzed 22 tenant leases across 4 properties
+✅ Extracted 10 special provision categories per lease
+✅ Identified 4 high-priority issues requiring immediate action
+✅ Compiled comprehensive markdown report with excerpts (62 KB)
+✅ Created Excel-ready CSV summary
+✅ Documented all gaps and OCR requirements
+✅ Provided actionable checklist with follow-up tracking
+✅ Prepared executive summary for decision makers
+✅ Estimated costs for completion work
+
+═══════════════════════════════════════════════════════════════════════════════
+
+                    QUESTIONS? See README_Lease_Audit.md
+
+═══════════════════════════════════════════════════════════════════════════════
