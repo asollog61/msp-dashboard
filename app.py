@@ -2872,6 +2872,101 @@ def load_lead_sheet():
     return retail_df, office_df
 
 
+def render_covenants_tab():
+    """Render the Lease Covenants tab directly from MSP Tenancy.xlsx (cols AI-AU, rows 10-40)."""
+    st.markdown("### 📜 Lease Covenants")
+    st.caption("Special lease provisions from MSP Tenancy.xlsx · Edit the spreadsheet and re-upload to update")
+
+    if not TENANCY_FILE:
+        st.warning("MSP Tenancy.xlsx not found.")
+        return
+
+    # Column mapping: spreadsheet column letter → display name
+    COV_COLUMNS = {
+        35: "Renewal Options",
+        36: "Option Notice",
+        37: "LL Termination",
+        38: "Tenant Termination",
+        39: "Non-Compete / Exclusive",
+        40: "CAM Obligations",
+        41: "ROFO/ROFR",
+        42: "Kick-Out",
+        43: "Assignment/Subletting",
+        44: "Personal Guarantee",
+        45: "Holdover Rate",
+        46: "Late Fee",
+        47: "Other Notable",
+    }
+
+    try:
+        wb = openpyxl.load_workbook(TENANCY_FILE, data_only=True)
+        ws = wb.active
+
+        rows = []
+        for r in range(11, 41):
+            building = ws.cell(row=r, column=1).value
+            tenant = ws.cell(row=r, column=3).value
+            if not building or not tenant:
+                continue
+            # Skip vacants and easements
+            tenant_str = str(tenant)
+            if tenant_str.upper().startswith("VACANT") or tenant_str.upper() == "EASEMENT":
+                continue
+            row_data = {
+                "Building": str(building),
+                "Unit": ws.cell(row=r, column=2).value or "",
+                "Tenant": tenant_str,
+            }
+            for col_idx, col_name in COV_COLUMNS.items():
+                val = ws.cell(row=r, column=col_idx).value
+                row_data[col_name] = str(val) if val is not None else ""
+            rows.append(row_data)
+        wb.close()
+    except Exception as e:
+        st.error(f"Error reading tenancy file: {e}")
+        return
+
+    if not rows:
+        st.info("No covenant data found in spreadsheet.")
+        return
+
+    df = pd.DataFrame(rows)
+
+    # --- Building filter ---
+    buildings = sorted(df["Building"].unique().tolist())
+    selected = st.multiselect("Filter by Building", buildings, default=buildings, key="cov_building_filter")
+    filtered = df[df["Building"].isin(selected)].copy()
+
+    # Summary metrics
+    total = len(filtered)
+
+    def _count_has(col_name, keyword="YES"):
+        if col_name not in filtered.columns:
+            return 0
+        return filtered[col_name].astype(str).str.upper().str.contains(keyword, na=False).sum()
+
+    has_noncompete = _count_has("Non-Compete / Exclusive")
+    has_rofr = _count_has("ROFO/ROFR")
+    has_guarantee = _count_has("Personal Guarantee")
+    has_kickout = _count_has("Kick-Out")
+
+    c1, c2, c3, c4, c5 = st.columns(5)
+    c1.metric("Total Tenants", total)
+    c2.metric("Non-Compete", has_noncompete)
+    c3.metric("ROFO/ROFR", has_rofr)
+    c4.metric("Personal Guarantee", has_guarantee)
+    c5.metric("Kick-Out", has_kickout)
+
+    # Display per building
+    for bldg in selected:
+        bldg_df = filtered[filtered["Building"] == bldg].copy()
+        if bldg_df.empty:
+            continue
+        st.markdown(f"#### 🏢 {bldg}")
+        display_df = bldg_df.drop(columns=["Building"]).reset_index(drop=True)
+        st.dataframe(display_df, use_container_width=True, hide_index=True)
+
+
 def render_lead_sheet_tab():
     """Render the Lead Sheet tab with Retail and Office sections."""
     st.markdown("### 📋 Lead Sheet")
@@ -2928,8 +3023,8 @@ col_title.markdown("## 🏢 MSP Property Dashboard")
 st.session_state.mobile_view = col_toggle.toggle("📱 Mobile", value=st.session_state.mobile_view)
 st.caption(f"Marion Street Properties · {TODAY.strftime('%B %d, %Y')}")
 
-tab_tenancy, tab_vacancy, tab_leads, tab_insurance, tab_deposits, tab_reconcile, tab_yardi, tab_sop = st.tabs([
-    "🏠 Current Tenancy", "🏚️ Vacancy", "📋 Lead Sheet", "🛡️ Insurance", "💰 Security Deposits", "🔄 Yardi Reconcile", "📊 Yardi Reports", "📋 SOPs"
+tab_tenancy, tab_vacancy, tab_leads, tab_covenants, tab_insurance, tab_deposits, tab_reconcile, tab_yardi, tab_sop = st.tabs([
+    "🏠 Current Tenancy", "🏚️ Vacancy", "📋 Lead Sheet", "📜 Lease Covenants", "🛡️ Insurance", "💰 Security Deposits", "🔄 Yardi Reconcile", "📊 Yardi Reports", "📋 SOPs"
 ])
 
 with tab_sop:
@@ -2943,6 +3038,9 @@ with tab_vacancy:
 
 with tab_leads:
     render_lead_sheet_tab()
+
+with tab_covenants:
+    render_covenants_tab()
 
 with tab_insurance:
     render_insurance_tab()
