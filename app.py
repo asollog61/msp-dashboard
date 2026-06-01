@@ -2964,7 +2964,13 @@ def render_covenants_tab():
             continue
         st.markdown(f"#### 🏢 {bldg}")
         display_df = bldg_df.drop(columns=["Building"]).reset_index(drop=True)
-        st.dataframe(display_df, use_container_width=True, hide_index=True)
+        # Auto-size: 35px header + 35px per row + small buffer
+        grid_h = 35 + 35 * len(display_df) + 10
+        st.dataframe(display_df, use_container_width=True, hide_index=True, height=grid_h)
+
+    # Column width config at the bottom
+    all_cov_cols = ["Unit", "Tenant"] + list(COV_COLUMNS.values())
+    render_column_config_editor('covenants', all_cov_cols)
 
 
 def render_lead_sheet_tab():
