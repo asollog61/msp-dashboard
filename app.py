@@ -670,9 +670,15 @@ def load_tenancy():
             annual = float(current_row.get('Annual', 0) or 0) + (gross_mod * 12)
         except (TypeError, ValueError):
             annual = gross_mod * 12
-        sqft = first.get('Sqft', 0) or 0
+        try:
+            sqft = float(first.get('Sqft', 0) or 0)
+        except (TypeError, ValueError):
+            sqft = 0
         psf = (annual / sqft) if sqft and sqft > 1 else 0
-        sec_dep = first.get('Sec Dep', 0) or 0
+        try:
+            sec_dep = float(first.get('Sec Dep', 0) or 0)
+        except (TypeError, ValueError):
+            sec_dep = 0
 
         # Exp Date = last original period end date
         exp_dt = last_orig_end
