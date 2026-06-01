@@ -658,9 +658,18 @@ def load_tenancy():
             tte_label = 'MTM'
 
         option_years = len([r for r in rows if r.get('Term', '').startswith('Option')])
-        gross_mod = current_row.get('Gross Mod', 0) or 0
-        monthly = (current_row.get('Monthly', 0) or 0) + gross_mod
-        annual = (current_row.get('Annual', 0) or 0) + (gross_mod * 12)
+        try:
+            gross_mod = float(current_row.get('Gross Mod', 0) or 0)
+        except (TypeError, ValueError):
+            gross_mod = 0
+        try:
+            monthly = float(current_row.get('Monthly', 0) or 0) + gross_mod
+        except (TypeError, ValueError):
+            monthly = gross_mod
+        try:
+            annual = float(current_row.get('Annual', 0) or 0) + (gross_mod * 12)
+        except (TypeError, ValueError):
+            annual = gross_mod * 12
         sqft = first.get('Sqft', 0) or 0
         psf = (annual / sqft) if sqft and sqft > 1 else 0
         sec_dep = first.get('Sec Dep', 0) or 0
