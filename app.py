@@ -2890,12 +2890,11 @@ def render_covenants_tab():
         39: "Non-Compete / Exclusive",
         40: "CAM Obligations",
         41: "ROFO/ROFR",
-        42: "Kick-Out",
-        43: "Assignment/Subletting",
-        44: "Personal Guarantee",
-        45: "Holdover Rate",
-        46: "Late Fee",
-        47: "Other Notable",
+        42: "Assignment/Subletting",
+        43: "Personal Guarantee",
+        44: "Holdover Rate",
+        45: "Late Fee",
+        46: "Other Notable",
     }
 
     try:
@@ -2919,7 +2918,10 @@ def render_covenants_tab():
             }
             for col_idx, col_name in COV_COLUMNS.items():
                 val = ws.cell(row=r, column=col_idx).value
-                row_data[col_name] = str(val) if val is not None else ""
+                if val is not None and isinstance(val, datetime) and col_idx == 36:
+                    row_data[col_name] = val.strftime("%m/%d/%Y")
+                else:
+                    row_data[col_name] = str(val) if val is not None else ""
             rows.append(row_data)
         wb.close()
     except Exception as e:
@@ -2948,14 +2950,12 @@ def render_covenants_tab():
     has_noncompete = _count_has("Non-Compete / Exclusive")
     has_rofr = _count_has("ROFO/ROFR")
     has_guarantee = _count_has("Personal Guarantee")
-    has_kickout = _count_has("Kick-Out")
 
-    c1, c2, c3, c4, c5 = st.columns(5)
+    c1, c2, c3, c4 = st.columns(4)
     c1.metric("Total Tenants", total)
     c2.metric("Non-Compete", has_noncompete)
     c3.metric("ROFO/ROFR", has_rofr)
     c4.metric("Personal Guarantee", has_guarantee)
-    c5.metric("Kick-Out", has_kickout)
 
     # Display per building
     for bldg in selected:
