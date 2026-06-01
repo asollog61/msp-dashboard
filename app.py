@@ -2964,9 +2964,9 @@ def render_covenants_tab():
             continue
         st.markdown(f"#### 🏢 {bldg}")
         display_df = bldg_df.drop(columns=["Building"]).reset_index(drop=True)
-        # Auto-size: 35px header + 35px per row + small buffer
-        grid_h = 35 + 35 * len(display_df) + 10
-        st.dataframe(display_df, use_container_width=True, hide_index=True, height=grid_h)
+        # Auto-size: 42px header + 42px per row + buffer
+        grid_h = 42 + 42 * len(display_df) + 12
+        show_grid(display_df, key=f"cov_{bldg}", height=grid_h, tab_key="covenants")
 
     # Column width config at the bottom
     all_cov_cols = ["Unit", "Tenant"] + list(COV_COLUMNS.values())
