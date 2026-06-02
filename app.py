@@ -2922,21 +2922,22 @@ def render_covenants_tab():
             tenant = ws.cell(row=r, column=3).value
             if not building or not tenant:
                 continue
-            # Skip vacants and easements
             tenant_str = str(tenant)
-            if tenant_str.upper().startswith("VACANT") or tenant_str.upper() == "EASEMENT":
-                continue
+            is_vacant = tenant_str.upper().startswith("VACANT") or tenant_str.upper() == "EASEMENT"
             row_data = {
                 "Building": str(building),
                 "Unit": ws.cell(row=r, column=2).value or "",
-                "Tenant": tenant_str,
+                "Tenant": "VACANT" if is_vacant else tenant_str,
             }
             for col_idx, col_name in COV_COLUMNS.items():
-                val = ws.cell(row=r, column=col_idx).value
-                if val is not None and isinstance(val, datetime) and col_idx == 36:
-                    row_data[col_name] = val.strftime("%m/%d/%Y")
+                if is_vacant:
+                    row_data[col_name] = ""
                 else:
-                    row_data[col_name] = str(val) if val is not None else ""
+                    val = ws.cell(row=r, column=col_idx).value
+                    if val is not None and isinstance(val, datetime) and col_idx == 36:
+                        row_data[col_name] = val.strftime("%m/%d/%Y")
+                    else:
+                        row_data[col_name] = str(val) if val is not None else ""
             rows.append(row_data)
         wb.close()
     except Exception as e:
