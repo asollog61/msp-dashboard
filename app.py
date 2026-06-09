@@ -658,6 +658,18 @@ def load_tenancy():
             tte_label = 'MTM'
 
         option_years = len([r for r in rows if r.get('Term', '').startswith('Option')])
+
+        # Find first option expiration date (if exercised, when would it expire)
+        first_option_exp = None
+        option_rows = [r for r in rows if r.get('Term', '').startswith('Option')]
+        if option_rows:
+            # Sort by Term (Option_1, Option_2, etc.) and get the first one's end date
+            option_rows_sorted = sorted(option_rows, key=lambda r: r.get('Term', ''))
+            first_opt = option_rows_sorted[0]
+            opt_end = to_date(first_opt.get('End Date'))
+            if opt_end:
+                first_option_exp = opt_end
+
         try:
             gross_mod = float(current_row.get('Gross Mod', 0) or 0)
         except (TypeError, ValueError):
@@ -732,6 +744,7 @@ def load_tenancy():
             'TTE_Months': tte_months,
             'TTE_Days': tte_days if tte_days is not None else 9999,
             'Options': f"{option_years}yr" if option_years > 0 else '-',
+            'First_Option_Exp': first_option_exp.strftime('%m/%d/%Y') if first_option_exp else '-',
             'Exp Date': exp_str,
             'Cancel Date': cancel_str,
             'Escalation': current_row.get('Escalation', 0) or 0,
@@ -1563,7 +1576,7 @@ def render_tenancy_tab():
 
             df['Gross_Annual'] = df['Annual'] + df['CAM_Reimb']
 
-            display_cols = ['Space', 'Tenant', 'Type', 'SF', 'Lease', 'Monthly', 'Annual', 'Gross_Annual', 'PSF', 'Gross_PSF', 'CAM_Pct', 'CAM_Reimb', 'TTE_Months', 'Exp Date', 'Cancel Date', 'Options', 'Escalation', 'Next Anniv', 'Anniv_Months', 'Next Monthly', 'Delta Monthly', 'Status', 'Yardi Diff', 'TTE_Label', 'Is_NNN']
+            display_cols = ['Space', 'Tenant', 'Type', 'SF', 'Lease', 'Monthly', 'Annual', 'Gross_Annual', 'PSF', 'Gross_PSF', 'CAM_Pct', 'CAM_Reimb', 'TTE_Months', 'Exp Date', 'Cancel Date', 'Options', 'First_Option_Exp', 'Escalation', 'Next Anniv', 'Anniv_Months', 'Next Monthly', 'Delta Monthly', 'Status', 'Yardi Diff', 'TTE_Label', 'Is_NNN']
 
             # Calculate building totals
             b_monthly = df['Monthly'].sum()
@@ -1591,6 +1604,7 @@ def render_tenancy_tab():
                 'Gross_Annual': 'Gross Annual',
                 'Gross_PSF': 'Gross PSF',
                 'TTE_Months': 'MTE',
+                'First_Option_Exp': '1st Opt Exp',
                 'Next Anniv': 'Next Anniversary',
                 'Anniv_Months': 'Anniv Δ',
                 'Next Monthly': 'New Rent',
@@ -1631,7 +1645,7 @@ def render_tenancy_tab():
                 'Lease': '', 'Monthly': f"${b_monthly:,.0f}", 'Annual': f"${b_annual:,.0f}",
                 'PSF': f"${b_wavg_psf:,.2f}", 'Gross Annual': f"${b_gross_annual:,.0f}", 'Gross PSF': '',
                 'CAM %': '', 'CAM Reimb': f"${b_cam_reimb:,.0f}",
-                'MTE': '', 'Exp Date': '', 'Cancel Date': '', 'Options': '', 'Escalation': '', 'Next Anniversary': '', 'Anniv Δ': '',
+                'MTE': '', 'Exp Date': '', 'Cancel Date': '', 'Options': '', '1st Opt Exp': '', 'Escalation': '', 'Next Anniversary': '', 'Anniv Δ': '',
                 'New Rent': '', 'Δ Monthly': '', 'Status': '', 'Yardi Diff': '', 'TTE Label': '', 'NNN': '',
             }]
 
@@ -1713,7 +1727,7 @@ def render_tenancy_tab():
     render_column_config_editor(
         'tenancy',
         ['Space', 'Tenant', 'Type', 'SF', 'Lease', 'Monthly', 'Annual', 'Gross Annual', 'PSF', 'Gross PSF',
-         'CAM %', 'CAM Reimb', 'MTE', 'Exp Date', 'Cancel Date', 'Options', 'Escalation',
+         'CAM %', 'CAM Reimb', 'MTE', 'Exp Date', 'Cancel Date', 'Options', '1st Opt Exp', 'Escalation',
          'Next Anniversary', 'Anniv Δ', 'New Rent', 'Δ Monthly', 'Status', 'Yardi Diff']
     )
     render_expense_editor()
