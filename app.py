@@ -576,10 +576,16 @@ def load_tenancy():
         if row.get('Buidling'):
             summaries.append(row)
 
-    # Term detail rows (45+)
-    detail_header = [ws.cell(45, c).value for c in range(1, 24)]
+    # Term detail rows: auto-detect the header row (the one starting with 'ID').
+    # Historically row 45, but inserts can shift it (e.g. to 46). Search 43-50.
+    detail_header_row = 45
+    for hr in range(43, 51):
+        if str(ws.cell(hr, 1).value).strip() == 'ID':
+            detail_header_row = hr
+            break
+    detail_header = [ws.cell(detail_header_row, c).value for c in range(1, 24)]
     details = {}
-    for r in range(46, ws.max_row + 1):
+    for r in range(detail_header_row + 1, ws.max_row + 1):
         row = {}
         for c, h in enumerate(detail_header, 1):
             if h:
@@ -610,13 +616,39 @@ def load_tenancy():
         next_row = None
         # Find current period: tightest fit (start <= TODAY <= end with smallest end date)
         best_end = None
+        has_current_period = False
         for r in rows_sorted:
             start = to_date(r.get('Start Date'))
             end = to_date(r.get('End Date'))
             if start and end and start <= TODAY <= end:
+                has_current_period = True
                 if best_end is None or end < best_end:
                     best_end = end
                     current_row = r
+
+        # Future tenant: no period contains TODAY and the earliest start is in the future
+        earliest_start = None
+        for r in rows_sorted:
+            s = to_date(r.get('Start Date'))
+            if s and (earliest_start is None or s < earliest_start):
+                earliest_start = s
+        is_future = (not has_current_period) and (earliest_start is not None) and (earliest_start > TODAY)
+        # For a future tenant, anchor display to the first (commencement) period
+        if is_future:
+            current_row = rows_sorted[0]
+            commence_date = earliest_start
+            # Use first period that actually carries rent (>0) for the display figures,
+            # so a $0 free-rent first month doesn't make the row look empty.
+            for r in rows_sorted:
+                try:
+                    m = float(r.get('Monthly', 0) or 0)
+                except (TypeError, ValueError):
+                    m = 0
+                if m > 0:
+                    current_row = r
+                    break
+        else:
+            commence_date = None
         # Find next row: the period starting right after current_row's end
         current_end = to_date(current_row.get('End Date'))
         for r in rows_sorted:
@@ -753,6 +785,9 @@ def load_tenancy():
             'Anniv_Months': anniv_months,
             'Next Monthly': round(next_monthly, 2) if next_monthly is not None else None,
             'Delta Monthly': round(delta_monthly, 2) if delta_monthly is not None else None,
+            'Future': is_future,
+            'Commence': commence_date.strftime('%m/%d/%Y') if commence_date else '',
+            'Commence_Date': commence_date,
         })
 
     tenants.sort(key=lambda t: (t['Building'], t['TTE_Days']))
@@ -1510,8 +1545,10 @@ def render_tenancy_tab():
     yardi_data = parse_yardi_rent_rolls()
     yardi_diffs = compute_yardi_diffs(tenants, yardi_data)
 
-    # Summary metrics
-    active = [t for t in tenants]
+    # Separate future (not-yet-commenced) tenants from current ones
+    future_tenants = [t for t in tenants if t.get('Future')]
+    # Summary metrics (current tenants only)
+    active = [t for t in tenants if not t.get('Future')]
     # Add vacancy status and Yardi diff
     for t in active:
         key = f"{t['Building']}|{t['Space']}"
@@ -1723,6 +1760,27 @@ def render_tenancy_tab():
     pc4.metric("NOI", f"${port_noi:,.0f}")
     pc5.metric("Wtd Avg Gross $/SF", f"${port_wavg_gross_psf:,.2f}")
     pc6.metric("Wtd Avg Net $/SF", f"${port_wavg_net_psf:,.2f}")
+
+    # --- FUTURE TENANTS (leases not yet commenced) ---
+    fut = future_tenants if selected == 'All' else [t for t in future_tenants if t['Building'] == selected]
+    if fut:
+        import pandas as pd
+        st.divider()
+        st.markdown(f"### 🔜 Future Tenants ({len(fut)})")
+        st.caption("Executed leases that have not yet commenced. Excluded from current portfolio totals above.")
+        # Sort by commencement date (soonest first)
+        fut_sorted = sorted(fut, key=lambda t: t.get('Commence_Date') or date.max)
+        fdf = pd.DataFrame(fut_sorted)
+        fdf['Space'] = fdf['Space'].astype(str)
+        fdf['SF'] = fdf['SF'].apply(lambda x: f"{x:,.0f}" if isinstance(x, (int, float)) and x > 1 else '')
+        fdf['Monthly'] = fdf['Monthly'].apply(lambda x: f"${x:,.0f}")
+        fdf['Annual'] = fdf['Annual'].apply(lambda x: f"${x:,.0f}")
+        fdf['PSF'] = fdf['PSF'].apply(lambda x: f"${x:,.2f}")
+        fut_cols = ['Building', 'Space', 'Tenant', 'Type', 'SF', 'Lease', 'Commence', 'Monthly', 'Annual', 'PSF', 'Exp Date', 'Options', 'First_Option_Exp']
+        fut_cols = [c for c in fut_cols if c in fdf.columns]
+        fdisplay = fdf[fut_cols].copy()
+        fdisplay.rename(columns={'Commence': 'Commences', 'First_Option_Exp': '1st Opt Exp'}, inplace=True)
+        show_grid(fdisplay, key="future_tenants", tab_key="tenancy")
 
     render_column_config_editor(
         'tenancy',
