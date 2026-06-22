@@ -2255,6 +2255,7 @@ def render_insurance_tab():
         show_grid(df[display_cols], key=f"ins_{building_name}", tab_key="insurance")
 
     render_column_config_editor('insurance', ['Tenant', 'Unit', 'Type', 'COI', 'Expiration', 'Days Left', 'Status'])
+    render_column_config_editor('insurance_building', ['Building Policy', 'COI', 'Expiration', 'Days Left', 'Status'])
 
 
 def render_deposits_tab():
