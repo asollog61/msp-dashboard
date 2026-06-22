@@ -857,7 +857,9 @@ def fuzzy_match_tenant(tenant_name, cert_name):
 
 @st.cache_data(ttl=3600)
 def scan_coi_files():
+    """Returns (coi_data, building_coi_data): tenant certs and building-level certs per building."""
     coi_data = {}
+    building_coi_data = {}
     # Check for COIs bundled in data/coi/{building}/ (Streamlit Cloud) or ACTIVE_PROPERTIES (local)
     bundled_coi = Path(os.path.dirname(__file__)) / "data" / "coi"
     for building_name, mapping in BUILDING_MAP.items():
@@ -878,10 +880,13 @@ def scan_coi_files():
                             cert_dir = d
                             break
         certs = []
+        building_certs = []
         if cert_dir and cert_dir.exists():
             for f in sorted(cert_dir.iterdir()):
                 if not f.is_file() or f.suffix.lower() != '.pdf':
                     continue
+                # Building-level COI: filename contains _building (case-insensitive)
+                is_building = '_building' in f.name.lower()
                 exp_date, insured_name = extract_cert_info(str(f))
                 if not insured_name:
                     m = re.match(r'Exp_(\d{8})_MSP\d+_(.+)\.pdf', f.name, re.IGNORECASE)
@@ -892,9 +897,14 @@ def scan_coi_files():
                             except ValueError:
                                 pass
                         insured_name = m.group(2).replace('_', ' ')
-                certs.append({'filename': f.name, 'exp_date': exp_date, 'insured_name': insured_name})
+                rec = {'filename': f.name, 'exp_date': exp_date, 'insured_name': insured_name}
+                if is_building:
+                    building_certs.append(rec)
+                else:
+                    certs.append(rec)
         coi_data[building_name] = certs
-    return coi_data
+        building_coi_data[building_name] = building_certs
+    return coi_data, building_coi_data
 
 
 # --- YARDI PDF PARSING ---
@@ -2099,7 +2109,7 @@ def render_vacancy_tab():
 
 def render_insurance_tab():
     tenants, _, summaries = load_tenancy()
-    coi_data = scan_coi_files()
+    coi_data, building_coi_data = scan_coi_files()
     today_dt = datetime.now()
     vacant_keys, vacant_meta = build_vacancy_lookup(tenants, include_auto=False)
 
@@ -2191,6 +2201,7 @@ def render_insurance_tab():
     c5.metric("Missing", summary['missing'])
 
     # Display by building
+    import pandas as pd
     for building_name in BUILDING_MAP:
         b_rows = [r for r in ins_rows if r['Building'] == building_name]
         if not b_rows:
@@ -2201,7 +2212,44 @@ def render_insurance_tab():
 
         st.markdown(f'<div class="building-header"><strong>▎ {building_name} ({code})</strong> — {b_covered}/{len(b_rows)} covered · {n_certs} files on disk</div>', unsafe_allow_html=True)
 
-        import pandas as pd
+        # --- Building-level certificate section (shown BEFORE tenants) ---
+        b_building_certs = building_coi_data.get(building_name, [])
+        bldg_rows = []
+        if b_building_certs:
+            for cert in b_building_certs:
+                exp = cert.get('exp_date')
+                if exp:
+                    days_left = (exp - today_dt).days
+                    if exp < today_dt:
+                        b_status = 'EXPIRED'
+                    elif days_left < 60:
+                        b_status = f'{days_left}d left'
+                    else:
+                        b_status = 'Active'
+                    b_exp_str = exp.strftime('%m/%d/%Y')
+                    b_days = str(days_left)
+                else:
+                    b_exp_str = 'Unknown'
+                    b_days = '—'
+                    b_status = 'No date'
+                bldg_rows.append({
+                    'Building Policy': cert.get('insured_name') or 'Building Insurance',
+                    'COI': '✅ YES', 'Expiration': b_exp_str,
+                    'Days Left': b_days, 'Status': b_status,
+                })
+        else:
+            bldg_rows.append({
+                'Building Policy': 'Building Insurance',
+                'COI': '❌ NO', 'Expiration': '—',
+                'Days Left': '—', 'Status': 'MISSING',
+            })
+        st.markdown('<div style="color:#f0883e;font-size:0.8rem;font-weight:600;margin:4px 0 2px 8px;">🏢 BUILDING CERTIFICATE</div>', unsafe_allow_html=True)
+        bldg_df = pd.DataFrame(bldg_rows)
+        bldg_cols = ['Building Policy', 'COI', 'Expiration', 'Days Left', 'Status']
+        show_grid(bldg_df[bldg_cols], key=f"ins_bldg_{building_name}", tab_key="insurance_building")
+
+        # --- Tenant certificates ---
+        st.markdown('<div style="color:#8b949e;font-size:0.8rem;font-weight:600;margin:8px 0 2px 8px;">👥 TENANTS</div>', unsafe_allow_html=True)
         df = pd.DataFrame(b_rows)
         display_cols = ['Tenant', 'Unit', 'Type', 'COI', 'Expiration', 'Days Left', 'Status']
         show_grid(df[display_cols], key=f"ins_{building_name}", tab_key="insurance")
