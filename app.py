@@ -2212,6 +2212,8 @@ def render_insurance_tab():
 
         st.markdown(f'<div class="building-header"><strong>▎ {building_name} ({code})</strong> — {b_covered}/{len(b_rows)} covered · {n_certs} files on disk</div>', unsafe_allow_html=True)
 
+        display_cols = ['Tenant', 'Unit', 'Type', 'COI', 'Expiration', 'Days Left', 'Status']
+
         # --- Building-level certificate section (shown BEFORE tenants) ---
         b_building_certs = building_coi_data.get(building_name, [])
         bldg_rows = []
@@ -2228,30 +2230,31 @@ def render_insurance_tab():
                         b_status = 'Active'
                     b_exp_str = exp.strftime('%m/%d/%Y')
                     b_days = str(days_left)
+                    b_coi = '✅ YES'
                 else:
                     b_exp_str = 'Unknown'
                     b_days = '—'
                     b_status = 'No date'
+                    b_coi = '✅ YES'
                 bldg_rows.append({
-                    'Building Policy': cert.get('insured_name') or 'Building Insurance',
-                    'COI': '✅ YES', 'Expiration': b_exp_str,
+                    'Tenant': cert.get('insured_name') or building_name,
+                    'Unit': '', 'Type': 'Building',
+                    'COI': b_coi, 'Expiration': b_exp_str,
                     'Days Left': b_days, 'Status': b_status,
                 })
         else:
             bldg_rows.append({
-                'Building Policy': 'Building Insurance',
+                'Tenant': building_name, 'Unit': '', 'Type': 'Building',
                 'COI': '❌ NO', 'Expiration': '—',
                 'Days Left': '—', 'Status': 'MISSING',
             })
         st.markdown('<div style="color:#f0883e;font-size:0.8rem;font-weight:600;margin:4px 0 2px 8px;">🏢 BUILDING CERTIFICATE</div>', unsafe_allow_html=True)
         bldg_df = pd.DataFrame(bldg_rows)
-        bldg_cols = ['Building Policy', 'COI', 'Expiration', 'Days Left', 'Status']
-        show_grid(bldg_df[bldg_cols], key=f"ins_bldg_{building_name}", tab_key="insurance")
+        show_grid(bldg_df[display_cols], key=f"ins_bldg_{building_name}", tab_key="insurance")
 
         # --- Tenant certificates ---
         st.markdown('<div style="color:#8b949e;font-size:0.8rem;font-weight:600;margin:8px 0 2px 8px;">👥 TENANTS</div>', unsafe_allow_html=True)
         df = pd.DataFrame(b_rows)
-        display_cols = ['Tenant', 'Unit', 'Type', 'COI', 'Expiration', 'Days Left', 'Status']
         show_grid(df[display_cols], key=f"ins_{building_name}", tab_key="insurance")
 
     render_column_config_editor('insurance', ['Tenant', 'Unit', 'Type', 'COI', 'Expiration', 'Days Left', 'Status'])
