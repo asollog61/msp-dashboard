@@ -398,6 +398,16 @@ def show_grid(df, key, height=None, fit_columns=True, pinned_bottom=None, column
     if 'Building' in df.columns:
         gb.configure_column('Building', width=130, minWidth=100)
 
+    # Render 'View' column as a clickable link (opens PDF in new tab)
+    if 'View' in df.columns:
+        view_renderer = JsCode("""
+            function(params) {
+                if (!params.value) { return ''; }
+                return '<a href="' + params.value + '" target="_blank" rel="noopener" style="color:#58a6ff;text-decoration:none;font-weight:600;">📄 View</a>';
+            }
+        """)
+        gb.configure_column('View', cellRenderer=view_renderer, width=90, minWidth=70, suppressSizeToFit=True, filter=False, sortable=False, cellStyle={'text-align': 'center'})
+
     if column_configs:
         for col, cfg in column_configs.items():
             if col in df.columns:
@@ -853,6 +863,17 @@ def fuzzy_match_tenant(tenant_name, cert_name):
     if t_words and c_words and t_words[0] == c_words[0]:
         return True
     return len(set(t_words) & set(c_words)) >= 1
+
+
+COI_RAW_BASE = "https://raw.githubusercontent.com/asollog61/msp-dashboard/master/data/coi"
+
+
+def build_coi_url(building_name, filename):
+    """Build a clickable GitHub raw URL for a COI PDF (URL-encoded)."""
+    from urllib.parse import quote
+    if not filename:
+        return ''
+    return f"{COI_RAW_BASE}/{quote(building_name)}/{quote(filename)}"
 
 
 @st.cache_data(ttl=3600)
@@ -2182,13 +2203,14 @@ def render_insurance_tab():
                 'COI': '✅ YES', 'Expiration': exp_str,
                 'Days Left': str(days_left) if days_left is not None else '—',
                 'Status': status, 'File': matched['filename'],
+                'View': build_coi_url(b, matched['filename']),
             })
         else:
             summary['missing'] += 1
             ins_rows.append({
                 'Building': b, 'Tenant': name, 'Unit': str(unit), 'Type': ttype,
                 'COI': '❌ NO', 'Expiration': '—', 'Days Left': '—',
-                'Status': 'MISSING', 'File': '',
+                'Status': 'MISSING', 'File': '', 'View': '',
             })
 
     # Summary metrics
@@ -2212,7 +2234,7 @@ def render_insurance_tab():
 
         st.markdown(f'<div class="building-header"><strong>▎ {building_name} ({code})</strong> — {b_covered}/{len(b_rows)} covered · {n_certs} files on disk</div>', unsafe_allow_html=True)
 
-        display_cols = ['Tenant', 'Unit', 'Type', 'COI', 'Expiration', 'Days Left', 'Status']
+        display_cols = ['Tenant', 'Unit', 'Type', 'COI', 'Expiration', 'Days Left', 'Status', 'View']
 
         # --- Building-level certificate section (shown BEFORE tenants) ---
         b_building_certs = building_coi_data.get(building_name, [])
@@ -2241,12 +2263,13 @@ def render_insurance_tab():
                     'Unit': '', 'Type': 'Building',
                     'COI': b_coi, 'Expiration': b_exp_str,
                     'Days Left': b_days, 'Status': b_status,
+                    'View': build_coi_url(building_name, cert.get('filename')),
                 })
         else:
             bldg_rows.append({
                 'Tenant': building_name, 'Unit': '', 'Type': 'Building',
                 'COI': '❌ NO', 'Expiration': '—',
-                'Days Left': '—', 'Status': 'MISSING',
+                'Days Left': '—', 'Status': 'MISSING', 'View': '',
             })
         st.markdown('<div style="color:#f0883e;font-size:0.8rem;font-weight:600;margin:4px 0 2px 8px;">🏢 BUILDING CERTIFICATE</div>', unsafe_allow_html=True)
         bldg_df = pd.DataFrame(bldg_rows)
@@ -2257,7 +2280,7 @@ def render_insurance_tab():
         df = pd.DataFrame(b_rows)
         show_grid(df[display_cols], key=f"ins_{building_name}", tab_key="insurance")
 
-    render_column_config_editor('insurance', ['Tenant', 'Unit', 'Type', 'COI', 'Expiration', 'Days Left', 'Status'])
+    render_column_config_editor('insurance', ['Tenant', 'Unit', 'Type', 'COI', 'Expiration', 'Days Left', 'Status', 'View'])
 
 
 def render_deposits_tab():
