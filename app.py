@@ -65,10 +65,10 @@ for p in [
         break
 
 BUILDING_MAP = {
-    "114 Central": {"code": "MSP114", "dest_folder": "114 Central Westfield", "share": "0_114Share"},
-    "15 South": {"code": "MSP15", "dest_folder": "15 South Street", "share": "0_15Share"},
-    "36 South": {"code": "MSP36", "dest_folder": "36 South Street", "share": "0_36Share"},
-    "1280 Springfield": {"code": "MSP1280", "dest_folder": "1280-86 Springfield Ave", "share": "0_1280Share"},
+    "114 Central": {"code": "MSP114", "dest_folder": "114 Central", "share": "0_114Share"},
+    "15 South": {"code": "MSP15", "dest_folder": "15 South", "share": "0_15Share"},
+    "36 South": {"code": "MSP36", "dest_folder": "36 South", "share": "0_36Share"},
+    "1280 Springfield": {"code": "MSP1280", "dest_folder": "1280 Springfield", "share": "0_1280Share"},
 }
 
 ACTIVE_PROPS_ROOT = None
