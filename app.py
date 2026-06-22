@@ -2246,7 +2246,7 @@ def render_insurance_tab():
         st.markdown('<div style="color:#f0883e;font-size:0.8rem;font-weight:600;margin:4px 0 2px 8px;">🏢 BUILDING CERTIFICATE</div>', unsafe_allow_html=True)
         bldg_df = pd.DataFrame(bldg_rows)
         bldg_cols = ['Building Policy', 'COI', 'Expiration', 'Days Left', 'Status']
-        show_grid(bldg_df[bldg_cols], key=f"ins_bldg_{building_name}", tab_key="insurance_building")
+        show_grid(bldg_df[bldg_cols], key=f"ins_bldg_{building_name}", tab_key="insurance")
 
         # --- Tenant certificates ---
         st.markdown('<div style="color:#8b949e;font-size:0.8rem;font-weight:600;margin:8px 0 2px 8px;">👥 TENANTS</div>', unsafe_allow_html=True)
@@ -2255,7 +2255,6 @@ def render_insurance_tab():
         show_grid(df[display_cols], key=f"ins_{building_name}", tab_key="insurance")
 
     render_column_config_editor('insurance', ['Tenant', 'Unit', 'Type', 'COI', 'Expiration', 'Days Left', 'Status'])
-    render_column_config_editor('insurance_building', ['Building Policy', 'COI', 'Expiration', 'Days Left', 'Status'])
 
 
 def render_deposits_tab():
