@@ -400,13 +400,24 @@ def show_grid(df, key, height=None, fit_columns=True, pinned_bottom=None, column
 
     # Render 'View' column as a clickable link (opens PDF in new tab)
     if 'View' in df.columns:
+        # Use HTML cell renderer with proper escaping for the URL
         view_renderer = JsCode("""
-            function(params) {
-                if (!params.value) { return ''; }
-                return '<a href="' + params.value + '" target="_blank" rel="noopener" style="color:#58a6ff;text-decoration:none;font-weight:600;">📄 View</a>';
+            class ViewCellRenderer {
+                init(params) {
+                    this.eGui = document.createElement('div');
+                    this.eGui.style.textAlign = 'center';
+                    if (params.value) {
+                        this.eGui.innerHTML = '<a href="' + params.value + '" target="_blank" rel="noopener" style="color:#58a6ff;text-decoration:none;font-weight:600;">📄 View</a>';
+                    } else {
+                        this.eGui.innerHTML = '';
+                    }
+                }
+                getGui() {
+                    return this.eGui;
+                }
             }
         """)
-        gb.configure_column('View', cellRenderer=view_renderer, width=90, minWidth=70, suppressSizeToFit=True, filter=False, sortable=False, cellStyle={'text-align': 'center'})
+        gb.configure_column('View', cellRenderer=view_renderer, width=90, minWidth=70, suppressSizeToFit=True, filter=False, sortable=False)
 
     if column_configs:
         for col, cfg in column_configs.items():
