@@ -889,9 +889,10 @@ def build_coi_url(building_name, filename):
 
 @st.cache_data(ttl=3600)
 def scan_coi_files():
-    """Returns (coi_data, building_coi_data): tenant certs and building-level certs per building."""
+    """Returns (coi_data, building_coi_data, pm_coi_data): tenant certs, building-level certs, and PM certs per building."""
     coi_data = {}
     building_coi_data = {}
+    pm_coi_data = {}
     # Check for COIs bundled in data/coi/{building}/ (Streamlit Cloud) or ACTIVE_PROPERTIES (local)
     bundled_coi = Path(os.path.dirname(__file__)) / "data" / "coi"
     for building_name, mapping in BUILDING_MAP.items():
@@ -913,12 +914,16 @@ def scan_coi_files():
                             break
         certs = []
         building_certs = []
+        pm_certs = []
         if cert_dir and cert_dir.exists():
             for f in sorted(cert_dir.iterdir()):
                 if not f.is_file() or f.suffix.lower() != '.pdf':
                     continue
+                fname_lower = f.name.lower()
                 # Building-level COI: filename contains _building (case-insensitive)
-                is_building = '_building' in f.name.lower()
+                is_building = '_building' in fname_lower
+                # PM COI: filename contains _pm or _property_manager
+                is_pm = '_pm' in fname_lower or '_property_manager' in fname_lower
                 exp_date, insured_name = extract_cert_info(str(f))
                 if not insured_name:
                     m = re.match(r'Exp_(\d{8})_MSP\d+_(.+)\.pdf', f.name, re.IGNORECASE)
@@ -930,13 +935,16 @@ def scan_coi_files():
                                 pass
                         insured_name = m.group(2).replace('_', ' ')
                 rec = {'filename': f.name, 'exp_date': exp_date, 'insured_name': insured_name}
-                if is_building:
+                if is_pm:
+                    pm_certs.append(rec)
+                elif is_building:
                     building_certs.append(rec)
                 else:
                     certs.append(rec)
         coi_data[building_name] = certs
         building_coi_data[building_name] = building_certs
-    return coi_data, building_coi_data
+        pm_coi_data[building_name] = pm_certs
+    return coi_data, building_coi_data, pm_coi_data
 
 
 # --- YARDI PDF PARSING ---
@@ -2141,7 +2149,7 @@ def render_vacancy_tab():
 
 def render_insurance_tab():
     tenants, _, summaries = load_tenancy()
-    coi_data, building_coi_data = scan_coi_files()
+    coi_data, building_coi_data, pm_coi_data = scan_coi_files()
     today_dt = datetime.now()
     vacant_keys, vacant_meta = build_vacancy_lookup(tenants, include_auto=False)
 
@@ -2285,6 +2293,45 @@ def render_insurance_tab():
         st.markdown('<div style="color:#f0883e;font-size:0.8rem;font-weight:600;margin:4px 0 2px 8px;">🏢 BUILDING CERTIFICATE</div>', unsafe_allow_html=True)
         bldg_df = pd.DataFrame(bldg_rows)
         show_grid(bldg_df[display_cols], key=f"ins_bldg_{building_name}", tab_key="insurance")
+
+        # --- Property Manager certificate section ---
+        b_pm_certs = pm_coi_data.get(building_name, [])
+        pm_rows = []
+        if b_pm_certs:
+            for cert in b_pm_certs:
+                exp = cert.get('exp_date')
+                if exp:
+                    days_left = (exp - today_dt).days
+                    if exp < today_dt:
+                        pm_status = 'EXPIRED'
+                    elif days_left < 60:
+                        pm_status = f'{days_left}d left'
+                    else:
+                        pm_status = 'Active'
+                    pm_exp_str = exp.strftime('%m/%d/%Y')
+                    pm_days = str(days_left)
+                    pm_coi = '✅ YES'
+                else:
+                    pm_exp_str = 'Unknown'
+                    pm_days = '—'
+                    pm_status = 'No date'
+                    pm_coi = '✅ YES'
+                pm_rows.append({
+                    'Tenant': cert.get('insured_name') or 'Property Manager',
+                    'Unit': '', 'Type': 'PM',
+                    'COI': pm_coi, 'Expiration': pm_exp_str,
+                    'Days Left': pm_days, 'Status': pm_status,
+                    'View': build_coi_url(building_name, cert.get('filename')),
+                })
+        else:
+            pm_rows.append({
+                'Tenant': 'Property Manager', 'Unit': '', 'Type': 'PM',
+                'COI': '❌ NO', 'Expiration': '—',
+                'Days Left': '—', 'Status': 'MISSING', 'View': '',
+            })
+        st.markdown('<div style="color:#9b59b6;font-size:0.8rem;font-weight:600;margin:8px 0 2px 8px;">👤 PROPERTY MANAGER CERTIFICATE</div>', unsafe_allow_html=True)
+        pm_df = pd.DataFrame(pm_rows)
+        show_grid(pm_df[display_cols], key=f"ins_pm_{building_name}", tab_key="insurance")
 
         # --- Tenant certificates ---
         st.markdown('<div style="color:#8b949e;font-size:0.8rem;font-weight:600;margin:8px 0 2px 8px;">👥 TENANTS</div>', unsafe_allow_html=True)
