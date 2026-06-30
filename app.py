@@ -922,8 +922,6 @@ def scan_coi_files():
                 fname_lower = f.name.lower()
                 # Building-level COI: filename contains _building (case-insensitive)
                 is_building = '_building' in fname_lower
-                # PM COI: filename contains _pm or _property_manager
-                is_pm = '_pm' in fname_lower or '_property_manager' in fname_lower
                 exp_date, insured_name = extract_cert_info(str(f))
                 if not insured_name:
                     m = re.match(r'Exp_(\d{8})_MSP\d+_(.+)\.pdf', f.name, re.IGNORECASE)
@@ -934,6 +932,8 @@ def scan_coi_files():
                             except ValueError:
                                 pass
                         insured_name = m.group(2).replace('_', ' ')
+                # PM COI: insured name contains "Proventus" (property manager)
+                is_pm = insured_name and 'proventus' in insured_name.lower()
                 rec = {'filename': f.name, 'exp_date': exp_date, 'insured_name': insured_name}
                 if is_pm:
                     pm_certs.append(rec)
