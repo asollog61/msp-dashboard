@@ -2204,22 +2204,26 @@ def render_insurance_tab():
                 if exp < today_dt:
                     status = 'EXPIRED'
                     summary['expired'] += 1
+                    coi_label = '❌ EXP'
                 elif days_left < 60:
                     status = f'{days_left}d left'
                     summary['expiring_soon'] += 1
                     summary['covered'] += 1
+                    coi_label = '✅ YES'
                 else:
                     status = 'Active'
                     summary['covered'] += 1
+                    coi_label = '✅ YES'
                 exp_str = exp.strftime('%m/%d/%Y')
             else:
                 exp_str = 'Unknown'
                 days_left = None
                 status = 'No date'
                 summary['covered'] += 1
+                coi_label = '✅ YES'
             ins_rows.append({
                 'Building': b, 'Tenant': name, 'Unit': str(unit), 'Type': ttype,
-                'COI': '✅ YES', 'Expiration': exp_str,
+                'COI': coi_label, 'Expiration': exp_str,
                 'Days Left': str(days_left) if days_left is not None else '—',
                 'Status': status, 'File': matched['filename'],
                 'View': build_coi_url(b, matched['filename']),
@@ -2265,13 +2269,15 @@ def render_insurance_tab():
                     days_left = (exp - today_dt).days
                     if exp < today_dt:
                         b_status = 'EXPIRED'
+                        b_coi = '❌ EXP'
                     elif days_left < 60:
                         b_status = f'{days_left}d left'
+                        b_coi = '✅ YES'
                     else:
                         b_status = 'Active'
+                        b_coi = '✅ YES'
                     b_exp_str = exp.strftime('%m/%d/%Y')
                     b_days = str(days_left)
-                    b_coi = '✅ YES'
                 else:
                     b_exp_str = 'Unknown'
                     b_days = '—'
@@ -2304,13 +2310,15 @@ def render_insurance_tab():
                     days_left = (exp - today_dt).days
                     if exp < today_dt:
                         pm_status = 'EXPIRED'
+                        pm_coi = '❌ EXP'
                     elif days_left < 60:
                         pm_status = f'{days_left}d left'
+                        pm_coi = '✅ YES'
                     else:
                         pm_status = 'Active'
+                        pm_coi = '✅ YES'
                     pm_exp_str = exp.strftime('%m/%d/%Y')
                     pm_days = str(days_left)
-                    pm_coi = '✅ YES'
                 else:
                     pm_exp_str = 'Unknown'
                     pm_days = '—'
