@@ -2147,13 +2147,477 @@ def render_vacancy_tab():
     render_column_config_editor('marketing', list(mdf.columns))
 
 
+# --- COI EMAIL REPORT ---
+EMAIL_TEAM_RECIPIENTS = [
+    "asollog@gmail.com",
+    "richard.b.angel@gmail.com",
+    "jason.forster@proventusproperties.com",
+]
+
+
+def build_coi_report_data():
+    """Build a unified list of every COI line item (building, PM, tenant) across all
+    properties with a normalized status and days_left, for use in the email report
+    and the urgent / expiring dashboard sections.
+
+    Returns (items, summary) where items is a list of dicts:
+      {building, code, category, entity, unit, coi, expiration (date|None),
+       exp_str, days_left (int|None), status}
+    """
+    tenants, _, summaries = load_tenancy()
+    coi_data, building_coi_data, pm_coi_data = scan_coi_files()
+    today_dt = datetime.now()
+    vacant_keys, vacant_meta = build_vacancy_lookup(tenants, include_auto=False)
+
+    items = []
+    summary = {'total': 0, 'covered': 0, 'expired': 0, 'missing': 0, 'expiring_soon': 0}
+
+    def _classify(exp):
+        """Return (status, coi_label, days_left) for an expiration date."""
+        if not exp:
+            return ('No date', '✅ YES', None)
+        dl = (exp - today_dt).days
+        if exp < today_dt:
+            return ('EXPIRED', '❌ EXP', dl)
+        if dl < 90:
+            return (f'{dl}d left', '✅ YES', dl)
+        return ('Active', '✅ YES', dl)
+
+    for building_name in BUILDING_MAP:
+        code = BUILDING_MAP[building_name]['code']
+
+        # Building-level certificate
+        b_building_certs = building_coi_data.get(building_name, [])
+        if b_building_certs:
+            for cert in b_building_certs:
+                exp = cert.get('exp_date')
+                status, coi_label, dl = _classify(exp)
+                items.append({
+                    'building': building_name, 'code': code, 'category': 'Building',
+                    'entity': cert.get('insured_name') or building_name, 'unit': '',
+                    'coi': coi_label, 'expiration': exp,
+                    'exp_str': exp.strftime('%m/%d/%Y') if exp else 'Unknown',
+                    'days_left': dl, 'status': status,
+                })
+        else:
+            items.append({
+                'building': building_name, 'code': code, 'category': 'Building',
+                'entity': building_name, 'unit': '', 'coi': '❌ NO',
+                'expiration': None, 'exp_str': '—', 'days_left': None,
+                'status': 'MISSING',
+            })
+
+        # Property Manager certificate
+        b_pm_certs = pm_coi_data.get(building_name, [])
+        if b_pm_certs:
+            for cert in b_pm_certs:
+                exp = cert.get('exp_date')
+                status, coi_label, dl = _classify(exp)
+                items.append({
+                    'building': building_name, 'code': code, 'category': 'Property Manager',
+                    'entity': cert.get('insured_name') or 'Property Manager', 'unit': '',
+                    'coi': coi_label, 'expiration': exp,
+                    'exp_str': exp.strftime('%m/%d/%Y') if exp else 'Unknown',
+                    'days_left': dl, 'status': status,
+                })
+        else:
+            items.append({
+                'building': building_name, 'code': code, 'category': 'Property Manager',
+                'entity': 'Property Manager', 'unit': '', 'coi': '❌ NO',
+                'expiration': None, 'exp_str': '—', 'days_left': None,
+                'status': 'MISSING',
+            })
+
+    # Tenant certificates
+    for s in summaries:
+        b = s.get('Buidling', '')
+        name = s.get('Tenant Name', '')
+        ttype = s.get('Type', '')
+        unit = s.get('Unit', '')
+        if not b or not name:
+            continue
+        if ttype and 'apartment' in str(ttype).lower():
+            continue
+        key = f"{b}|{str(unit).strip()}"
+        if key in vacant_keys:
+            continue  # vacant units don't need a COI
+
+        summary['total'] += 1
+        code = BUILDING_MAP.get(b, {}).get('code', '')
+        b_certs = coi_data.get(b, [])
+        matched = None
+        for cert in b_certs:
+            if fuzzy_match_tenant(name, cert.get('insured_name')):
+                matched = cert
+                break
+        if not matched:
+            for cert in b_certs:
+                if fuzzy_match_tenant(name, cert['filename']):
+                    matched = cert
+                    break
+
+        if matched:
+            exp = matched['exp_date']
+            status, coi_label, dl = _classify(exp)
+            if status == 'EXPIRED':
+                summary['expired'] += 1
+            else:
+                summary['covered'] += 1
+                if dl is not None and dl < 90:
+                    summary['expiring_soon'] += 1
+            items.append({
+                'building': b, 'code': code, 'category': 'Tenant',
+                'entity': name, 'unit': str(unit), 'coi': coi_label,
+                'expiration': exp,
+                'exp_str': exp.strftime('%m/%d/%Y') if exp else 'Unknown',
+                'days_left': dl, 'status': status,
+            })
+        else:
+            summary['missing'] += 1
+            items.append({
+                'building': b, 'code': code, 'category': 'Tenant',
+                'entity': name, 'unit': str(unit), 'coi': '❌ NO',
+                'expiration': None, 'exp_str': '—', 'days_left': None,
+                'status': 'MISSING',
+            })
+
+    return items, summary
+
+
+def split_urgent_expiring(items):
+    """Split items into (urgent, expiring). Urgent = expired OR missing.
+    Expiring = active certs with days_left < 90, sorted soonest-first."""
+    urgent = [it for it in items if it['status'] == 'EXPIRED' or it['status'] == 'MISSING']
+    # urgent: expired (by most overdue) then missing
+    urgent.sort(key=lambda it: (it['status'] != 'EXPIRED',
+                                it['days_left'] if it['days_left'] is not None else 0))
+    expiring = [it for it in items
+                if it['status'] not in ('EXPIRED', 'MISSING', 'No date')
+                and it['days_left'] is not None and 0 <= it['days_left'] < 90]
+    expiring.sort(key=lambda it: it['days_left'])
+    return urgent, expiring
+
+
+def generate_coi_pdf(items, summary):
+    """Generate a PDF report of the COI status. Returns bytes."""
+    from reportlab.lib import colors
+    from reportlab.lib.pagesizes import letter
+    from reportlab.lib.units import inch
+    from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+    from reportlab.platypus import (SimpleDocTemplate, Table, TableStyle, Paragraph,
+                                    Spacer)
+    import io
+
+    urgent, expiring = split_urgent_expiring(items)
+    buf = io.BytesIO()
+    doc = SimpleDocTemplate(buf, pagesize=letter,
+                            leftMargin=0.6 * inch, rightMargin=0.6 * inch,
+                            topMargin=0.6 * inch, bottomMargin=0.6 * inch)
+    styles = getSampleStyleSheet()
+    title_style = ParagraphStyle('T', parent=styles['Title'], fontSize=18,
+                                 textColor=colors.HexColor('#1a3a5c'))
+    h2 = ParagraphStyle('H2', parent=styles['Heading2'], fontSize=13,
+                        spaceBefore=14, spaceAfter=6)
+    small = ParagraphStyle('S', parent=styles['Normal'], fontSize=9,
+                           textColor=colors.HexColor('#555555'))
+    story = []
+    today_str = datetime.now().strftime('%B %d, %Y')
+    story.append(Paragraph("Marion Street Properties", title_style))
+    story.append(Paragraph("Certificate of Insurance Status Report", h2))
+    story.append(Paragraph(f"Generated {today_str}", small))
+    story.append(Spacer(1, 10))
+
+    cov = (summary['covered'] / summary['total'] * 100) if summary['total'] else 0
+    story.append(Paragraph(
+        f"<b>Coverage:</b> {cov:.0f}%  |  <b>Active:</b> {summary['covered'] - summary['expiring_soon']}  |  "
+        f"<b>Expiring Soon:</b> {summary['expiring_soon']}  |  <b>Expired:</b> {summary['expired']}  |  "
+        f"<b>Missing:</b> {summary['missing']}", styles['Normal']))
+    story.append(Spacer(1, 6))
+
+    cell_style = ParagraphStyle('cell', parent=styles['Normal'], fontSize=8, leading=9)
+    hdr_cell = ParagraphStyle('hcell', parent=styles['Normal'], fontSize=8,
+                              leading=9, textColor=colors.white,
+                              fontName='Helvetica-Bold')
+
+    def _table(rows, header_color):
+        header = [Paragraph(h, hdr_cell) for h in
+                  ['Property', 'Type', 'Entity', 'Unit', 'Expiration', 'Days', 'Status']]
+        data = [header]
+        for it in rows:
+            days = '' if it['days_left'] is None else str(it['days_left'])
+            data.append([it['code'], it['category'],
+                         Paragraph(it['entity'], cell_style),
+                         it['unit'], it['exp_str'], days, it['status']])
+        t = Table(data, repeatRows=1,
+                  colWidths=[0.7*inch, 0.95*inch, 2.25*inch, 0.55*inch, 0.8*inch, 0.55*inch, 0.85*inch])
+        style = [
+            ('BACKGROUND', (0, 0), (-1, 0), header_color),
+            ('TEXTCOLOR', (0, 0), (-1, 0), colors.white),
+            ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+            ('FONTSIZE', (0, 0), (-1, -1), 8),
+            ('GRID', (0, 0), (-1, -1), 0.4, colors.HexColor('#cccccc')),
+            ('ROWBACKGROUNDS', (0, 1), (-1, -1), [colors.white, colors.HexColor('#f4f6f8')]),
+            ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
+            ('TOPPADDING', (0, 0), (-1, -1), 3),
+            ('BOTTOMPADDING', (0, 0), (-1, -1), 3),
+        ]
+        for i, it in enumerate(rows, start=1):
+            if it['status'] == 'EXPIRED':
+                style.append(('TEXTCOLOR', (6, i), (6, i), colors.HexColor('#c0392b')))
+                style.append(('FONTNAME', (6, i), (6, i), 'Helvetica-Bold'))
+            elif it['status'] == 'MISSING':
+                style.append(('TEXTCOLOR', (6, i), (6, i), colors.HexColor('#b9770e')))
+                style.append(('FONTNAME', (6, i), (6, i), 'Helvetica-Bold'))
+        t.setStyle(TableStyle(style))
+        return t
+
+    urgent_style = ParagraphStyle('HU', parent=h2, textColor=colors.HexColor('#c0392b'))
+    exp_style = ParagraphStyle('HE', parent=h2, textColor=colors.HexColor('#b9770e'))
+    story.append(Paragraph("URGENT — Expired &amp; Missing Certificates", urgent_style))
+    if urgent:
+        story.append(_table(urgent, colors.HexColor('#c0392b')))
+    else:
+        story.append(Paragraph("None — all certificates present and current.", styles['Normal']))
+
+    story.append(Paragraph("Expiring in the Next 3 Months", exp_style))
+    if expiring:
+        story.append(_table(expiring, colors.HexColor('#b9770e')))
+    else:
+        story.append(Paragraph("None expiring in the next 90 days.", styles['Normal']))
+
+    doc.build(story)
+    return buf.getvalue()
+
+
+def build_coi_email_text(items, summary):
+    """Build the plain-text + HTML email body for the COI report."""
+    urgent, expiring = split_urgent_expiring(items)
+    today_str = datetime.now().strftime('%B %d, %Y')
+    cov = (summary['covered'] / summary['total'] * 100) if summary['total'] else 0
+
+    lines = []
+    lines.append("Hi Addison, Richie, and Jason,")
+    lines.append("")
+    lines.append(f"Certificate of Insurance status as of {today_str}:")
+    lines.append("")
+    lines.append(f"Coverage: {cov:.0f}%  |  Active: {summary['covered'] - summary['expiring_soon']}  |  "
+                 f"Expiring Soon: {summary['expiring_soon']}  |  Expired: {summary['expired']}  |  "
+                 f"Missing: {summary['missing']}")
+    lines.append("")
+    lines.append("=== URGENT — EXPIRED & MISSING ===")
+    if urgent:
+        for it in urgent:
+            if it['status'] == 'EXPIRED':
+                od = abs(it['days_left']) if it['days_left'] is not None else '?'
+                lines.append(f"  [EXPIRED {od}d ago] {it['code']} — {it['category']}: "
+                             f"{it['entity']}{(' (Unit ' + it['unit'] + ')') if it['unit'] else ''} "
+                             f"— exp. {it['exp_str']}")
+            else:
+                lines.append(f"  [MISSING] {it['code']} — {it['category']}: "
+                             f"{it['entity']}{(' (Unit ' + it['unit'] + ')') if it['unit'] else ''}")
+    else:
+        lines.append("  None — all certificates present and current.")
+    lines.append("")
+    lines.append("=== EXPIRING IN NEXT 3 MONTHS (soonest first) ===")
+    if expiring:
+        for it in expiring:
+            lines.append(f"  [{it['days_left']}d left] {it['code']} — {it['category']}: "
+                         f"{it['entity']}{(' (Unit ' + it['unit'] + ')') if it['unit'] else ''} "
+                         f"— exp. {it['exp_str']}")
+    else:
+        lines.append("  None expiring in the next 90 days.")
+    lines.append("")
+    lines.append("Full status report attached (PDF).")
+    lines.append("")
+    lines.append("— Sis")
+    lines.append("Marion Street Properties")
+    text = "\n".join(lines)
+
+    def _rows_html(rows, kind):
+        if not rows:
+            note = ("None — all certificates present and current." if kind == 'urgent'
+                    else "None expiring in the next 90 days.")
+            return f'<tr><td colspan="5" style="padding:6px;color:#2e7d32;">{note}</td></tr>'
+        out = []
+        for it in rows:
+            if it['status'] == 'EXPIRED':
+                badge = f'<span style="color:#c0392b;font-weight:bold;">EXPIRED</span>'
+            elif it['status'] == 'MISSING':
+                badge = f'<span style="color:#b9770e;font-weight:bold;">MISSING</span>'
+            else:
+                badge = f'<span style="color:#b9770e;">{it["days_left"]}d left</span>'
+            unit = f" (Unit {it['unit']})" if it['unit'] else ''
+            out.append(
+                f'<tr>'
+                f'<td style="padding:5px 8px;border-bottom:1px solid #eee;">{it["code"]}</td>'
+                f'<td style="padding:5px 8px;border-bottom:1px solid #eee;">{it["category"]}</td>'
+                f'<td style="padding:5px 8px;border-bottom:1px solid #eee;">{it["entity"]}{unit}</td>'
+                f'<td style="padding:5px 8px;border-bottom:1px solid #eee;">{it["exp_str"]}</td>'
+                f'<td style="padding:5px 8px;border-bottom:1px solid #eee;">{badge}</td>'
+                f'</tr>')
+        return "".join(out)
+
+    html = f"""\
+<html><body style="font-family:Arial,Helvetica,sans-serif;color:#222;font-size:14px;">
+<p>Hi Addison, Richie, and Jason,</p>
+<p>Certificate of Insurance status as of <b>{today_str}</b>:</p>
+<p style="background:#f4f6f8;padding:10px;border-radius:6px;">
+<b>Coverage:</b> {cov:.0f}% &nbsp;|&nbsp; <b>Active:</b> {summary['covered'] - summary['expiring_soon']} &nbsp;|&nbsp;
+<b>Expiring Soon:</b> {summary['expiring_soon']} &nbsp;|&nbsp; <b>Expired:</b> {summary['expired']} &nbsp;|&nbsp;
+<b>Missing:</b> {summary['missing']}</p>
+<h3 style="color:#c0392b;margin-bottom:4px;">⚠️ Urgent — Expired &amp; Missing</h3>
+<table style="border-collapse:collapse;width:100%;font-size:13px;">
+<tr style="background:#c0392b;color:#fff;">
+<th style="padding:6px 8px;text-align:left;">Property</th><th style="padding:6px 8px;text-align:left;">Type</th>
+<th style="padding:6px 8px;text-align:left;">Entity</th><th style="padding:6px 8px;text-align:left;">Expiration</th>
+<th style="padding:6px 8px;text-align:left;">Status</th></tr>
+{_rows_html(urgent, 'urgent')}
+</table>
+<h3 style="color:#b9770e;margin-bottom:4px;margin-top:18px;">🗓️ Expiring in Next 3 Months</h3>
+<table style="border-collapse:collapse;width:100%;font-size:13px;">
+<tr style="background:#b9770e;color:#fff;">
+<th style="padding:6px 8px;text-align:left;">Property</th><th style="padding:6px 8px;text-align:left;">Type</th>
+<th style="padding:6px 8px;text-align:left;">Entity</th><th style="padding:6px 8px;text-align:left;">Expiration</th>
+<th style="padding:6px 8px;text-align:left;">Status</th></tr>
+{_rows_html(expiring, 'expiring')}
+</table>
+<p style="margin-top:18px;">Full status report attached (PDF).</p>
+<p>— Sis<br>Marion Street Properties</p>
+</body></html>"""
+    return text, html
+
+
+def send_coi_email(items, summary):
+    """Send the COI report to the team. Returns (ok, message).
+    SMTP credentials are read from st.secrets['smtp'].
+    Expected secrets:
+      [smtp]
+      host = "smtp.gmail.com"
+      port = 587
+      user = "Sis.MarionStreet@gmail.com"
+      password = "<app password>"
+      from = "Sis.MarionStreet@gmail.com"   # optional, defaults to user
+    """
+    import smtplib
+    from email.mime.multipart import MIMEMultipart
+    from email.mime.text import MIMEText
+    from email.mime.application import MIMEApplication
+
+    try:
+        smtp_cfg = dict(st.secrets['smtp'])
+    except Exception:
+        return (False, "SMTP credentials not configured. Add an [smtp] section to "
+                       "Streamlit Cloud secrets (host, port, user, password).")
+
+    host = smtp_cfg.get('host', 'smtp.gmail.com')
+    port = int(smtp_cfg.get('port', 587))
+    user = smtp_cfg.get('user')
+    password = smtp_cfg.get('password')
+    sender = smtp_cfg.get('from', user)
+    if not user or not password:
+        return (False, "SMTP user/password missing from secrets.")
+
+    text, html = build_coi_email_text(items, summary)
+    subject = f"MSP Certificate of Insurance Report — {datetime.now().strftime('%m/%d/%Y')}"
+
+    msg = MIMEMultipart('mixed')
+    msg['Subject'] = subject
+    msg['From'] = sender
+    msg['To'] = ", ".join(EMAIL_TEAM_RECIPIENTS)
+    alt = MIMEMultipart('alternative')
+    alt.attach(MIMEText(text, 'plain'))
+    alt.attach(MIMEText(html, 'html'))
+    msg.attach(alt)
+
+    try:
+        pdf_bytes = generate_coi_pdf(items, summary)
+        pdf_part = MIMEApplication(pdf_bytes, _subtype='pdf')
+        pdf_part.add_header('Content-Disposition', 'attachment',
+                            filename=f"MSP_COI_Report_{datetime.now().strftime('%Y-%m-%d')}.pdf")
+        msg.attach(pdf_part)
+    except Exception as e:
+        return (False, f"Failed to generate PDF: {e}")
+
+    try:
+        if port == 465:
+            with smtplib.SMTP_SSL(host, port, timeout=30) as server:
+                server.login(user, password)
+                server.sendmail(sender, EMAIL_TEAM_RECIPIENTS, msg.as_string())
+        else:
+            with smtplib.SMTP(host, port, timeout=30) as server:
+                server.starttls()
+                server.login(user, password)
+                server.sendmail(sender, EMAIL_TEAM_RECIPIENTS, msg.as_string())
+    except Exception as e:
+        return (False, f"SMTP send failed: {e}")
+
+    return (True, f"Report emailed to {', '.join(EMAIL_TEAM_RECIPIENTS)}.")
+
+
 def render_insurance_tab():
     tenants, _, summaries = load_tenancy()
     coi_data, building_coi_data, pm_coi_data = scan_coi_files()
     today_dt = datetime.now()
     vacant_keys, vacant_meta = build_vacancy_lookup(tenants, include_auto=False)
 
-    st.markdown("### 🛡️ Certificate of Insurance Reconciliation")
+    # --- Email Team button + Urgent / Expiring sections (top of tab) ---
+    report_items, report_summary = build_coi_report_data()
+    urgent_items, expiring_items = split_urgent_expiring(report_items)
+
+    hdr_col, btn_col = st.columns([3, 1])
+    with hdr_col:
+        st.markdown("### 🛡️ Certificate of Insurance Reconciliation")
+    with btn_col:
+        if st.button("📧 Email Team", key="coi_email_team", use_container_width=True,
+                     help="Email the COI report (PDF + summary) to Addison, Richie, and Jason."):
+            with st.spinner("Sending report to the team…"):
+                ok, msg = send_coi_email(report_items, report_summary)
+            if ok:
+                st.success(f"✅ {msg}")
+            else:
+                st.error(f"❌ {msg}")
+
+    # Downloadable PDF (always available, even if email isn't configured)
+    try:
+        _pdf = generate_coi_pdf(report_items, report_summary)
+        btn_col.download_button(
+            "⬇️ Download PDF", data=_pdf,
+            file_name=f"MSP_COI_Report_{datetime.now().strftime('%Y-%m-%d')}.pdf",
+            mime="application/pdf", key="coi_pdf_dl", use_container_width=True)
+    except Exception:
+        pass
+
+    _uc = len(urgent_items)
+    _ec = len(expiring_items)
+    with st.expander(f"⚠️ URGENT — Expired & Missing ({_uc})", expanded=_uc > 0):
+        if urgent_items:
+            import pandas as pd
+            urg_df = pd.DataFrame([{
+                'Property': it['code'], 'Type': it['category'],
+                'Entity': it['entity'], 'Unit': it['unit'],
+                'Expiration': it['exp_str'],
+                'Overdue/Days': (f"{abs(it['days_left'])}d ago" if it['status'] == 'EXPIRED'
+                                 and it['days_left'] is not None else ''),
+                'Status': it['status'],
+            } for it in urgent_items])
+            st.dataframe(urg_df, hide_index=True, use_container_width=True)
+        else:
+            st.success("All certificates present and current.")
+
+    with st.expander(f"🗓️ Expiring in Next 3 Months ({_ec})", expanded=_ec > 0):
+        if expiring_items:
+            import pandas as pd
+            exp_df = pd.DataFrame([{
+                'Property': it['code'], 'Type': it['category'],
+                'Entity': it['entity'], 'Unit': it['unit'],
+                'Expiration': it['exp_str'], 'Days Left': it['days_left'],
+                'Status': it['status'],
+            } for it in expiring_items])
+            st.dataframe(exp_df, hide_index=True, use_container_width=True)
+        else:
+            st.info("Nothing expiring in the next 90 days.")
+
+    st.divider()
 
     # Build insurance data
     ins_rows = []
