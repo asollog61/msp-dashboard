@@ -1488,8 +1488,31 @@ def extract_sop_content():
 
 def render_sop_tab():
     if not SOP_PDF:
+        st.markdown("### 📋 Marion St Properties — Standard Operating Procedures")
         st.warning("SOP Manual PDF not found. Place Marion_St_SOP_Manual.pdf in the data/ folder.")
         return
+
+    # --- Report buttons (SOP index for the PDF; also attach the manual itself) ---
+    def _sop_sections():
+        import pandas as pd
+        sops = [
+            ("SOP 100", "New Lease or Addendum"),
+            ("SOP 200", "Insurance Reconciliation"),
+            ("SOP 300", "Security Deposit Reconciliation"),
+            ("SOP 400", "Tenant Move-Out"),
+        ]
+        pages = ''
+        try:
+            if HAS_PYMUPDF:
+                _d = fitz.open(SOP_PDF)
+                pages = f"{len(_d)} pages"
+                _d.close()
+        except Exception:
+            pass
+        df = pd.DataFrame([{"SOP": s, "Procedure": n} for s, n in sops])
+        return [(f"Standard Operating Procedures Index ({pages})", df)]
+    render_report_buttons("sop", "SOPs", _sop_sections,
+                          meta="Full SOP manual available in the dashboard SOPs tab.")
 
     st.markdown("### 📋 Marion St Properties — Standard Operating Procedures")
 
@@ -1623,6 +1646,33 @@ def render_tenancy_tab():
     total_noi = total_gross_rev - total_expenses
     wavg_net_psf = total_annual / total_sf if total_sf > 0 else 0
     wavg_gross_psf = total_gross_rev / total_sf if total_sf > 0 else 0
+
+    # --- Report buttons (condensed portfolio tenancy view for the PDF) ---
+    def _ten_sections():
+        import pandas as pd
+        def _mk(rows):
+            out = []
+            for t in rows:
+                out.append({
+                    'Bldg': BUILDING_MAP.get(t.get('Building'), {}).get('code', t.get('Building', '')),
+                    'Space': t.get('Space', ''),
+                    'Tenant': t.get('Tenant', ''),
+                    'SF': f"{t.get('SF', 0):,.0f}" if isinstance(t.get('SF'), (int, float)) else t.get('SF', ''),
+                    'Monthly': f"${t.get('Monthly', 0):,.0f}",
+                    'Annual': f"${t.get('Annual', 0):,.0f}",
+                    'PSF': f"${t.get('PSF', 0):,.2f}" if isinstance(t.get('PSF'), (int, float)) else '',
+                    'TTE': t.get('TTE_Label', ''),
+                    'Status': (t.get('Status', '') or '').replace('🔴 ', ''),
+                })
+            return pd.DataFrame(out)
+        secs = [("Current Tenants", _mk(active))]
+        if future_tenants:
+            secs.append(("Future / Not-Yet-Commenced", _mk(future_tenants)))
+        return secs
+    render_report_buttons(
+        "tenancy", "Current Tenancy", _ten_sections,
+        meta=f"Portfolio SF {total_sf:,.0f} · Gross Rev ${total_gross_rev:,.0f} · "
+             f"NOI ${total_noi:,.0f} · Wtd Avg Gross ${wavg_gross_psf:,.2f}/SF")
 
     c1, c2, c3, c4, c5, c6 = st.columns(6)
     c1.metric("Portfolio SF", f"{total_sf:,.0f}")
@@ -1934,6 +1984,32 @@ def render_vacancy_tab():
     vacant_records = get_vacant_spaces()
     manual_keys = set(f"{v.get('Building', '')}|{v.get('Space', '')}" for v in vacant_records)
 
+    # --- Report buttons (vacant + at-risk sections for the PDF) ---
+    def _vac_sections():
+        import pandas as pd
+        vac_rows = []
+        for v in vacant_records:
+            vac_rows.append({
+                'Building': v.get('Building', ''), 'Space': str(v.get('Space', '')),
+                'Last Tenant': v.get('Tenant', ''), 'SF': v.get('SF', ''),
+                'Vacant Since': v.get('Vacancy Date', v.get('Date Marked', '')),
+                'Notes': v.get('Notes', ''),
+            })
+        risk_rows = []
+        for t in active:
+            if (t.get('TTE_Label') == 'MTM' or (0 < t.get('TTE_Days', 0) <= 365)) \
+                    and f"{t['Building']}|{t['Space']}" not in manual_keys:
+                risk_rows.append({
+                    'Building': t.get('Building', ''), 'Space': str(t.get('Space', '')),
+                    'Tenant': t.get('Tenant', ''),
+                    'SF': f"{t.get('SF', 0):,.0f}" if isinstance(t.get('SF'), (int, float)) else t.get('SF', ''),
+                    'Monthly': f"${t.get('Monthly', 0):,.0f}",
+                    'MTE': t.get('TTE_Months', ''), 'Exp Date': t.get('Exp Date', ''),
+                })
+        return [("Currently Vacant Spaces", pd.DataFrame(vac_rows)),
+                ("At Risk — Expiring Within 12 Months", pd.DataFrame(risk_rows))]
+    render_report_buttons("vacancy", "Vacancy", _vac_sections)
+
     # --- Mark space vacant ---
     st.markdown("### ✏️ Mark a Space Vacant")
     all_spaces = sorted(set(f"{t['Building']} #{t['Space']} — {t['Tenant']}" for t in active))
@@ -2153,6 +2229,246 @@ EMAIL_TEAM_RECIPIENTS = [
     "richard.b.angel@gmail.com",
     "jason.forster@proventusproperties.com",
 ]
+
+
+# --- GENERIC TAB REPORT (PDF + Email) ---
+# Reusable across every dashboard tab. `sections` is a list of
+# (section_label:str, pandas.DataFrame). Produces a compact PDF capped at 2 pages
+# and emails it to the team. Kept independent of the COI-specific functions.
+
+def _smtp_config():
+    """Return the [smtp] secrets dict or None."""
+    try:
+        return dict(st.secrets['smtp'])
+    except Exception:
+        return None
+
+
+def _smtp_send(subject, text, html, pdf_bytes, pdf_filename):
+    """Shared SMTP sender. Returns (ok, msg). Reads creds from st.secrets['smtp']."""
+    import smtplib
+    from email.mime.multipart import MIMEMultipart
+    from email.mime.text import MIMEText
+    from email.mime.application import MIMEApplication
+
+    cfg = _smtp_config()
+    if not cfg:
+        return (False, "SMTP credentials not configured. Add an [smtp] section to "
+                       "Streamlit Cloud secrets (host, port, user, password).")
+    host = cfg.get('host', 'smtp.gmail.com')
+    port = int(cfg.get('port', 587))
+    user = cfg.get('user')
+    password = cfg.get('password')
+    sender = cfg.get('from', user)
+    if not user or not password:
+        return (False, "SMTP user/password missing from secrets.")
+
+    msg = MIMEMultipart('mixed')
+    msg['Subject'] = subject
+    msg['From'] = sender
+    msg['To'] = ", ".join(EMAIL_TEAM_RECIPIENTS)
+    alt = MIMEMultipart('alternative')
+    alt.attach(MIMEText(text, 'plain'))
+    alt.attach(MIMEText(html, 'html'))
+    msg.attach(alt)
+    if pdf_bytes is not None:
+        part = MIMEApplication(pdf_bytes, _subtype='pdf')
+        part.add_header('Content-Disposition', 'attachment', filename=pdf_filename)
+        msg.attach(part)
+
+    try:
+        if port == 465:
+            with smtplib.SMTP_SSL(host, port, timeout=30) as server:
+                server.login(user, password)
+                server.sendmail(sender, EMAIL_TEAM_RECIPIENTS, msg.as_string())
+        else:
+            with smtplib.SMTP(host, port, timeout=30) as server:
+                server.starttls()
+                server.login(user, password)
+                server.sendmail(sender, EMAIL_TEAM_RECIPIENTS, msg.as_string())
+    except Exception as e:
+        return (False, f"SMTP send failed: {e}")
+    return (True, f"Report emailed to {', '.join(EMAIL_TEAM_RECIPIENTS)}.")
+
+
+def generate_tab_pdf(title, sections, meta=None, max_rows_total=90):
+    """Render a compact <=2-page PDF from (label, DataFrame) sections.
+    Chooses landscape automatically for wide tables. Long DataFrames are capped
+    with a '...and N more' note so the PDF never overruns 2 pages.
+    Returns PDF bytes.
+    """
+    from reportlab.lib import colors
+    from reportlab.lib.pagesizes import letter, landscape
+    from reportlab.lib.units import inch
+    from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+    from reportlab.platypus import (SimpleDocTemplate, Table, TableStyle,
+                                    Paragraph, Spacer)
+    import io
+
+    # Decide orientation from the widest section.
+    max_cols = 1
+    for _lbl, df in sections:
+        try:
+            max_cols = max(max_cols, len(df.columns))
+        except Exception:
+            pass
+    use_landscape = max_cols > 7
+    pagesize = landscape(letter) if use_landscape else letter
+    avail_w = (pagesize[0] - 1.0 * inch)
+
+    buf = io.BytesIO()
+    doc = SimpleDocTemplate(buf, pagesize=pagesize,
+                            leftMargin=0.5 * inch, rightMargin=0.5 * inch,
+                            topMargin=0.5 * inch, bottomMargin=0.5 * inch,
+                            title=f"MSP {title}")
+    styles = getSampleStyleSheet()
+    title_style = ParagraphStyle('T', parent=styles['Title'], fontSize=16,
+                                 textColor=colors.HexColor('#1a3a5c'), spaceAfter=2)
+    sub = ParagraphStyle('sub', parent=styles['Heading2'], fontSize=12,
+                         spaceBefore=10, spaceAfter=4,
+                         textColor=colors.HexColor('#1a3a5c'))
+    small = ParagraphStyle('S', parent=styles['Normal'], fontSize=8,
+                           textColor=colors.HexColor('#555555'))
+    cell = ParagraphStyle('cell', parent=styles['Normal'], fontSize=7, leading=8)
+    hcell = ParagraphStyle('hcell', parent=styles['Normal'], fontSize=7, leading=8,
+                           textColor=colors.white, fontName='Helvetica-Bold')
+    note = ParagraphStyle('note', parent=styles['Normal'], fontSize=7,
+                          textColor=colors.HexColor('#888888'))
+
+    story = []
+    story.append(Paragraph(f"Marion Street Properties — {title}", title_style))
+    story.append(Paragraph(f"Generated {datetime.now().strftime('%B %d, %Y %I:%M %p')}", small))
+    if meta:
+        story.append(Paragraph(meta, small))
+    story.append(Spacer(1, 6))
+
+    # Budget rows across sections so we stay within ~2 pages.
+    nonempty = [(lbl, df) for lbl, df in sections
+                if df is not None and hasattr(df, 'empty') and not df.empty]
+    n_sec = max(1, len(nonempty))
+    per_section_cap = max(6, max_rows_total // n_sec)
+
+    def _mk_table(df):
+        cols = list(df.columns)
+        ncol = len(cols)
+        colw = avail_w / ncol
+        header = [Paragraph(str(c), hcell) for c in cols]
+        data = [header]
+        shown = df.head(per_section_cap)
+        for _, row in shown.iterrows():
+            data.append([Paragraph('' if pd.isna(row[c]) else str(row[c]), cell)
+                         for c in cols])
+        t = Table(data, repeatRows=1, colWidths=[colw] * ncol)
+        t.setStyle(TableStyle([
+            ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#1a3a5c')),
+            ('FONTSIZE', (0, 0), (-1, -1), 7),
+            ('GRID', (0, 0), (-1, -1), 0.3, colors.HexColor('#cccccc')),
+            ('ROWBACKGROUNDS', (0, 1), (-1, -1),
+             [colors.white, colors.HexColor('#f4f6f8')]),
+            ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
+            ('TOPPADDING', (0, 0), (-1, -1), 2),
+            ('BOTTOMPADDING', (0, 0), (-1, -1), 2),
+            ('LEFTPADDING', (0, 0), (-1, -1), 3),
+            ('RIGHTPADDING', (0, 0), (-1, -1), 3),
+        ]))
+        return t, len(df) - len(shown)
+
+    if not nonempty:
+        story.append(Paragraph("No data available for this section.", styles['Normal']))
+    for lbl, df in nonempty:
+        story.append(Paragraph(str(lbl), sub))
+        tbl, remaining = _mk_table(df)
+        story.append(tbl)
+        if remaining > 0:
+            story.append(Paragraph(f"…and {remaining} more row(s) — see dashboard.", note))
+
+    doc.build(story)
+    return buf.getvalue()
+
+
+def _df_to_html(df, cap=25):
+    """Small HTML table for the email body."""
+    if df is None or not hasattr(df, 'empty') or df.empty:
+        return '<p style="color:#2e7d32;">No data.</p>'
+    cols = list(df.columns)
+    head = ''.join(f'<th style="padding:4px 6px;text-align:left;background:#1a3a5c;'
+                   f'color:#fff;font-size:12px;">{c}</th>' for c in cols)
+    body = []
+    for _, row in df.head(cap).iterrows():
+        tds = ''.join(f'<td style="padding:4px 6px;border-bottom:1px solid #eee;'
+                      f'font-size:12px;">{"" if pd.isna(row[c]) else row[c]}</td>'
+                      for c in cols)
+        body.append(f'<tr>{tds}</tr>')
+    more = len(df) - min(len(df), cap)
+    extra = (f'<p style="color:#888;font-size:11px;">…and {more} more — see PDF.</p>'
+             if more > 0 else '')
+    return (f'<table style="border-collapse:collapse;width:100%;">'
+            f'<tr>{head}</tr>{"".join(body)}</table>{extra}')
+
+
+def send_tab_email(title, sections, meta=None):
+    """Build + send a tab report email (PDF attached) to the team."""
+    try:
+        pdf_bytes = generate_tab_pdf(title, sections, meta=meta)
+    except Exception as e:
+        return (False, f"Failed to generate PDF: {e}")
+
+    today_str = datetime.now().strftime('%B %d, %Y')
+    text_lines = ["Hi Addison, Richie, and Jason,", "",
+                  f"MSP {title} report as of {today_str}.", ""]
+    html_secs = []
+    for lbl, df in sections:
+        n = 0 if (df is None or not hasattr(df, 'empty') or df.empty) else len(df)
+        text_lines.append(f"- {lbl}: {n} row(s)")
+        html_secs.append(f'<h3 style="color:#1a3a5c;margin-bottom:4px;">{lbl}</h3>'
+                         f'{_df_to_html(df)}')
+    text_lines += ["", "Full report attached (PDF).", "", "— Sis",
+                   "Marion Street Properties"]
+    text = "\n".join(text_lines)
+    meta_html = f'<p style="color:#555;font-size:12px;">{meta}</p>' if meta else ''
+    html = (f'<html><body style="font-family:Arial,Helvetica,sans-serif;color:#222;">'
+            f'<p>Hi Addison, Richie, and Jason,</p>'
+            f'<p>MSP <b>{title}</b> report as of <b>{today_str}</b>.</p>'
+            f'{meta_html}{"".join(html_secs)}'
+            f'<p style="margin-top:16px;">Full report attached (PDF).</p>'
+            f'<p>— Sis<br>Marion Street Properties</p></body></html>')
+
+    subject = f"MSP {title} Report — {datetime.now().strftime('%m/%d/%Y')}"
+    fname = f"MSP_{title.replace(' ', '_')}_{datetime.now().strftime('%Y-%m-%d')}.pdf"
+    return _smtp_send(subject, text, html, pdf_bytes, fname)
+
+
+def render_report_buttons(tab_key, title, sections_fn, meta=None):
+    """Render an '📧 Email Team' + '⬇️ Download PDF' button pair (right-aligned).
+    sections_fn is a zero-arg callable returning a list of (label, DataFrame).
+    Renders inside a header row: caller passes the title; this draws the title on
+    the left and the buttons on the right.
+    """
+    hdr_col, btn_col = st.columns([3, 1])
+    with hdr_col:
+        st.markdown(f"### {title}")
+    with btn_col:
+        if st.button("📧 Email Team", key=f"emailteam_{tab_key}",
+                     use_container_width=True,
+                     help="Email this report (PDF) to Addison, Richie, and Jason."):
+            with st.spinner("Sending report to the team…"):
+                try:
+                    ok, msg = send_tab_email(title, sections_fn(), meta=meta)
+                except Exception as e:
+                    ok, msg = False, f"Error: {e}"
+            if ok:
+                st.success(f"✅ {msg}")
+            else:
+                st.error(f"❌ {msg}")
+        try:
+            _pdf = generate_tab_pdf(title, sections_fn(), meta=meta)
+            btn_col.download_button(
+                "⬇️ Download PDF", data=_pdf,
+                file_name=f"MSP_{title.replace(' ', '_')}_{datetime.now().strftime('%Y-%m-%d')}.pdf",
+                mime="application/pdf", key=f"pdfdl_{tab_key}",
+                use_container_width=True)
+        except Exception:
+            pass
 
 
 def build_coi_report_data():
@@ -2820,7 +3136,7 @@ def render_deposits_tab():
     today_dt = datetime.now()
     vacant_keys, vacant_meta = build_vacancy_lookup(tenants, include_auto=False)
 
-    st.markdown("### 💰 Security Deposit Reconciliation")
+    # (Report buttons render after dep_data is built, just before the tables.)
 
     # Build detailed SD data from term rows
     import pandas as pd
@@ -2987,6 +3303,30 @@ def render_deposits_tab():
     c3.metric("Tenants w/o Deposit", str(without_dep))
     c4.metric("Upcoming SD Changes", str(upcoming_changes))
 
+    # --- Report buttons (condensed portfolio SD view for the PDF) ---
+    def _dep_sections():
+        if not dep_data:
+            return [("Security Deposits", pd.DataFrame())]
+        rows_out = []
+        for d in dep_data:
+            rows_out.append({
+                'Bldg': BUILDING_MAP.get(d['Building'], {}).get('code', d['Building']),
+                'Tenant': d.get('Display Tenant', ''),
+                'Space': d.get('Space', ''),
+                'Current SD': d.get('Current SD Fmt', ''),
+                'SD Anniv': (d['SD Anniversary'].strftime('%m/%d/%Y')
+                             if isinstance(d.get('SD Anniversary'), (datetime, date))
+                             else (d.get('SD Anniversary') or '-')),
+                'Yardi SD': (f"${d['Yardi SD']:,.0f}"
+                             if d.get('Yardi SD') is not None
+                             and not (isinstance(d.get('Yardi SD'), float) and pd.isna(d.get('Yardi SD')))
+                             else 'N/A'),
+            })
+        return [(f"Security Deposits — Portfolio Total ${total_deposits:,.2f}",
+                 pd.DataFrame(rows_out))]
+    render_report_buttons("deposits", "Security Deposits", _dep_sections,
+                          meta=f"Portfolio total security deposits: ${total_deposits:,.2f}")
+
     # Display by building
     for building_name in BUILDING_MAP:
         b_deps = [d for d in dep_data if d['Building'] == building_name]
@@ -3023,17 +3363,35 @@ def render_yardi_tab():
     import base64
     yardi_dir = Path(os.path.dirname(__file__)) / "data" / "Yardi"
 
-    st.markdown("### 📊 Yardi Reports")
-
     if not yardi_dir.exists():
+        st.markdown("### 📊 Yardi Reports")
         st.warning("No Yardi reports found. Place PDF files in data/Yardi/ folder.")
         return
 
     pdfs = sorted([f for f in yardi_dir.iterdir() if f.suffix.lower() == '.pdf'])
     if not pdfs:
+        st.markdown("### 📊 Yardi Reports")
         st.warning("No PDF files found in data/Yardi/.")
         return
 
+    # --- Report buttons (index of available Yardi reports for the PDF) ---
+    def _yardi_sections():
+        import pandas as pd
+        rows_out = []
+        for p in pdfs:
+            m = re.match(r'^([A-Za-z]{3})-(\d{4})', p.stem)
+            period = f"{m.group(1)} {m.group(2)}" if m else ''
+            bldg = ''
+            for bn, mp in BUILDING_MAP.items():
+                fn = p.stem.lower().replace('-', '').replace(' ', '').replace('_', '')
+                if any(x in fn for x in [mp['dest_folder'].lower().replace('-', '').replace(' ', ''),
+                                         bn.lower().replace(' ', ''), mp['code'].lower()]):
+                    bldg = mp['code']
+                    break
+            rows_out.append({'Period': period, 'Building': bldg, 'File': p.name})
+        return [("Available Yardi Reports", pd.DataFrame(rows_out))]
+    render_report_buttons("yardi", "Yardi Reports", _yardi_sections,
+                          meta=f"{len(pdfs)} monthly statement report(s) on file.")
     st.caption(f"{len(pdfs)} report(s) available")
 
     # Sort PDFs by date (newest first) using Mon-YYYY prefix
@@ -3379,6 +3737,26 @@ def render_reconcile_tab():
     elif filter_opt == "Unmatched Only":
         filtered = [r for r in recon_rows if r['Status'] == '❓ Unmatched']
 
+    # --- Report buttons (condensed reconcile view for the PDF) ---
+    def _recon_sections():
+        if not filtered:
+            return [("Yardi Reconciliation", pd.DataFrame())]
+        rows_out = []
+        for r in filtered:
+            rows_out.append({
+                'Bldg': BUILDING_MAP.get(r.get('Building'), {}).get('code', r.get('Building', '')),
+                'Space': r.get('Space', ''),
+                'Yardi Name': r.get('Yardi Name', ''),
+                'Sheet Name': r.get('Sheet Name', ''),
+                'Rent Y/S': f"{r.get('Rent (Yardi)', '')} / {r.get('Rent (Sheet)', '')}",
+                'ΔRent': r.get('Rent Δ', ''),
+                'ΔExp': r.get('Exp Δ', ''),
+                'ΔSD': r.get('SD Δ', ''),
+                'Status': r.get('Status', ''),
+            })
+        return [("Yardi vs Sheet Reconciliation", pd.DataFrame(rows_out))]
+    render_report_buttons("reconcile", "Yardi Reconcile", _recon_sections)
+
     for building_name in BUILDING_MAP:
         b_rows = [r for r in filtered if r['Building'] == building_name]
         if not b_rows:
@@ -3566,7 +3944,6 @@ def load_lead_sheet():
 
 def render_covenants_tab():
     """Render the Lease Covenants tab directly from MSP Tenancy.xlsx (cols AI-AU, rows 10-40)."""
-    st.markdown("### 📜 Lease Covenants")
     st.caption("Special lease provisions from MSP Tenancy.xlsx · Edit the spreadsheet and re-upload to update")
 
     if not TENANCY_FILE:
@@ -3627,6 +4004,15 @@ def render_covenants_tab():
 
     df = pd.DataFrame(rows)
 
+    # Report buttons: condensed key-covenant columns (full set is too wide for PDF)
+    def _cov_sections():
+        key_cols = [c for c in ["Building", "Unit", "Tenant", "Renewal Options",
+                                "Non-Compete / Exclusive", "ROFO/ROFR",
+                                "Personal Guarantee", "Assignment/Subletting"]
+                    if c in df.columns]
+        return [("Lease Covenants (key provisions)", df[key_cols])]
+    render_report_buttons("covenants", "Lease Covenants", _cov_sections)
+
     # --- Building filter ---
     buildings = sorted(df["Building"].unique().tolist())
     selected = st.multiselect("Filter by Building", buildings, default=buildings, key="cov_building_filter")
@@ -3668,10 +4054,11 @@ def render_covenants_tab():
 
 def render_lead_sheet_tab():
     """Render the Lead Sheet tab with Retail and Office sections."""
-    st.markdown("### 📋 Lead Sheet")
-    st.caption("Prospect leads from Google Sheets · Auto-refreshes every 5 minutes")
-
     retail_df, office_df = load_lead_sheet()
+    render_report_buttons(
+        "leads", "Lead Sheet",
+        lambda: [("Retail Leads", retail_df), ("Office Leads", office_df)])
+    st.caption("Prospect leads from Google Sheets · Auto-refreshes every 5 minutes")
 
     if retail_df.empty and office_df.empty:
         st.warning("No lead data found. Check Google Sheets connection.")
