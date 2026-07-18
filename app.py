@@ -2587,37 +2587,7 @@ def render_insurance_tab():
     except Exception:
         pass
 
-    _uc = len(urgent_items)
-    _ec = len(expiring_items)
-    with st.expander(f"⚠️ URGENT — Expired & Missing ({_uc})", expanded=_uc > 0):
-        if urgent_items:
-            import pandas as pd
-            urg_df = pd.DataFrame([{
-                'Property': it['code'], 'Type': it['category'],
-                'Entity': it['entity'], 'Unit': it['unit'],
-                'Expiration': it['exp_str'],
-                'Overdue/Days': (f"{abs(it['days_left'])}d ago" if it['status'] == 'EXPIRED'
-                                 and it['days_left'] is not None else ''),
-                'Status': it['status'],
-            } for it in urgent_items])
-            st.dataframe(urg_df, hide_index=True, use_container_width=True)
-        else:
-            st.success("All certificates present and current.")
-
-    with st.expander(f"🗓️ Expiring in Next 3 Months ({_ec})", expanded=_ec > 0):
-        if expiring_items:
-            import pandas as pd
-            exp_df = pd.DataFrame([{
-                'Property': it['code'], 'Type': it['category'],
-                'Entity': it['entity'], 'Unit': it['unit'],
-                'Expiration': it['exp_str'], 'Days Left': it['days_left'],
-                'Status': it['status'],
-            } for it in expiring_items])
-            st.dataframe(exp_df, hide_index=True, use_container_width=True)
-        else:
-            st.info("Nothing expiring in the next 90 days.")
-
-    st.divider()
+    # (Urgent / Expiring summary sections are rendered at the BOTTOM of this tab.)
 
     # Build insurance data
     ins_rows = []
@@ -2811,6 +2781,37 @@ def render_insurance_tab():
         show_grid(df[display_cols], key=f"ins_{building_name}", tab_key="insurance")
 
     render_column_config_editor('insurance', ['Tenant', 'Unit', 'Type', 'COI', 'Expiration', 'Days Left', 'Status', 'View'])
+
+    # --- Summary sections (bottom of tab): Urgent + Expiring in 3 months ---
+    st.divider()
+    st.markdown("### 📋 COI Summary")
+    _uc = len(urgent_items)
+    _ec = len(expiring_items)
+    with st.expander(f"⚠️ URGENT — Expired & Missing ({_uc})", expanded=_uc > 0):
+        if urgent_items:
+            urg_df = pd.DataFrame([{
+                'Property': it['code'], 'Type': it['category'],
+                'Entity': it['entity'], 'Unit': it['unit'],
+                'Expiration': it['exp_str'],
+                'Overdue/Days': (f"{abs(it['days_left'])}d ago" if it['status'] == 'EXPIRED'
+                                 and it['days_left'] is not None else ''),
+                'Status': it['status'],
+            } for it in urgent_items])
+            st.dataframe(urg_df, hide_index=True, use_container_width=True)
+        else:
+            st.success("All certificates present and current.")
+
+    with st.expander(f"🗓️ Expiring in Next 3 Months ({_ec})", expanded=_ec > 0):
+        if expiring_items:
+            exp_df = pd.DataFrame([{
+                'Property': it['code'], 'Type': it['category'],
+                'Entity': it['entity'], 'Unit': it['unit'],
+                'Expiration': it['exp_str'], 'Days Left': it['days_left'],
+                'Status': it['status'],
+            } for it in expiring_items])
+            st.dataframe(exp_df, hide_index=True, use_container_width=True)
+        else:
+            st.info("Nothing expiring in the next 90 days.")
 
 
 def render_deposits_tab():
