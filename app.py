@@ -621,6 +621,26 @@ def load_tenancy():
 
     wb.close()
 
+    # Building percentages come from New Sqft in the MSP tenancy summary.
+    # This gives every tenant—including gross leases—a share of the building,
+    # and the shares add to 100% within each building.
+    def _norm_key(value):
+        return str(value).strip().lower() if value is not None else ''
+
+    summary_by_tenant = {}
+    building_sqft = {}
+    for s in summaries:
+        b = _norm_key(s.get('Buidling'))
+        tenant = _norm_key(s.get('Tenant Name'))
+        unit = _norm_key(s.get('Unit'))
+        try:
+            new_sqft = float(s.get('New Sqft', 0) or 0)
+        except (TypeError, ValueError):
+            new_sqft = 0.0
+        if b and new_sqft > 0:
+            building_sqft[b] = building_sqft.get(b, 0.0) + new_sqft
+            summary_by_tenant[(b, unit, tenant)] = new_sqft
+
     # Build tenant list
     tenants = []
     def to_date(val):
@@ -740,6 +760,12 @@ def load_tenancy():
         except (TypeError, ValueError):
             sqft = 0
         psf = (annual / sqft) if sqft and sqft > 1 else 0
+        building_key = _norm_key(first.get('Building'))
+        summary_sqft = summary_by_tenant.get((
+            building_key, _norm_key(first.get('Space')), _norm_key(first.get('Tenant'))
+        ), sqft)
+        building_pct = (summary_sqft / building_sqft[building_key]
+                        if building_key in building_sqft and building_sqft[building_key] > 0 else 0)
         try:
             sec_dep = float(first.get('Sec Dep', 0) or 0)
         except (TypeError, ValueError):
@@ -790,6 +816,7 @@ def load_tenancy():
             'Monthly': round(monthly, 2),
             'Annual': round(annual, 2),
             'PSF': round(psf, 2),
+            'Building_Pct': building_pct,
             'CAM_Pct': first.get('CAM', 0) or 0,
             'Is_NNN': True if str(first.get('Type', '')).upper().startswith('NNN') else False,
             'TTE': '0' if tte_label == 'MTM' else tte_label,
@@ -1719,24 +1746,22 @@ def render_tenancy_tab():
             rows = []
             b_monthly = b_annual = b_gross_annual = 0.0
             b_sf = 0.0
-            cam_pct_total = sum(
-                float(t.get('CAM_Pct') or 0)
-                for t in b_tenants
-                if t.get('Is_NNN') and isinstance(t.get('CAM_Pct'), (int, float))
-            )
+            building_pct_total = sum(float(t.get('Building_Pct') or 0) for t in b_tenants)
             for t in b_tenants:
                 sf = t.get('SF', 0) or 0
                 monthly = t.get('Monthly', 0) or 0
                 annual = t.get('Annual', 0) or 0
-                cam_pct = (float(t.get('CAM_Pct') or 0)
-                           if t.get('Is_NNN') and isinstance(t.get('CAM_Pct'), (int, float)) else 0)
-                # Normalize to the active CAM percentage pool so all building
-                # expenses are allocated and tenant NOI totals to building NOI.
-                expense_annual = (b_expense * cam_pct / cam_pct_total) if cam_pct_total else 0
-                cam_reimb = expense_annual
+                building_pct = float(t.get('Building_Pct') or 0)
+                # Allocate the full building expense using the workbook's
+                # Building %; this applies to NNN and gross leases alike.
+                expense_annual = (b_expense * building_pct / building_pct_total
+                                  if building_pct_total else 0)
                 expense_monthly = expense_annual / 12
+                cam_reimb = (b_expense * float(t.get('CAM_Pct') or 0)
+                             if t.get('Is_NNN') else 0)
+                gross_monthly = monthly + (cam_reimb / 12)
                 gross_annual = annual + cam_reimb
-                net_monthly = monthly + (cam_reimb / 12) - expense_monthly
+                net_monthly = gross_monthly - expense_monthly
                 noi_annual = gross_annual - expense_annual
                 net_psf = t.get('PSF', 0) or 0
                 gross_psf = net_psf + ((cam_reimb / sf) if sf and sf > 0 else 0)
@@ -1750,15 +1775,14 @@ def render_tenancy_tab():
                     'Tenant': t.get('Tenant', ''),
                     'Type': t.get('Type', ''),
                     'SF': f"{sf:,.0f}" if isinstance(sf, (int, float)) and sf > 1 else '',
-                    'Monthly': f"${monthly:,.0f}",
-                    'Annual': f"${annual:,.0f}",
-                    'CAM % of Building': f"{cam_pct:.1%}" if cam_pct else '-',
-                    'CAM Reimb': f"${cam_reimb:,.0f}",
-                    'Expense Monthly': f"${expense_monthly:,.0f}",
-                    'Expense Annual': f"${expense_annual:,.0f}",
-                    'Net Monthly': f"${net_monthly:,.0f}",
-                    'NOI Annual': f"${noi_annual:,.0f}",
+                    'Building %': f"{building_pct / building_pct_total:.1%}" if building_pct_total else '0.0%',
                     'Gross Annual': f"${gross_annual:,.0f}",
+                    'Expense Annual': f"${expense_annual:,.0f}",
+                    'NOI Annual': f"${noi_annual:,.0f}",
+                    '': '',
+                    'Gross Monthly': f"${gross_monthly:,.0f}",
+                    'Expense Monthly': f"${expense_monthly:,.0f}",
+                    'Net Monthly': f"${net_monthly:,.0f}",
                     'Net PSF': f"${net_psf:,.2f}",
                     'Gross PSF': f"${gross_psf:,.2f}",
                     'Exp Date': _exp_str(t),
@@ -1770,15 +1794,15 @@ def render_tenancy_tab():
             # TOTAL row
             rows.append({
                 'Space': '', 'Tenant': 'TOTAL', 'Type': '',
-                'SF': f"{b_sf:,.0f}", 'Monthly': f"${b_monthly:,.0f}",
-                'Annual': f"${b_annual:,.0f}",
-                'CAM % of Building': '100.0%' if cam_pct_total else '-',
-                'CAM Reimb': f"${b_gross_annual - b_annual:,.0f}",
-                'Expense Monthly': f"${b_expense / 12:,.0f}",
-                'Expense Annual': f"${b_expense:,.0f}",
-                'Net Monthly': f"${(b_gross_annual - b_expense) / 12:,.0f}",
-                'NOI Annual': f"${b_noi:,.0f}",
+                'SF': f"{b_sf:,.0f}",
+                'Building %': '100.0%',
                 'Gross Annual': f"${b_gross_annual:,.0f}",
+                'Expense Annual': f"${b_expense:,.0f}",
+                'NOI Annual': f"${b_noi:,.0f}",
+                '': '',
+                'Gross Monthly': f"${b_gross_annual / 12:,.0f}",
+                'Expense Monthly': f"${b_expense / 12:,.0f}",
+                'Net Monthly': f"${b_noi / 12:,.0f}",
                 'Net PSF': f"${b_net_psf:,.2f}", 'Gross PSF': f"${b_gross_psf:,.2f}",
                 'Exp Date': '', 'MTE': '',
             })
@@ -2420,7 +2444,7 @@ def generate_tab_pdf(title, sections, meta=None, max_rows_total=150):
     Returns PDF bytes.
     """
     from reportlab.lib import colors
-    from reportlab.lib.pagesizes import letter, landscape
+    from reportlab.lib.pagesizes import letter, legal, landscape
     from reportlab.lib.units import inch
     from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
     from reportlab.platypus import (SimpleDocTemplate, Table, TableStyle,
@@ -2443,30 +2467,46 @@ def generate_tab_pdf(title, sections, meta=None, max_rows_total=150):
             max_cols = max(max_cols, len(df.columns))
         except Exception:
             pass
+    is_current_tenancy = title == 'Current Tenancy'
     use_landscape = max_cols > 7
-    pagesize = landscape(letter) if use_landscape else letter
-    avail_w = (pagesize[0] - 1.0 * inch)
+    pagesize = landscape(legal) if is_current_tenancy else (landscape(letter) if use_landscape else letter)
+    margin = 0.25 * inch if is_current_tenancy else 0.5 * inch
+    avail_w = pagesize[0] - (2 * margin)
 
     buf = io.BytesIO()
     doc = SimpleDocTemplate(buf, pagesize=pagesize,
-                            leftMargin=0.5 * inch, rightMargin=0.5 * inch,
-                            topMargin=0.5 * inch, bottomMargin=0.5 * inch,
+                            leftMargin=margin, rightMargin=margin,
+                            topMargin=margin, bottomMargin=margin,
                             title=f"MSP {title}")
     styles = getSampleStyleSheet()
-    title_style = ParagraphStyle('T', parent=styles['Title'], fontSize=16,
-                                 textColor=colors.HexColor('#1a3a5c'), spaceAfter=2)
-    sub = ParagraphStyle('sub', parent=styles['Heading2'], fontSize=12,
-                         spaceBefore=10, spaceAfter=1,
-                         textColor=colors.HexColor('#1a3a5c'))
-    subtitle_style = ParagraphStyle('subtitle', parent=styles['Normal'], fontSize=8,
-                                    spaceAfter=3,
+    title_style = ParagraphStyle('T', parent=styles['Title'],
+                                 fontSize=10 if is_current_tenancy else 16,
+                                 leading=11 if is_current_tenancy else 18,
+                                 textColor=colors.HexColor('#1a3a5c'), spaceAfter=1)
+    sub = ParagraphStyle('sub', parent=styles['Heading2'],
+                         fontSize=7 if is_current_tenancy else 12,
+                         leading=8 if is_current_tenancy else 14,
+                         spaceBefore=3 if is_current_tenancy else 10,
+                         spaceAfter=1, textColor=colors.HexColor('#1a3a5c'))
+    subtitle_style = ParagraphStyle('subtitle', parent=styles['Normal'],
+                                    fontSize=5.5 if is_current_tenancy else 8,
+                                    leading=6 if is_current_tenancy else 10,
+                                    spaceAfter=1,
                                     textColor=colors.HexColor('#333333'))
-    small = ParagraphStyle('S', parent=styles['Normal'], fontSize=8,
+    small = ParagraphStyle('S', parent=styles['Normal'],
+                           fontSize=5.5 if is_current_tenancy else 8,
+                           leading=6 if is_current_tenancy else 10,
                            textColor=colors.HexColor('#555555'))
-    cell = ParagraphStyle('cell', parent=styles['Normal'], fontSize=7, leading=8)
-    hcell = ParagraphStyle('hcell', parent=styles['Normal'], fontSize=7, leading=8,
+    cell = ParagraphStyle('cell', parent=styles['Normal'],
+                          fontSize=5.5 if is_current_tenancy else 7,
+                          leading=6 if is_current_tenancy else 8)
+    hcell = ParagraphStyle('hcell', parent=styles['Normal'],
+                           fontSize=5.5 if is_current_tenancy else 7,
+                           leading=6 if is_current_tenancy else 8,
                            textColor=colors.white, fontName='Helvetica-Bold')
-    note = ParagraphStyle('note', parent=styles['Normal'], fontSize=7,
+    note = ParagraphStyle('note', parent=styles['Normal'],
+                          fontSize=5.5 if is_current_tenancy else 7,
+                          leading=6 if is_current_tenancy else 8,
                           textColor=colors.HexColor('#888888'))
 
     story = []
@@ -2474,7 +2514,7 @@ def generate_tab_pdf(title, sections, meta=None, max_rows_total=150):
     story.append(Paragraph(f"Generated {datetime.now().strftime('%B %d, %Y %I:%M %p')}", small))
     if meta:
         story.append(Paragraph(meta, small))
-    story.append(Spacer(1, 6))
+    story.append(Spacer(1, 2 if is_current_tenancy else 6))
 
     # Budget rows across sections so we stay within ~2 pages.
     nonempty = [(lbl, df, sbt) for lbl, df, sbt in sections
@@ -2499,10 +2539,10 @@ def generate_tab_pdf(title, sections, meta=None, max_rows_total=150):
                 for _, row in shown.iterrows()
             ]
             all_rows = [list(map(str, cols))] + text_rows
-            padding = 4  # total horizontal padding per cell
+            padding = 3  # total horizontal padding per cell
             normal_font = 'Helvetica'
             header_font = 'Helvetica-Bold'
-            font_size = 7.0
+            font_size = 5.5 if is_current_tenancy else 7.0
 
             # Scale the type down only as far as necessary to keep the full row
             # on one line in the printable landscape width.
@@ -2531,7 +2571,7 @@ def generate_tab_pdf(title, sections, meta=None, max_rows_total=150):
             data = [[Paragraph(str(c), tenancy_hcell) for c in cols]]
             data.extend([[Paragraph(v, tenancy_cell) for v in row] for row in text_rows])
             col_widths = widths
-            pad_left = pad_right = 2
+            pad_left = pad_right = 1
         else:
             header = [Paragraph(str(c), hcell) for c in cols]
             data = [header]
@@ -2539,7 +2579,7 @@ def generate_tab_pdf(title, sections, meta=None, max_rows_total=150):
                 data.append([Paragraph('' if pd.isna(row[c]) else str(row[c]), cell)
                              for c in cols])
             col_widths = [avail_w / ncol] * ncol
-            pad_left = pad_right = 3
+            pad_left = pad_right = 1
 
         t = Table(data, repeatRows=1, colWidths=col_widths)
         t.setStyle(TableStyle([
