@@ -1719,12 +1719,25 @@ def render_tenancy_tab():
             rows = []
             b_monthly = b_annual = b_gross_annual = 0.0
             b_sf = 0.0
+            cam_pct_total = sum(
+                float(t.get('CAM_Pct') or 0)
+                for t in b_tenants
+                if t.get('Is_NNN') and isinstance(t.get('CAM_Pct'), (int, float))
+            )
             for t in b_tenants:
                 sf = t.get('SF', 0) or 0
                 monthly = t.get('Monthly', 0) or 0
                 annual = t.get('Annual', 0) or 0
-                cam_reimb = (b_expense * t['CAM_Pct']) if t.get('Is_NNN') and isinstance(t.get('CAM_Pct'), (int, float)) else 0
+                cam_pct = (float(t.get('CAM_Pct') or 0)
+                           if t.get('Is_NNN') and isinstance(t.get('CAM_Pct'), (int, float)) else 0)
+                # Normalize to the active CAM percentage pool so all building
+                # expenses are allocated and tenant NOI totals to building NOI.
+                expense_annual = (b_expense * cam_pct / cam_pct_total) if cam_pct_total else 0
+                cam_reimb = expense_annual
+                expense_monthly = expense_annual / 12
                 gross_annual = annual + cam_reimb
+                net_monthly = monthly + (cam_reimb / 12) - expense_monthly
+                noi_annual = gross_annual - expense_annual
                 net_psf = t.get('PSF', 0) or 0
                 gross_psf = net_psf + ((cam_reimb / sf) if sf and sf > 0 else 0)
                 b_monthly += monthly
@@ -1739,6 +1752,12 @@ def render_tenancy_tab():
                     'SF': f"{sf:,.0f}" if isinstance(sf, (int, float)) and sf > 1 else '',
                     'Monthly': f"${monthly:,.0f}",
                     'Annual': f"${annual:,.0f}",
+                    'CAM % of Building': f"{cam_pct:.1%}" if cam_pct else '-',
+                    'CAM Reimb': f"${cam_reimb:,.0f}",
+                    'Expense Monthly': f"${expense_monthly:,.0f}",
+                    'Expense Annual': f"${expense_annual:,.0f}",
+                    'Net Monthly': f"${net_monthly:,.0f}",
+                    'NOI Annual': f"${noi_annual:,.0f}",
                     'Gross Annual': f"${gross_annual:,.0f}",
                     'Net PSF': f"${net_psf:,.2f}",
                     'Gross PSF': f"${gross_psf:,.2f}",
@@ -1752,7 +1771,14 @@ def render_tenancy_tab():
             rows.append({
                 'Space': '', 'Tenant': 'TOTAL', 'Type': '',
                 'SF': f"{b_sf:,.0f}", 'Monthly': f"${b_monthly:,.0f}",
-                'Annual': f"${b_annual:,.0f}", 'Gross Annual': f"${b_gross_annual:,.0f}",
+                'Annual': f"${b_annual:,.0f}",
+                'CAM % of Building': '100.0%' if cam_pct_total else '-',
+                'CAM Reimb': f"${b_gross_annual - b_annual:,.0f}",
+                'Expense Monthly': f"${b_expense / 12:,.0f}",
+                'Expense Annual': f"${b_expense:,.0f}",
+                'Net Monthly': f"${(b_gross_annual - b_expense) / 12:,.0f}",
+                'NOI Annual': f"${b_noi:,.0f}",
+                'Gross Annual': f"${b_gross_annual:,.0f}",
                 'Net PSF': f"${b_net_psf:,.2f}", 'Gross PSF': f"${b_gross_psf:,.2f}",
                 'Exp Date': '', 'MTE': '',
             })
