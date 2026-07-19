@@ -639,7 +639,14 @@ def load_tenancy():
             new_sqft = 0.0
         if b and new_sqft > 0:
             building_sqft[b] = building_sqft.get(b, 0.0) + new_sqft
-            summary_by_tenant[(b, unit, tenant)] = new_sqft
+            try:
+                new_cam = float(s.get('New CAM', 0) or 0)
+            except (TypeError, ValueError):
+                new_cam = 0.0
+            summary_by_tenant[(b, unit, tenant)] = {
+                'sqft': new_sqft,
+                'new_cam': new_cam,
+            }
 
     # Build tenant list
     tenants = []
@@ -761,11 +768,13 @@ def load_tenancy():
             sqft = 0
         psf = (annual / sqft) if sqft and sqft > 1 else 0
         building_key = _norm_key(first.get('Building'))
-        summary_sqft = summary_by_tenant.get((
+        summary_rec = summary_by_tenant.get((
             building_key, _norm_key(first.get('Space')), _norm_key(first.get('Tenant'))
-        ), sqft)
+        ), {})
+        summary_sqft = summary_rec.get('sqft', sqft) if isinstance(summary_rec, dict) else summary_rec
         building_pct = (summary_sqft / building_sqft[building_key]
                         if building_key in building_sqft and building_sqft[building_key] > 0 else 0)
+        new_cam_pct = (summary_rec.get('new_cam', 0) if isinstance(summary_rec, dict) else 0)
         try:
             sec_dep = float(first.get('Sec Dep', 0) or 0)
         except (TypeError, ValueError):
@@ -817,7 +826,8 @@ def load_tenancy():
             'Annual': round(annual, 2),
             'PSF': round(psf, 2),
             'Building_Pct': building_pct,
-            'CAM_Pct': first.get('CAM', 0) or 0,
+            # New CAM is the workbook's expense-allocation percentage.
+            'CAM_Pct': new_cam_pct,
             'Is_NNN': True if str(first.get('Type', '')).upper().startswith('NNN') else False,
             'TTE': '0' if tte_label == 'MTM' else tte_label,
             'TTE_Label': tte_label,
@@ -1754,11 +1764,10 @@ def render_tenancy_tab():
                 building_pct = float(t.get('Building_Pct') or 0)
                 # Allocate the full building expense using the workbook's
                 # Building %; this applies to NNN and gross leases alike.
-                expense_annual = (b_expense * building_pct / building_pct_total
-                                  if building_pct_total else 0)
+                # New CAM is already the workbook's expense allocation %.
+                expense_annual = b_expense * float(t.get('CAM_Pct') or 0)
                 expense_monthly = expense_annual / 12
-                cam_reimb = (b_expense * float(t.get('CAM_Pct') or 0)
-                             if t.get('Is_NNN') else 0)
+                cam_reimb = expense_annual if t.get('Is_NNN') else 0
                 gross_annual = annual + cam_reimb
                 noi_annual = gross_annual - expense_annual
                 net_psf = t.get('PSF', 0) or 0
@@ -1774,7 +1783,7 @@ def render_tenancy_tab():
                     'Type': t.get('Type', ''),
                     'SF': f"{sf:,.0f}" if isinstance(sf, (int, float)) and sf > 1 else '',
                     'Building %': f"{building_pct / building_pct_total:.1%}" if building_pct_total else '0.0%',
-                    'CAM %': f"{float(t.get('CAM_Pct') or 0):.1%}" if t.get('Is_NNN') else '-',
+                    'New CAM %': f"{float(t.get('CAM_Pct') or 0):.1%}",
                     'Gross Annual': f"${gross_annual:,.0f}",
                     'Expense Annual': f"${expense_annual:,.0f}",
                     'NOI Annual': f"${noi_annual:,.0f}",
@@ -1793,7 +1802,7 @@ def render_tenancy_tab():
                 'Space': '', 'Tenant': 'TOTAL', 'Type': '',
                 'SF': f"{b_sf:,.0f}",
                 'Building %': '100.0%',
-                'CAM %': f"{sum(float(t.get('CAM_Pct') or 0) for t in b_tenants if t.get('Is_NNN')):.1%}",
+                'New CAM %': f"{sum(float(t.get('CAM_Pct') or 0) for t in b_tenants):.1%}",
                 'Gross Annual': f"${b_gross_annual:,.0f}",
                 'Expense Annual': f"${b_expense:,.0f}",
                 'NOI Annual': f"${b_noi:,.0f}",
