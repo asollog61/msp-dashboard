@@ -1759,9 +1759,7 @@ def render_tenancy_tab():
                 expense_monthly = expense_annual / 12
                 cam_reimb = (b_expense * float(t.get('CAM_Pct') or 0)
                              if t.get('Is_NNN') else 0)
-                gross_monthly = monthly + (cam_reimb / 12)
                 gross_annual = annual + cam_reimb
-                net_monthly = gross_monthly - expense_monthly
                 noi_annual = gross_annual - expense_annual
                 net_psf = t.get('PSF', 0) or 0
                 gross_psf = net_psf + ((cam_reimb / sf) if sf and sf > 0 else 0)
@@ -1776,13 +1774,12 @@ def render_tenancy_tab():
                     'Type': t.get('Type', ''),
                     'SF': f"{sf:,.0f}" if isinstance(sf, (int, float)) and sf > 1 else '',
                     'Building %': f"{building_pct / building_pct_total:.1%}" if building_pct_total else '0.0%',
+                    'CAM %': f"{float(t.get('CAM_Pct') or 0):.1%}" if t.get('Is_NNN') else '-',
                     'Gross Annual': f"${gross_annual:,.0f}",
                     'Expense Annual': f"${expense_annual:,.0f}",
                     'NOI Annual': f"${noi_annual:,.0f}",
                     '': '',
-                    'Gross Monthly': f"${gross_monthly:,.0f}",
-                    'Expense Monthly': f"${expense_monthly:,.0f}",
-                    'Net Monthly': f"${net_monthly:,.0f}",
+                    'Monthly Rent': f"${monthly:,.0f}",
                     'Net PSF': f"${net_psf:,.2f}",
                     'Gross PSF': f"${gross_psf:,.2f}",
                     'Exp Date': _exp_str(t),
@@ -1796,13 +1793,12 @@ def render_tenancy_tab():
                 'Space': '', 'Tenant': 'TOTAL', 'Type': '',
                 'SF': f"{b_sf:,.0f}",
                 'Building %': '100.0%',
+                'CAM %': f"{sum(float(t.get('CAM_Pct') or 0) for t in b_tenants if t.get('Is_NNN')):.1%}",
                 'Gross Annual': f"${b_gross_annual:,.0f}",
                 'Expense Annual': f"${b_expense:,.0f}",
                 'NOI Annual': f"${b_noi:,.0f}",
                 '': '',
-                'Gross Monthly': f"${b_gross_annual / 12:,.0f}",
-                'Expense Monthly': f"${b_expense / 12:,.0f}",
-                'Net Monthly': f"${b_noi / 12:,.0f}",
+                'Monthly Rent': f"${b_monthly:,.0f}",
                 'Net PSF': f"${b_net_psf:,.2f}", 'Gross PSF': f"${b_gross_psf:,.2f}",
                 'Exp Date': '', 'MTE': '',
             })
@@ -2444,7 +2440,7 @@ def generate_tab_pdf(title, sections, meta=None, max_rows_total=150):
     Returns PDF bytes.
     """
     from reportlab.lib import colors
-    from reportlab.lib.pagesizes import letter, legal, landscape
+    from reportlab.lib.pagesizes import letter, landscape
     from reportlab.lib.units import inch
     from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
     from reportlab.platypus import (SimpleDocTemplate, Table, TableStyle,
@@ -2469,8 +2465,8 @@ def generate_tab_pdf(title, sections, meta=None, max_rows_total=150):
             pass
     is_current_tenancy = title == 'Current Tenancy'
     use_landscape = max_cols > 7
-    pagesize = landscape(legal) if is_current_tenancy else (landscape(letter) if use_landscape else letter)
-    margin = 0.25 * inch if is_current_tenancy else 0.5 * inch
+    pagesize = landscape(letter) if is_current_tenancy else (landscape(letter) if use_landscape else letter)
+    margin = 0.18 * inch if is_current_tenancy else 0.5 * inch
     avail_w = pagesize[0] - (2 * margin)
 
     buf = io.BytesIO()
@@ -2480,17 +2476,17 @@ def generate_tab_pdf(title, sections, meta=None, max_rows_total=150):
                             title=f"MSP {title}")
     styles = getSampleStyleSheet()
     title_style = ParagraphStyle('T', parent=styles['Title'],
-                                 fontSize=10 if is_current_tenancy else 16,
-                                 leading=11 if is_current_tenancy else 18,
+                                 fontSize=8 if is_current_tenancy else 16,
+                                 leading=9 if is_current_tenancy else 18,
                                  textColor=colors.HexColor('#1a3a5c'), spaceAfter=1)
     sub = ParagraphStyle('sub', parent=styles['Heading2'],
-                         fontSize=7 if is_current_tenancy else 12,
-                         leading=8 if is_current_tenancy else 14,
+                         fontSize=5.5 if is_current_tenancy else 12,
+                         leading=6.5 if is_current_tenancy else 14,
                          spaceBefore=3 if is_current_tenancy else 10,
                          spaceAfter=1, textColor=colors.HexColor('#1a3a5c'))
     subtitle_style = ParagraphStyle('subtitle', parent=styles['Normal'],
-                                    fontSize=5.5 if is_current_tenancy else 8,
-                                    leading=6 if is_current_tenancy else 10,
+                                    fontSize=4.5 if is_current_tenancy else 8,
+                                    leading=5 if is_current_tenancy else 10,
                                     spaceAfter=1,
                                     textColor=colors.HexColor('#333333'))
     small = ParagraphStyle('S', parent=styles['Normal'],
@@ -2498,15 +2494,15 @@ def generate_tab_pdf(title, sections, meta=None, max_rows_total=150):
                            leading=6 if is_current_tenancy else 10,
                            textColor=colors.HexColor('#555555'))
     cell = ParagraphStyle('cell', parent=styles['Normal'],
-                          fontSize=5.5 if is_current_tenancy else 7,
-                          leading=6 if is_current_tenancy else 8)
+                          fontSize=4.5 if is_current_tenancy else 7,
+                          leading=5 if is_current_tenancy else 8)
     hcell = ParagraphStyle('hcell', parent=styles['Normal'],
-                           fontSize=5.5 if is_current_tenancy else 7,
-                           leading=6 if is_current_tenancy else 8,
+                           fontSize=4.5 if is_current_tenancy else 7,
+                           leading=5 if is_current_tenancy else 8,
                            textColor=colors.white, fontName='Helvetica-Bold')
     note = ParagraphStyle('note', parent=styles['Normal'],
-                          fontSize=5.5 if is_current_tenancy else 7,
-                          leading=6 if is_current_tenancy else 8,
+                          fontSize=4.5 if is_current_tenancy else 7,
+                          leading=5 if is_current_tenancy else 8,
                           textColor=colors.HexColor('#888888'))
 
     story = []
