@@ -2518,6 +2518,30 @@ def generate_tab_pdf(title, sections, meta=None, max_rows_total=150):
     n_sec = max(1, len(nonempty))
     per_section_cap = max(6, max_rows_total // n_sec)
 
+    tenancy_layout = None
+    if title == 'Current Tenancy' and nonempty:
+        from reportlab.pdfbase.pdfmetrics import stringWidth
+        shared_cols = list(nonempty[0][1].columns)
+        shared_rows = [list(map(str, shared_cols))]
+        for _, section_df, _ in nonempty:
+            for _, row in section_df.head(per_section_cap).iterrows():
+                shared_rows.append(['' if pd.isna(row[c]) else str(row[c]) for c in shared_cols])
+        shared_font_size = 5.5
+        shared_widths = [max(stringWidth(row[i], 'Helvetica-Bold' if r == 0 else 'Helvetica', shared_font_size)
+                             for r, row in enumerate(shared_rows)) + 3 for i in range(len(shared_cols))]
+        total_width = sum(shared_widths)
+        if total_width > avail_w:
+            shared_font_size = max(4.0, shared_font_size * avail_w / total_width)
+            shared_widths = [max(stringWidth(row[i], 'Helvetica-Bold' if r == 0 else 'Helvetica', shared_font_size)
+                                 for r, row in enumerate(shared_rows)) + 3 for i in range(len(shared_cols))]
+            total_width = sum(shared_widths)
+        if total_width > avail_w:
+            shared_widths = [w * avail_w / total_width for w in shared_widths]
+        elif total_width < avail_w:
+            extra = (avail_w - total_width) / len(shared_widths)
+            shared_widths = [w + extra for w in shared_widths]
+        tenancy_layout = (shared_cols, shared_widths, shared_font_size)
+
     def _mk_table(df):
         cols = list(df.columns)
         ncol = len(cols)
@@ -2527,35 +2551,12 @@ def generate_tab_pdf(title, sections, meta=None, max_rows_total=150):
         # columns use only the width they need, and values align to the right.
         is_tenancy = title == 'Current Tenancy'
         if is_tenancy:
-            from reportlab.pdfbase.pdfmetrics import stringWidth
             from reportlab.lib.enums import TA_RIGHT
-
+            layout_cols, col_widths, font_size = tenancy_layout
             text_rows = [
                 ['' if pd.isna(row[c]) else str(row[c]) for c in cols]
                 for _, row in shown.iterrows()
             ]
-            all_rows = [list(map(str, cols))] + text_rows
-            padding = 3  # total horizontal padding per cell
-            normal_font = 'Helvetica'
-            header_font = 'Helvetica-Bold'
-            font_size = 5.5 if is_current_tenancy else 7.0
-
-            # Scale the type down only as far as necessary to keep the full row
-            # on one line in the printable landscape width.
-            def _widths(size):
-                return [max(
-                    stringWidth(row[i], header_font if r == 0 else normal_font, size)
-                    for r, row in enumerate(all_rows)
-                ) + padding for i in range(ncol)]
-
-            widths = _widths(font_size)
-            if sum(widths) > avail_w:
-                font_size = max(4.0, font_size * avail_w / sum(widths))
-                widths = _widths(font_size)
-            # Final proportional squeeze protects against rounding overflow.
-            if sum(widths) > avail_w:
-                widths = [w * avail_w / sum(widths) for w in widths]
-
             tenancy_cell = ParagraphStyle(
                 'tenancy_cell', parent=cell, fontSize=font_size,
                 leading=font_size + 1, alignment=TA_RIGHT, splitLongWords=0,
@@ -2564,9 +2565,8 @@ def generate_tab_pdf(title, sections, meta=None, max_rows_total=150):
                 'tenancy_hcell', parent=hcell, fontSize=font_size,
                 leading=font_size + 1, alignment=TA_RIGHT, splitLongWords=0,
             )
-            data = [[Paragraph(str(c), tenancy_hcell) for c in cols]]
+            data = [[Paragraph(str(c), tenancy_hcell) for c in layout_cols]]
             data.extend([[Paragraph(v, tenancy_cell) for v in row] for row in text_rows])
-            col_widths = widths
             pad_left = pad_right = 1
         else:
             header = [Paragraph(str(c), hcell) for c in cols]
