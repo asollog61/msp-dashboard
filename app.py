@@ -1678,32 +1678,87 @@ def render_tenancy_tab():
     wavg_net_psf = total_annual / total_sf if total_sf > 0 else 0
     wavg_gross_psf = total_gross_rev / total_sf if total_sf > 0 else 0
 
-    # --- Report buttons (condensed portfolio tenancy view for the PDF) ---
+    # --- Report buttons: per-building tenancy view mirroring the dashboard ---
     def _ten_sections():
         import pandas as pd
-        def _mk(rows):
-            out = []
-            for t in rows:
-                out.append({
-                    'Bldg': BUILDING_MAP.get(t.get('Building'), {}).get('code', t.get('Building', '')),
-                    'Space': t.get('Space', ''),
+
+        def _exp_str(t):
+            e = t.get('Exp Date')
+            if isinstance(e, (datetime, date)):
+                return e.strftime('%m/%d/%Y')
+            return '-' if not e else str(e)
+
+        def _mte(t):
+            lbl = t.get('TTE_Label')
+            if lbl == 'MTM':
+                return 'MTM'
+            m = t.get('TTE_Months')
+            if m is None or (isinstance(m, float) and pd.isna(m)):
+                return ''
+            try:
+                return str(int(m))
+            except Exception:
+                return str(m)
+
+        secs = []
+        # One section per building, in BUILDING_MAP order.
+        ordered_bldgs = [b for b in BUILDING_MAP if any(t['Building'] == b for t in active)]
+        for b in ordered_bldgs:
+            b_tenants = [t for t in active if t['Building'] == b]
+            b_expense = float(expense_cfg.get(b, 0) or 0)
+            rows = []
+            b_monthly = b_annual = b_gross_annual = 0.0
+            b_sf = 0.0
+            for t in b_tenants:
+                sf = t.get('SF', 0) or 0
+                monthly = t.get('Monthly', 0) or 0
+                annual = t.get('Annual', 0) or 0
+                cam_reimb = (b_expense * t['CAM_Pct']) if t.get('Is_NNN') and isinstance(t.get('CAM_Pct'), (int, float)) else 0
+                gross_annual = annual + cam_reimb
+                net_psf = t.get('PSF', 0) or 0
+                gross_psf = net_psf + ((cam_reimb / sf) if sf and sf > 0 else 0)
+                b_monthly += monthly
+                b_annual += annual
+                b_gross_annual += gross_annual
+                if sf > 1:
+                    b_sf += sf
+                rows.append({
+                    'Space': str(t.get('Space', '')),
                     'Tenant': t.get('Tenant', ''),
-                    'SF': f"{t.get('SF', 0):,.0f}" if isinstance(t.get('SF'), (int, float)) else t.get('SF', ''),
-                    'Monthly': f"${t.get('Monthly', 0):,.0f}",
-                    'Annual': f"${t.get('Annual', 0):,.0f}",
-                    'PSF': f"${t.get('PSF', 0):,.2f}" if isinstance(t.get('PSF'), (int, float)) else '',
-                    'TTE': t.get('TTE_Label', ''),
-                    'Status': (t.get('Status', '') or '').replace('🔴 ', ''),
+                    'Type': t.get('Type', ''),
+                    'SF': f"{sf:,.0f}" if isinstance(sf, (int, float)) and sf > 1 else '',
+                    'Monthly': f"${monthly:,.0f}",
+                    'Annual': f"${annual:,.0f}",
+                    'Gross Annual': f"${gross_annual:,.0f}",
+                    'Net PSF': f"${net_psf:,.2f}",
+                    'Gross PSF': f"${gross_psf:,.2f}",
+                    'Exp Date': _exp_str(t),
+                    'MTE': _mte(t),
                 })
-            return pd.DataFrame(out)
-        secs = [("Current Tenants", _mk(active))]
-        if future_tenants:
-            secs.append(("Future / Not-Yet-Commenced", _mk(future_tenants)))
+            b_noi = b_gross_annual - b_expense
+            b_net_psf = b_annual / b_sf if b_sf > 0 else 0
+            b_gross_psf = b_gross_annual / b_sf if b_sf > 0 else 0
+            # TOTAL row
+            rows.append({
+                'Space': '', 'Tenant': 'TOTAL', 'Type': '',
+                'SF': f"{b_sf:,.0f}", 'Monthly': f"${b_monthly:,.0f}",
+                'Annual': f"${b_annual:,.0f}", 'Gross Annual': f"${b_gross_annual:,.0f}",
+                'Net PSF': f"${b_net_psf:,.2f}", 'Gross PSF': f"${b_gross_psf:,.2f}",
+                'Exp Date': '', 'MTE': '',
+            })
+            code = BUILDING_MAP.get(b, {}).get('code', '')
+            label = f"{b} ({code})" if code else b
+            subtitle = (f"Monthly ${b_monthly:,.0f} · Annual ${b_annual:,.0f} · "
+                        f"Gross Rev ${b_gross_annual:,.0f} · Expenses ${b_expense:,.0f} · "
+                        f"NOI ${b_noi:,.0f}")
+            secs.append((label, pd.DataFrame(rows), subtitle))
         return secs
+
     render_report_buttons(
         "tenancy", "Current Tenancy", _ten_sections,
         meta=f"Portfolio SF {total_sf:,.0f} · Gross Rev ${total_gross_rev:,.0f} · "
-             f"NOI ${total_noi:,.0f} · Wtd Avg Gross ${wavg_gross_psf:,.2f}/SF")
+             f"Expenses ${total_expenses:,.0f} · NOI ${total_noi:,.0f} · "
+             f"Wtd Avg Net ${wavg_net_psf:,.2f}/SF · Wtd Avg Gross ${wavg_gross_psf:,.2f}/SF")
 
     c1, c2, c3, c4, c5, c6 = st.columns(6)
     c1.metric("Portfolio SF", f"{total_sf:,.0f}")
@@ -2322,7 +2377,7 @@ def _smtp_send(subject, text, html, pdf_bytes, pdf_filename):
     return (True, f"Report emailed to {', '.join(EMAIL_TEAM_RECIPIENTS)}.")
 
 
-def generate_tab_pdf(title, sections, meta=None, max_rows_total=90):
+def generate_tab_pdf(title, sections, meta=None, max_rows_total=150):
     """Render a compact <=2-page PDF from (label, DataFrame) sections.
     Chooses landscape automatically for wide tables. Long DataFrames are capped
     with a '...and N more' note so the PDF never overruns 2 pages.
@@ -2336,9 +2391,18 @@ def generate_tab_pdf(title, sections, meta=None, max_rows_total=90):
                                     Paragraph, Spacer)
     import io
 
+    # Normalize sections to (label, df, subtitle) 3-tuples (subtitle optional).
+    norm_sections = []
+    for s in sections:
+        if len(s) == 3:
+            norm_sections.append((s[0], s[1], s[2]))
+        else:
+            norm_sections.append((s[0], s[1], None))
+    sections = norm_sections
+
     # Decide orientation from the widest section.
     max_cols = 1
-    for _lbl, df in sections:
+    for _lbl, df, _sub in sections:
         try:
             max_cols = max(max_cols, len(df.columns))
         except Exception:
@@ -2356,8 +2420,11 @@ def generate_tab_pdf(title, sections, meta=None, max_rows_total=90):
     title_style = ParagraphStyle('T', parent=styles['Title'], fontSize=16,
                                  textColor=colors.HexColor('#1a3a5c'), spaceAfter=2)
     sub = ParagraphStyle('sub', parent=styles['Heading2'], fontSize=12,
-                         spaceBefore=10, spaceAfter=4,
+                         spaceBefore=10, spaceAfter=1,
                          textColor=colors.HexColor('#1a3a5c'))
+    subtitle_style = ParagraphStyle('subtitle', parent=styles['Normal'], fontSize=8,
+                                    spaceAfter=3,
+                                    textColor=colors.HexColor('#333333'))
     small = ParagraphStyle('S', parent=styles['Normal'], fontSize=8,
                            textColor=colors.HexColor('#555555'))
     cell = ParagraphStyle('cell', parent=styles['Normal'], fontSize=7, leading=8)
@@ -2374,7 +2441,7 @@ def generate_tab_pdf(title, sections, meta=None, max_rows_total=90):
     story.append(Spacer(1, 6))
 
     # Budget rows across sections so we stay within ~2 pages.
-    nonempty = [(lbl, df) for lbl, df in sections
+    nonempty = [(lbl, df, sbt) for lbl, df, sbt in sections
                 if df is not None and hasattr(df, 'empty') and not df.empty]
     n_sec = max(1, len(nonempty))
     per_section_cap = max(6, max_rows_total // n_sec)
@@ -2406,8 +2473,10 @@ def generate_tab_pdf(title, sections, meta=None, max_rows_total=90):
 
     if not nonempty:
         story.append(Paragraph("No data available for this section.", styles['Normal']))
-    for lbl, df in nonempty:
+    for lbl, df, sbt in nonempty:
         story.append(Paragraph(str(lbl), sub))
+        if sbt:
+            story.append(Paragraph(str(sbt), subtitle_style))
         tbl, remaining = _mk_table(df)
         story.append(tbl)
         if remaining > 0:
@@ -2448,11 +2517,15 @@ def send_tab_email(title, sections, meta=None):
     text_lines = ["Hi Addison, Richie, and Jason,", "",
                   f"MSP {title} report as of {today_str}.", ""]
     html_secs = []
-    for lbl, df in sections:
+    for s in sections:
+        lbl, df = s[0], s[1]
+        sbt = s[2] if len(s) == 3 else None
         n = 0 if (df is None or not hasattr(df, 'empty') or df.empty) else len(df)
-        text_lines.append(f"- {lbl}: {n} row(s)")
+        text_lines.append(f"- {lbl}: {n} row(s)" + (f" — {sbt}" if sbt else ""))
+        sub_html = (f'<p style="color:#555;font-size:12px;margin:2px 0;">{sbt}</p>'
+                    if sbt else '')
         html_secs.append(f'<h3 style="color:#1a3a5c;margin-bottom:4px;">{lbl}</h3>'
-                         f'{_df_to_html(df)}')
+                         f'{sub_html}{_df_to_html(df)}')
     text_lines += ["", "Full report attached (PDF).", "", "— Sis",
                    "Marion Street Properties"]
     text = "\n".join(text_lines)
