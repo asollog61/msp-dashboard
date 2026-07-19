@@ -862,9 +862,40 @@ def extract_cert_info(pdf_path):
         return None, None
 
 
+# Tenant name aliases: maps alternate / rebranded / d-b-a insured names (as they
+# appear on COI certs) to the canonical roster tenant name. Add entries here when a
+# tenant's insurance is issued under a different legal name than the roster shows.
+# Keys and values are matched case-insensitively.
+TENANT_ALIASES = {
+    # City Property USA rebranded to Village Practice Management (15 South, Unit 1).
+    # "village practice man" covers the 20-char-truncated filename form too.
+    "village practice man": "City Property USA NJ, LLC",
+    "village practice management": "City Property USA NJ, LLC",
+    "village practice management company": "City Property USA NJ, LLC",
+    "village practice management company, llc": "City Property USA NJ, LLC",
+}
+
+
+def _apply_tenant_alias(name):
+    """Return the canonical roster name if `name` (or a prefix of it) is a known alias."""
+    if not name:
+        return name
+    key = name.strip().lower().rstrip(' .,')
+    if key in TENANT_ALIASES:
+        return TENANT_ALIASES[key]
+    # also try alias keys as substrings (cert name may carry extra text)
+    for alias, canonical in TENANT_ALIASES.items():
+        if alias in key:
+            return canonical
+    return name
+
+
 def fuzzy_match_tenant(tenant_name, cert_name):
     if not tenant_name or not cert_name:
         return False
+    # Normalize known aliases on BOTH sides to the canonical roster name.
+    tenant_name = _apply_tenant_alias(tenant_name)
+    cert_name = _apply_tenant_alias(cert_name)
     t, c = tenant_name.upper().strip(), cert_name.upper().strip()
     if t in c or c in t:
         return True
@@ -2561,16 +2592,21 @@ def build_coi_report_data():
         summary['total'] += 1
         code = BUILDING_MAP.get(b, {}).get('code', '')
         b_certs = coi_data.get(b, [])
-        matched = None
+        matches = []
         for cert in b_certs:
             if fuzzy_match_tenant(name, cert.get('insured_name')):
-                matched = cert
-                break
-        if not matched:
+                matches.append(cert)
+        if not matches:
             for cert in b_certs:
                 if fuzzy_match_tenant(name, cert['filename']):
-                    matched = cert
-                    break
+                    matches.append(cert)
+        # When multiple certs match one tenant (e.g. an old + a renewed cert, or a
+        # rebrand alias), pick the one with the LATEST expiration date so stale
+        # certs never mask a current one.
+        matched = None
+        if matches:
+            matched = max(matches,
+                          key=lambda c: c.get('exp_date') or datetime.min)
 
         if matched:
             exp = matched['exp_date']
@@ -2936,16 +2972,19 @@ def render_insurance_tab():
 
         summary['total'] += 1
         b_certs = coi_data.get(b, [])
-        matched = None
+        matches = []
         for cert in b_certs:
             if fuzzy_match_tenant(name, cert.get('insured_name')):
-                matched = cert
-                break
-        if not matched:
+                matches.append(cert)
+        if not matches:
             for cert in b_certs:
                 if fuzzy_match_tenant(name, cert['filename']):
-                    matched = cert
-                    break
+                    matches.append(cert)
+        # Latest-expiration cert wins so stale certs never mask a current one.
+        matched = None
+        if matches:
+            matched = max(matches,
+                          key=lambda c: c.get('exp_date') or datetime.min)
 
         if matched:
             exp = matched['exp_date']
