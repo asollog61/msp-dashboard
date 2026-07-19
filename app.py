@@ -1701,10 +1701,20 @@ def render_tenancy_tab():
                 return str(m)
 
         secs = []
-        # One section per building, in BUILDING_MAP order.
+
+        def _space_sort_key(t):
+            # Natural ordering: 2 before 10, while preserving labels like 102-104.
+            raw = str(t.get('Space', '') or '').strip()
+            parts = re.split(r'(\d+)', raw)
+            return tuple(int(p) if p.isdigit() else p.lower() for p in parts)
+
+        # One section per building, in BUILDING_MAP order; tenants by space.
         ordered_bldgs = [b for b in BUILDING_MAP if any(t['Building'] == b for t in active)]
         for b in ordered_bldgs:
-            b_tenants = [t for t in active if t['Building'] == b]
+            b_tenants = sorted(
+                (t for t in active if t['Building'] == b),
+                key=lambda t: (_space_sort_key(t), str(t.get('Building', '')).lower()),
+            )
             b_expense = float(expense_cfg.get(b, 0) or 0)
             rows = []
             b_monthly = b_annual = b_gross_annual = 0.0
