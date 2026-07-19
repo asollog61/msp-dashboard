@@ -2174,49 +2174,80 @@ def render_vacancy_tab():
                     'Net PSF': f"${t.get('PSF', 0):,.2f}",
                     'MTE': t.get('TTE_Months', ''), 'Exp Date': t.get('Exp Date', ''),
                 })
-        # Add the ten most recently updated lead-sheet items to the vacancy report.
-        # Last Modified comes from the lead-sheet changelog; dated activity fields
-        # provide a fallback when changelog data is unavailable.
-        recent_leads = []
+        # Group matching leads under each currently vacant space and each space
+        # expiring within three months. Each space gets its own clearly labeled
+        # section with the five most recently active matching leads.
+        lead_sections = []
         try:
             retail_leads, office_leads = load_lead_sheet()
+            lead_frames = []
             for section_name, lead_df in (("Retail", retail_leads), ("Office", office_leads)):
                 if lead_df is None or lead_df.empty:
                     continue
                 work = lead_df.copy()
                 work.insert(0, "Lead Type", section_name)
-                date_cols = [c for c in work.columns
-                             if "date" in str(c).lower() or str(c).lower() == "last modified"]
-                if date_cols:
-                    parsed_dates = [pd.to_datetime(work[c], errors="coerce") for c in date_cols]
-                    work["_Recent Date"] = pd.concat(parsed_dates, axis=1).max(axis=1)
+                activity_cols = [c for c in work.columns if "date" in str(c).lower()]
+                if activity_cols:
+                    parsed = [pd.to_datetime(work[c], errors="coerce") for c in activity_cols]
+                    work["_Recent Date"] = pd.concat(parsed, axis=1).max(axis=1)
                 else:
                     work["_Recent Date"] = pd.NaT
-                recent_leads.append(work)
+                lead_frames.append(work)
 
-            if recent_leads:
-                leads = pd.concat(recent_leads, ignore_index=True)
-                leads = leads.sort_values("_Recent Date", ascending=False, na_position="last").head(10)
-                preferred = [
-                    "Lead Type", "Tenant", "Unit", "Space", "Phone", "Email",
-                    "Contact Date", "Contact", "Shown Date", "Show", "Showing",
-                    "LOI", "Last Modified"
-                ]
-                lead_cols = [c for c in preferred if c in leads.columns]
-                if not lead_cols:
-                    lead_cols = [c for c in leads.columns if c != "_Recent Date"][:8]
-                recent_lead_rows = leads[lead_cols].copy()
-                for col in recent_lead_rows.columns:
-                    if "date" in str(col).lower() or str(col).lower() == "last modified":
-                        recent_lead_rows[col] = recent_lead_rows[col].fillna("").astype(str).str.slice(0, 19)
-            else:
-                recent_lead_rows = pd.DataFrame()
+            all_leads = pd.concat(lead_frames, ignore_index=True) if lead_frames else pd.DataFrame()
+
+            def _unit_tokens(value):
+                return set(re.findall(r"\d+[A-Za-z]?", str(value or "").upper()))
+
+            def _same_space(building, space, lead_building, lead_unit):
+                b1 = re.sub(r"[^A-Z0-9]", "", str(building or "").upper())
+                b2 = re.sub(r"[^A-Z0-9]", "", str(lead_building or "").upper())
+                units = _unit_tokens(space) & _unit_tokens(lead_unit)
+                return bool(b1 and b1 == b2 and units)
+
+            targets = []
+            seen_targets = set()
+            for v in vacant_records:
+                building = v.get('Building', '')
+                space = str(v.get('Space', ''))
+                key = (str(building).strip().lower(), space.strip().lower())
+                if key not in seen_targets:
+                    targets.append((building, space, f"VACANT · Since {v.get('Vacancy Date', v.get('Date Marked', ''))}"))
+                    seen_targets.add(key)
+            for t in active:
+                if 0 < t.get('TTE_Days', 0) <= 90:
+                    building = t.get('Building', '')
+                    space = str(t.get('Space', ''))
+                    key = (str(building).strip().lower(), space.strip().lower())
+                    if key not in seen_targets:
+                        targets.append((building, space, f"EXPIRING · {t.get('Exp Date', '')} · {t.get('TTE_Months', '')} months"))
+                        seen_targets.add(key)
+
+            lead_cols = ["Lead Type", "Tenant", "Unit", "Sqft", "Broker", "Phone", "Email",
+                         "Date Contacted", "Showing", "Date Shown", "LOI", "Date LOI"]
+            for building, space, status in targets:
+                label = f"{building} — Space {space} · {status} · 5 Most Recent Matching Leads"
+                if all_leads.empty:
+                    matched = pd.DataFrame(columns=lead_cols)
+                else:
+                    matched = all_leads[
+                        all_leads.apply(lambda r: _same_space(building, space, r.get('Building'), r.get('Unit')), axis=1)
+                    ].copy()
+                    matched = matched.sort_values("_Recent Date", ascending=False, na_position="last").head(5)
+                    available = [c for c in lead_cols if c in matched.columns]
+                    matched = matched[available].copy() if available else pd.DataFrame(columns=lead_cols)
+                    for col in matched.columns:
+                        if "date" in str(col).lower():
+                            matched[col] = matched[col].fillna("").astype(str).str.slice(0, 19)
+                if matched.empty:
+                    matched = pd.DataFrame([{"Tenant": "No matching leads found"}])
+                lead_sections.append((label, matched))
         except Exception:
-            recent_lead_rows = pd.DataFrame()
+            lead_sections = []
 
         return [("Currently Vacant Spaces", pd.DataFrame(vac_rows)),
                 ("At Risk — Expiring Within 12 Months", pd.DataFrame(risk_rows)),
-                ("10 Most Recent Lead Sheet Items", recent_lead_rows)]
+                *lead_sections]
     render_report_buttons("vacancy", "Vacancy", _vac_sections)
 
     # --- Mark space vacant ---
@@ -2605,26 +2636,52 @@ def generate_tab_pdf(title, sections, meta=None, max_rows_total=150):
         ncol = len(cols)
         shown = df.head(per_section_cap)
 
-        # Current Tenancy is deliberately packed: every cell stays on one line,
-        # columns use only the width they need, and values align to the right.
-        is_tenancy = title == 'Current Tenancy'
-        if is_tenancy:
+        # Current Tenancy and Vacancy are deliberately packed: text is right-
+        # justified and each column gets only the width its contents require,
+        # with any remaining width distributed evenly.
+        is_packed = title in ('Current Tenancy', 'Vacancy')
+        if is_packed:
             from reportlab.lib.enums import TA_RIGHT
-            layout_cols, col_widths, font_size = tenancy_layout
+            packed_cell = ParagraphStyle(
+                'packed_cell', parent=cell, fontSize=4.5,
+                leading=5.5, alignment=TA_RIGHT, splitLongWords=0,
+            )
+            packed_hcell = ParagraphStyle(
+                'packed_hcell', parent=hcell, fontSize=4.5,
+                leading=5.5, alignment=TA_RIGHT, splitLongWords=0,
+            )
             text_rows = [
                 ['' if pd.isna(row[c]) else str(row[c]) for c in cols]
                 for _, row in shown.iterrows()
             ]
-            tenancy_cell = ParagraphStyle(
-                'tenancy_cell', parent=cell, fontSize=font_size,
-                leading=font_size + 1, alignment=TA_RIGHT, splitLongWords=0,
-            )
-            tenancy_hcell = ParagraphStyle(
-                'tenancy_hcell', parent=hcell, fontSize=font_size,
-                leading=font_size + 1, alignment=TA_RIGHT, splitLongWords=0,
-            )
-            data = [[Paragraph(str(c), tenancy_hcell) for c in layout_cols]]
-            data.extend([[Paragraph(v, tenancy_cell) for v in row] for row in text_rows])
+            if title == 'Current Tenancy':
+                layout_cols, col_widths, font_size = tenancy_layout
+                packed_cell.fontSize = font_size
+                packed_cell.leading = font_size + 1
+                packed_hcell.fontSize = font_size
+                packed_hcell.leading = font_size + 1
+                header_cols = layout_cols
+            else:
+                # Vacancy sections have different columns, so size each grid
+                # independently instead of forcing every column to equal width.
+                from reportlab.pdfbase.pdfmetrics import stringWidth
+                font_size = 4.5
+                header_cols = cols
+                raw_widths = []
+                for i, col in enumerate(cols):
+                    values = [str(col)] + [row[i] for row in text_rows]
+                    raw_widths.append(max(stringWidth(v, 'Helvetica-Bold' if v == str(col) else 'Helvetica', font_size)
+                                          for v in values) + 4)
+                raw_total = sum(raw_widths)
+                if raw_total > avail_w:
+                    scale = avail_w / raw_total
+                    col_widths = [w * scale for w in raw_widths]
+                else:
+                    extra = (avail_w - raw_total) / len(raw_widths) if raw_widths else 0
+                    col_widths = [w + extra for w in raw_widths]
+
+            data = [[Paragraph(str(c), packed_hcell) for c in header_cols]]
+            data.extend([[Paragraph(v, packed_cell) for v in row] for row in text_rows])
             pad_left = pad_right = 1
         else:
             header = [Paragraph(str(c), hcell) for c in cols]
