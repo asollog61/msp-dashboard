@@ -2126,6 +2126,21 @@ def remove_vacant_space(row_idx):
         return False
 
 
+def _months_vacant(value):
+    """Return elapsed vacancy time in months for report/display use."""
+    try:
+        if isinstance(value, datetime):
+            vac_date = value.date()
+        elif isinstance(value, date):
+            vac_date = value
+        else:
+            vac_date = datetime.strptime(str(value)[:10], '%Y-%m-%d').date()
+        days = max(0, (TODAY - vac_date).days)
+        return round(days / 30.44, 1)
+    except (TypeError, ValueError):
+        return '—'
+
+
 def render_vacancy_tab():
     tenants, _, _ = load_tenancy()
     active = [t for t in tenants]
@@ -2144,6 +2159,7 @@ def render_vacancy_tab():
                 'Building': v.get('Building', ''), 'Space': str(v.get('Space', '')),
                 'Last Tenant': v.get('Tenant', ''), 'SF': v.get('SF', ''),
                 'Vacant Since': v.get('Vacancy Date', v.get('Date Marked', '')),
+                'Months Vacant': _months_vacant(v.get('Vacancy Date', v.get('Date Marked', ''))),
                 'Notes': v.get('Notes', ''),
             })
         risk_rows = []
@@ -2155,10 +2171,52 @@ def render_vacancy_tab():
                     'Tenant': t.get('Tenant', ''),
                     'SF': f"{t.get('SF', 0):,.0f}" if isinstance(t.get('SF'), (int, float)) else t.get('SF', ''),
                     'Monthly': f"${t.get('Monthly', 0):,.0f}",
+                    'Net PSF': f"${t.get('PSF', 0):,.2f}",
                     'MTE': t.get('TTE_Months', ''), 'Exp Date': t.get('Exp Date', ''),
                 })
+        # Add the ten most recently updated lead-sheet items to the vacancy report.
+        # Last Modified comes from the lead-sheet changelog; dated activity fields
+        # provide a fallback when changelog data is unavailable.
+        recent_leads = []
+        try:
+            retail_leads, office_leads = load_lead_sheet()
+            for section_name, lead_df in (("Retail", retail_leads), ("Office", office_leads)):
+                if lead_df is None or lead_df.empty:
+                    continue
+                work = lead_df.copy()
+                work.insert(0, "Lead Type", section_name)
+                date_cols = [c for c in work.columns
+                             if "date" in str(c).lower() or str(c).lower() == "last modified"]
+                if date_cols:
+                    parsed_dates = [pd.to_datetime(work[c], errors="coerce") for c in date_cols]
+                    work["_Recent Date"] = pd.concat(parsed_dates, axis=1).max(axis=1)
+                else:
+                    work["_Recent Date"] = pd.NaT
+                recent_leads.append(work)
+
+            if recent_leads:
+                leads = pd.concat(recent_leads, ignore_index=True)
+                leads = leads.sort_values("_Recent Date", ascending=False, na_position="last").head(10)
+                preferred = [
+                    "Lead Type", "Tenant", "Unit", "Space", "Phone", "Email",
+                    "Contact Date", "Contact", "Shown Date", "Show", "Showing",
+                    "LOI", "Last Modified"
+                ]
+                lead_cols = [c for c in preferred if c in leads.columns]
+                if not lead_cols:
+                    lead_cols = [c for c in leads.columns if c != "_Recent Date"][:8]
+                recent_lead_rows = leads[lead_cols].copy()
+                for col in recent_lead_rows.columns:
+                    if "date" in str(col).lower() or str(col).lower() == "last modified":
+                        recent_lead_rows[col] = recent_lead_rows[col].fillna("").astype(str).str.slice(0, 19)
+            else:
+                recent_lead_rows = pd.DataFrame()
+        except Exception:
+            recent_lead_rows = pd.DataFrame()
+
         return [("Currently Vacant Spaces", pd.DataFrame(vac_rows)),
-                ("At Risk — Expiring Within 12 Months", pd.DataFrame(risk_rows))]
+                ("At Risk — Expiring Within 12 Months", pd.DataFrame(risk_rows)),
+                ("10 Most Recent Lead Sheet Items", recent_lead_rows)]
     render_report_buttons("vacancy", "Vacancy", _vac_sections)
 
     # --- Mark space vacant ---
@@ -2208,20 +2266,7 @@ def render_vacancy_tab():
         for v in vacant_records:
             # Calculate days vacant
             vac_date_str = v.get('Vacancy Date', v.get('Date Marked', ''))
-            days_vacant = '—'
-            try:
-                vac_date = datetime.strptime(vac_date_str, '%Y-%m-%d').date()
-                days = (TODAY - vac_date).days
-                if days < 0:
-                    days_vacant = f"Starts in {-days}d"
-                elif days < 30:
-                    days_vacant = f"{days}d"
-                elif days < 365:
-                    days_vacant = f"{days // 30}mo {days % 30}d"
-                else:
-                    days_vacant = f"{days // 365}yr {(days % 365) // 30}mo"
-            except (ValueError, TypeError):
-                pass
+            months_vacant = _months_vacant(vac_date_str)
 
             vacant_display.append({
                 'Building': v.get('Building', ''),
@@ -2229,7 +2274,7 @@ def render_vacancy_tab():
                 'Last Tenant': v.get('Tenant', ''),
                 'SF': v.get('SF', ''),
                 'Vacant Since': vac_date_str,
-                'Days Vacant': days_vacant,
+                'Months Vacant': months_vacant,
                 'Notes': v.get('Notes', ''),
             })
 
@@ -2256,9 +2301,10 @@ def render_vacancy_tab():
                and f"{t['Building']}|{t['Space']}" not in manual_keys]
     if at_risk:
         import pandas as pd
-        risk_df = pd.DataFrame(at_risk)[['Building', 'Space', 'Tenant', 'SF', 'Monthly', 'TTE_Months', 'Exp Date']]
-        risk_df.rename(columns={'TTE_Months': 'MTE'}, inplace=True)
+        risk_df = pd.DataFrame(at_risk)[['Building', 'Space', 'Tenant', 'SF', 'Monthly', 'PSF', 'TTE_Months', 'Exp Date']]
+        risk_df.rename(columns={'TTE_Months': 'MTE', 'PSF': 'Net PSF'}, inplace=True)
         risk_df['Monthly'] = risk_df['Monthly'].apply(lambda x: f"${x:,.0f}")
+        risk_df['Net PSF'] = risk_df['Net PSF'].apply(lambda x: f"${x:,.2f}")
         show_grid(
             risk_df,
             key="at_risk",
@@ -2370,7 +2416,7 @@ def render_vacancy_tab():
         st.info("No marketing entries yet.")
         mdf = pd.DataFrame(columns=['Space', 'Description', 'URL', 'Added By', 'Date', 'Status'])
 
-    render_column_config_editor('vacancy', ['Building', 'Space', 'Tenant', 'SF', 'Monthly', 'MTE', 'Exp Date', 'Last Tenant', 'Vacant Since', 'Days Vacant', 'Notes'])
+    render_column_config_editor('vacancy', ['Building', 'Space', 'Tenant', 'SF', 'Monthly', 'Net PSF', 'MTE', 'Exp Date', 'Last Tenant', 'Vacant Since', 'Months Vacant', 'Notes'])
     render_column_config_editor('marketing', list(mdf.columns))
 
 
@@ -2473,9 +2519,12 @@ def generate_tab_pdf(title, sections, meta=None, max_rows_total=150):
         except Exception:
             pass
     is_current_tenancy = title == 'Current Tenancy'
+    is_vacancy_report = title == 'Vacancy'
     use_landscape = max_cols > 7
-    pagesize = landscape(letter) if is_current_tenancy else (landscape(letter) if use_landscape else letter)
-    margin = 0.18 * inch if is_current_tenancy else 0.5 * inch
+    # Vacancy uses the same landscape treatment as the current-tenancy report,
+    # even when a section is narrow enough to fit portrait.
+    pagesize = landscape(letter) if (is_current_tenancy or is_vacancy_report) else (landscape(letter) if use_landscape else letter)
+    margin = 0.18 * inch if (is_current_tenancy or is_vacancy_report) else 0.5 * inch
     avail_w = pagesize[0] - (2 * margin)
 
     buf = io.BytesIO()
@@ -2485,33 +2534,33 @@ def generate_tab_pdf(title, sections, meta=None, max_rows_total=150):
                             title=f"MSP {title}")
     styles = getSampleStyleSheet()
     title_style = ParagraphStyle('T', parent=styles['Title'],
-                                 fontSize=8 if is_current_tenancy else 16,
-                                 leading=9 if is_current_tenancy else 18,
+                                 fontSize=8 if (is_current_tenancy or is_vacancy_report) else 16,
+                                 leading=9 if (is_current_tenancy or is_vacancy_report) else 18,
                                  textColor=colors.HexColor('#1a3a5c'), spaceAfter=1)
     sub = ParagraphStyle('sub', parent=styles['Heading2'],
-                         fontSize=5.5 if is_current_tenancy else 12,
-                         leading=6.5 if is_current_tenancy else 14,
-                         spaceBefore=3 if is_current_tenancy else 10,
+                         fontSize=5.5 if (is_current_tenancy or is_vacancy_report) else 12,
+                         leading=6.5 if (is_current_tenancy or is_vacancy_report) else 14,
+                         spaceBefore=3 if (is_current_tenancy or is_vacancy_report) else 10,
                          spaceAfter=1, textColor=colors.HexColor('#1a3a5c'))
     subtitle_style = ParagraphStyle('subtitle', parent=styles['Normal'],
-                                    fontSize=4.5 if is_current_tenancy else 8,
-                                    leading=5 if is_current_tenancy else 10,
+                                    fontSize=4.5 if (is_current_tenancy or is_vacancy_report) else 8,
+                                    leading=5 if (is_current_tenancy or is_vacancy_report) else 10,
                                     spaceAfter=1,
                                     textColor=colors.HexColor('#333333'))
     small = ParagraphStyle('S', parent=styles['Normal'],
-                           fontSize=5.5 if is_current_tenancy else 8,
-                           leading=6 if is_current_tenancy else 10,
+                           fontSize=5.5 if (is_current_tenancy or is_vacancy_report) else 8,
+                           leading=6 if (is_current_tenancy or is_vacancy_report) else 10,
                            textColor=colors.HexColor('#555555'))
     cell = ParagraphStyle('cell', parent=styles['Normal'],
-                          fontSize=4.5 if is_current_tenancy else 7,
-                          leading=5 if is_current_tenancy else 8)
+                          fontSize=4.5 if (is_current_tenancy or is_vacancy_report) else 7,
+                          leading=5 if (is_current_tenancy or is_vacancy_report) else 8)
     hcell = ParagraphStyle('hcell', parent=styles['Normal'],
-                           fontSize=4.5 if is_current_tenancy else 7,
-                           leading=5 if is_current_tenancy else 8,
+                           fontSize=4.5 if (is_current_tenancy or is_vacancy_report) else 7,
+                           leading=5 if (is_current_tenancy or is_vacancy_report) else 8,
                            textColor=colors.white, fontName='Helvetica-Bold')
     note = ParagraphStyle('note', parent=styles['Normal'],
-                          fontSize=4.5 if is_current_tenancy else 7,
-                          leading=5 if is_current_tenancy else 8,
+                          fontSize=4.5 if (is_current_tenancy or is_vacancy_report) else 7,
+                          leading=5 if (is_current_tenancy or is_vacancy_report) else 8,
                           textColor=colors.HexColor('#888888'))
 
     story = []
