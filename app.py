@@ -2459,14 +2459,63 @@ def generate_tab_pdf(title, sections, meta=None, max_rows_total=150):
     def _mk_table(df):
         cols = list(df.columns)
         ncol = len(cols)
-        colw = avail_w / ncol
-        header = [Paragraph(str(c), hcell) for c in cols]
-        data = [header]
         shown = df.head(per_section_cap)
-        for _, row in shown.iterrows():
-            data.append([Paragraph('' if pd.isna(row[c]) else str(row[c]), cell)
-                         for c in cols])
-        t = Table(data, repeatRows=1, colWidths=[colw] * ncol)
+
+        # Current Tenancy is deliberately packed: every cell stays on one line,
+        # columns use only the width they need, and values align to the right.
+        is_tenancy = title == 'Current Tenancy'
+        if is_tenancy:
+            from reportlab.pdfbase.pdfmetrics import stringWidth
+            from reportlab.lib.enums import TA_RIGHT
+
+            text_rows = [
+                ['' if pd.isna(row[c]) else str(row[c]) for c in cols]
+                for _, row in shown.iterrows()
+            ]
+            all_rows = [list(map(str, cols))] + text_rows
+            padding = 4  # total horizontal padding per cell
+            normal_font = 'Helvetica'
+            header_font = 'Helvetica-Bold'
+            font_size = 7.0
+
+            # Scale the type down only as far as necessary to keep the full row
+            # on one line in the printable landscape width.
+            def _widths(size):
+                return [max(
+                    stringWidth(row[i], header_font if r == 0 else normal_font, size)
+                    for r, row in enumerate(all_rows)
+                ) + padding for i in range(ncol)]
+
+            widths = _widths(font_size)
+            if sum(widths) > avail_w:
+                font_size = max(4.0, font_size * avail_w / sum(widths))
+                widths = _widths(font_size)
+            # Final proportional squeeze protects against rounding overflow.
+            if sum(widths) > avail_w:
+                widths = [w * avail_w / sum(widths) for w in widths]
+
+            tenancy_cell = ParagraphStyle(
+                'tenancy_cell', parent=cell, fontSize=font_size,
+                leading=font_size + 1, alignment=TA_RIGHT, splitLongWords=0,
+            )
+            tenancy_hcell = ParagraphStyle(
+                'tenancy_hcell', parent=hcell, fontSize=font_size,
+                leading=font_size + 1, alignment=TA_RIGHT, splitLongWords=0,
+            )
+            data = [[Paragraph(str(c), tenancy_hcell) for c in cols]]
+            data.extend([[Paragraph(v, tenancy_cell) for v in row] for row in text_rows])
+            col_widths = widths
+            pad_left = pad_right = 2
+        else:
+            header = [Paragraph(str(c), hcell) for c in cols]
+            data = [header]
+            for _, row in shown.iterrows():
+                data.append([Paragraph('' if pd.isna(row[c]) else str(row[c]), cell)
+                             for c in cols])
+            col_widths = [avail_w / ncol] * ncol
+            pad_left = pad_right = 3
+
+        t = Table(data, repeatRows=1, colWidths=col_widths)
         t.setStyle(TableStyle([
             ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#1a3a5c')),
             ('FONTSIZE', (0, 0), (-1, -1), 7),
@@ -2476,8 +2525,8 @@ def generate_tab_pdf(title, sections, meta=None, max_rows_total=150):
             ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
             ('TOPPADDING', (0, 0), (-1, -1), 2),
             ('BOTTOMPADDING', (0, 0), (-1, -1), 2),
-            ('LEFTPADDING', (0, 0), (-1, -1), 3),
-            ('RIGHTPADDING', (0, 0), (-1, -1), 3),
+            ('LEFTPADDING', (0, 0), (-1, -1), pad_left),
+            ('RIGHTPADDING', (0, 0), (-1, -1), pad_right),
         ]))
         return t, len(df) - len(shown)
 
