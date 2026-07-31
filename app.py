@@ -4735,6 +4735,26 @@ def _lb_money(value):
         return ""
 
 
+def _lb_parse_money(value):
+    try:
+        return float(str(value).replace("$", "").replace(",", ""))
+    except (ValueError, TypeError):
+        return 0.0
+
+
+def _lb_fill_thereafter(rows, manual_years, escalation_pct, total_years):
+    rows = [dict(row) for row in rows]
+    manual_years = max(1, min(int(manual_years), int(total_years)))
+    while len(rows) < manual_years:
+        rows.append({"Period": f"Year {len(rows) + 1}", "Monthly Rent": "$0.00", "Annual Rent": "$0.00"})
+    monthly = _lb_parse_money(rows[manual_years - 1].get("Monthly Rent", 0))
+    rows = rows[:manual_years]
+    for year in range(manual_years + 1, int(total_years) + 1):
+        monthly *= 1 + float(escalation_pct or 0) / 100
+        rows.append({"Period": f"Year {year}", "Monthly Rent": _lb_money(monthly), "Annual Rent": _lb_money(monthly * 12)})
+    return rows
+
+
 def _lb_make_base_rent(start_monthly, escalation_pct, years=10):
     rows = []
     monthly = float(start_monthly or 0)
@@ -5119,13 +5139,21 @@ def render_lease_builder_tab():
             rent_state = draft_state.setdefault("rent_schedules", {"base": _lb_make_base_rent(0, 0, 10), "options": [], "settings": {}})
             settings = rent_state.setdefault("settings", {})
             st.markdown("#### Base Rent Table")
-            b1, b2, b3, b4 = st.columns(4)
-            start_monthly = b1.number_input("Starting monthly rent", min_value=0.0, value=float(settings.get("start_monthly", 0.0)), step=100.0, key="rent_start_monthly")
-            base_escalation = b2.number_input("Annual escalation %", min_value=-100.0, value=float(settings.get("base_escalation", 0.0)), step=0.25, key="rent_base_escalation")
-            base_years = b3.number_input("Base lease years", min_value=1, max_value=10, value=int(settings.get("base_years", 10)), step=1, key="rent_base_years")
-            if b4.button("Generate Base Table", key="rent_generate_base"):
-                rent_state["base"] = _lb_make_base_rent(start_monthly, base_escalation, base_years)
-            settings.update({"start_monthly": start_monthly, "base_escalation": base_escalation, "base_years": base_years})
+            r1, r2, r3, r4, r5 = st.columns(5)
+            basis = r1.selectbox("Start basis", ["Monthly Rent", "$/SF"], index=0 if settings.get("basis", "Monthly Rent") == "Monthly Rent" else 1, key="rent_basis")
+            sqft = r2.number_input("Premises SF", min_value=0.0, value=float(settings.get("sqft", 0.0)), step=100.0, key="rent_sqft")
+            start_value = r3.number_input("Starting monthly rent" if basis == "Monthly Rent" else "Starting $/SF", min_value=0.0, value=float(settings.get("start_value", 0.0)), step=0.25 if basis == "$/SF" else 100.0, key="rent_start_value")
+            base_years = r4.number_input("Base lease years", min_value=1, max_value=10, value=int(settings.get("base_years", 10)), step=1, key="rent_base_years")
+            manual_years = r5.number_input("Manual years", min_value=1, max_value=int(base_years), value=min(int(settings.get("manual_years", 1)), int(base_years)), step=1, key="rent_manual_years")
+            thereafter = st.number_input("Thereafter annual escalation %", min_value=-100.0, value=float(settings.get("thereafter", 3.0)), step=0.25, key="rent_thereafter")
+            starting_monthly = start_value if basis == "Monthly Rent" else (start_value * sqft / 12 if sqft else 0.0)
+            g1, g2 = st.columns(2)
+            if g1.button("Generate Base Table", key="rent_generate_base"):
+                rent_state["base"] = _lb_make_base_rent(starting_monthly, thereafter, base_years)
+            if g2.button("Apply Thereafter Escalation", key="rent_apply_thereafter"):
+                rent_state["base"] = _lb_fill_thereafter(rent_state.get("base", []), manual_years, thereafter, base_years)
+            settings.update({"basis": basis, "sqft": sqft, "start_value": start_value, "base_years": base_years, "manual_years": manual_years, "thereafter": thereafter})
+            st.caption("Enter Year 1 through the Manual Years directly in the grid, then use Apply Thereafter Escalation to fill later years.")
             base_df = st.data_editor(pd.DataFrame(rent_state.get("base", [])), hide_index=True, width="stretch", key="rent_base_grid")
             rent_state["base"] = base_df.to_dict("records")
 
@@ -5134,7 +5162,7 @@ def render_lease_builder_tab():
             option_count = o1.number_input("Number of options", min_value=0, max_value=5, value=int(settings.get("option_count", 0)), step=1, key="rent_option_count")
             option_years = o2.number_input("Years per option", min_value=1, max_value=10, value=int(settings.get("option_years", 5)), step=1, key="rent_option_years")
             option_jump = o3.number_input("Option start jump %", min_value=-100.0, value=float(settings.get("option_jump", 0.0)), step=0.25, key="rent_option_jump")
-            option_escalation = o4.number_input("Option annual escalation %", min_value=-100.0, value=float(settings.get("option_escalation", 0.0)), step=0.25, key="rent_option_escalation")
+            option_escalation = o4.number_input("Option annual escalation %", min_value=-100.0, value=float(settings.get("option_escalation", thereafter)), step=0.25, key="rent_option_escalation")
             if st.button("Generate Option Table", key="rent_generate_options"):
                 rent_state["options"] = _lb_make_option_rent(rent_state["base"], option_count, option_years, option_jump, option_escalation)
             settings.update({"option_count": option_count, "option_years": option_years, "option_jump": option_jump, "option_escalation": option_escalation})
