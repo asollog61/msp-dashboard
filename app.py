@@ -5584,6 +5584,15 @@ def render_lease_builder_tab():
             row.pop("Section", None)
             grid_rows.append(row)
         kp_df = pd.DataFrame(grid_rows)
+        # Drag must stay the first column (it is the reorder handle) and Bookmark
+        # is an internal id, so neither is offered to the column config editor.
+        KP_TAB_KEY = "key provisions"
+        configurable_columns = [
+            column for column in kp_df.columns if column not in ("Drag", "Bookmark")
+        ]
+        ordered_columns = get_column_order(KP_TAB_KEY, configurable_columns)
+        tail = ["Bookmark"] if "Bookmark" in kp_df.columns else []
+        kp_df = kp_df[[column for column in ordered_columns if column in kp_df.columns] + tail]
         kp_df.insert(0, "Drag", "")
         grid_builder = GridOptionsBuilder.from_dataframe(kp_df)
         grid_builder.configure_default_column(resizable=True, sortable=False, filter=False, editable=False)
@@ -5621,6 +5630,16 @@ def render_lease_builder_tab():
             grid_builder.configure_column(f"Alt {index}", header_name=f"Alt {index}",
                                           editable=template_mode, width=185)
         grid_builder.configure_column("Bookmark", hide=True)
+
+        # Saved widths win over the defaults above, matching the Tenancy tab.
+        kp_width_overrides = get_column_width_overrides(KP_TAB_KEY)
+        for column, width in kp_width_overrides.items():
+            if column in kp_df.columns:
+                grid_builder.configure_column(
+                    column, width=width, initialWidth=width, minWidth=width,
+                    suppressSizeToFit=True, suppressAutoSize=True,
+                )
+
         grid_builder.configure_grid_options(
             rowDragManaged=True,
             animateRows=True,
@@ -5662,6 +5681,8 @@ def render_lease_builder_tab():
             count_col.caption(f"{len(edited_rows)} provisions · {selected_count} on by default")
         else:
             count_col.caption(f"{selected_count} used · {len(edited_rows) - selected_count} excluded")
+
+        render_column_config_editor(KP_TAB_KEY, configurable_columns)
 
         # The provision list is app-owned, so template mode can add and remove
         # rows freely — the old bookmark scheme allowed neither.
