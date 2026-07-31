@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 from io import BytesIO
 import json
 from pathlib import Path
@@ -17,6 +18,8 @@ from docx.text.paragraph import Paragraph
 
 BASE_DIR = Path(__file__).resolve().parent
 TEMPLATE_DIR = BASE_DIR / "data" / "Lease Builder"
+PUBLISHED_DIR = TEMPLATE_DIR / "Published"
+PUBLISHED_PREFIX = "📦 "
 CLAUSE_LIBRARY_FILE = TEMPLATE_DIR / "lease_clause_library.json"
 SECTION_RE = re.compile(
     r"^\s*Section\s+(\d+(?:\.\d+)?)(?:\.(?:\s+|$)|\s+)(.*)$",
@@ -34,18 +37,76 @@ CATEGORY_RANGES = [
 
 
 def discover_templates() -> list[dict[str, str]]:
-    """Return deployable DOCX templates; future templates are auto-discovered."""
+    """Return deployable DOCX templates; future templates are auto-discovered.
+
+    Hand-authored masters live in data/Lease Builder. Templates published from
+    the dashboard live in the Published subfolder and are labelled so the two are
+    never confused in the picker.
+    """
     templates = []
     if not TEMPLATE_DIR.exists():
         return templates
-    for path in sorted(TEMPLATE_DIR.glob("*.docx")):
-        if path.name.startswith("~$") or " TEST" in path.stem.upper():
-            continue
-        stem = path.stem
-        label = re.sub(r"^\d{4}_\d{2}_\d{2}\s+", "", stem)
-        label = re.sub(r"\s*\.v(\d+)\s*", r" — v\1 ", label, flags=re.IGNORECASE)
-        templates.append({"label": label.strip(), "path": str(path)})
+
+    def add_from(directory: Path, prefix: str = "") -> None:
+        if not directory.exists():
+            return
+        for path in sorted(directory.glob("*.docx")):
+            if path.name.startswith("~$") or " TEST" in path.stem.upper():
+                continue
+            label = re.sub(r"^\d{4}_\d{2}_\d{2}\s+", "", path.stem)
+            label = re.sub(r"\s*\.v(\d+)\s*", r" — v\1 ", label, flags=re.IGNORECASE)
+            templates.append({"label": (prefix + label.strip()).strip(), "path": str(path)})
+
+    add_from(TEMPLATE_DIR)
+    add_from(PUBLISHED_DIR, prefix=PUBLISHED_PREFIX)
     return templates
+
+
+def publish_template_docx(
+    template_path: str | Path,
+    name: str,
+    section_choices: dict[str, dict[str, Any]],
+    bookmark_values: dict[str, str] | None = None,
+    rent_schedules: dict[str, Any] | None = None,
+    clean_drafting_notes: bool = True,
+    key_provision_rows: list[dict[str, Any]] | None = None,
+) -> Path:
+    """Write a resolved template to Published/ and return the new file path.
+
+    The result is a normal Word file, so it carries its own formatting and can be
+    hand-edited, and it is a valid base template: every section stays included
+    and every key-provision bookmark is preserved.
+    """
+    safe_name = re.sub(r"[^A-Za-z0-9 ._-]+", "_", str(name)).strip(" _.") or "Published Template"
+    PUBLISHED_DIR.mkdir(parents=True, exist_ok=True)
+    destination = PUBLISHED_DIR / f"{safe_name}.docx"
+
+    payload = build_word_document(
+        template_path,
+        section_choices=section_choices,
+        bookmark_values=bookmark_values or {},
+        included_bookmarks=None,
+        linked_provisions=[],
+        custom_provisions=[],
+        rent_schedules=rent_schedules,
+        additional_choices=[],
+        clean_drafting_notes=clean_drafting_notes,
+        document_title=safe_name,
+        preserve_template_structure=True,
+        key_provision_rows=key_provision_rows,
+    )
+    destination.write_bytes(payload)
+
+    # A published file that cannot be parsed back is worse than no file, so it is
+    # validated before being handed to the caller.
+    check = inspect_template(destination)
+    if not check["sections"]:
+        destination.unlink(missing_ok=True)
+        raise ValueError(
+            "The published file could not be read back as a template "
+            "(no numbered sections were found). Nothing was saved."
+        )
+    return destination
 
 
 def load_clause_library() -> dict[str, Any]:
@@ -79,19 +140,29 @@ def _section_title(remainder: str, number: str) -> str:
 def scan_sections(document: Document) -> list[dict[str, Any]]:
     """Locate the numbered lease body, excluding drafting notes and exhibits."""
     paragraphs = document.paragraphs
-    starts: list[tuple[int, str, str]] = []
-    body_started = False
+    matches: list[tuple[int, str, str]] = []
     for index, paragraph in enumerate(paragraphs):
         match = SECTION_RE.match(paragraph.text.strip())
-        if not match:
-            continue
-        number, remainder = match.groups()
-        if number == "1" and index >= 50:
-            body_started = True
-        if body_started:
-            starts.append((index, number, remainder))
-        if body_started and number == "56":
-            break
+        if match:
+            number, remainder = match.groups()
+            matches.append((index, number, remainder))
+
+    # The body begins at "Section 1". Anything before it is preamble or drafting
+    # notes, which may themselves cite a section (the master lease mentions
+    # Section 12 in its notes). Position is not a reliable cue: a generated
+    # template has its notes stripped, so Section 1 sits near the top. When more
+    # than one candidate exists (e.g. a table of contents), take the one that
+    # yields the most sections, which is always the real body.
+    def collect(from_position: int) -> list[tuple[int, str, str]]:
+        picked: list[tuple[int, str, str]] = []
+        for index, number, remainder in matches[from_position:]:
+            picked.append((index, number, remainder))
+            if number == "56":
+                break
+        return picked
+
+    candidates = [position for position, item in enumerate(matches) if item[1] == "1"]
+    starts = max((collect(position) for position in candidates), key=len, default=[])
 
     sections = []
     for position, (start, number, remainder) in enumerate(starts):
@@ -279,6 +350,146 @@ def _apply_key_provision_inclusions(document: Document, included_bookmarks: set[
         else:
             for name in excluded:
                 _replace_bookmark_text(document, name, "")
+
+
+# ---------------------------------------------------------------------------
+# App-owned key provisions.
+#
+# The master lease carries hand-placed Tx_* bookmarks that were used both to
+# discover the provision list and to inject values. They are brittle: a blank
+# value could delete the row and take the bookmark with it, and provisions could
+# never be added or renamed. The provision list now lives in the app, and the
+# summary table is rebuilt from it on every build.
+#
+# Linking no longer copies a provision's text into the clause. Instead each
+# included section gets a generated anchor bookmark and the summary row carries
+# a hyperlink to it. Those anchors are disposable and rewritten on every build,
+# unlike the hand-placed bookmarks they replace.
+# ---------------------------------------------------------------------------
+
+ANCHOR_PREFIX = "_MSP_Sec_"
+
+
+def _anchor_name(section_number: str) -> str:
+    """Word bookmark names allow no dots and must start with a letter or underscore."""
+    return ANCHOR_PREFIX + re.sub(r"[^A-Za-z0-9_]", "_", str(section_number))[:24]
+
+
+def _add_section_anchors(document: Document) -> dict[str, str]:
+    """Bookmark the first paragraph of every surviving section; return number -> anchor."""
+    anchors: dict[str, str] = {}
+    paragraphs = document.paragraphs
+    bookmark_id = 9000
+    for section in scan_sections(document):
+        number = str(section["number"])
+        start_index = section["start"]
+        if start_index >= len(paragraphs):
+            continue
+        anchor = _anchor_name(number)
+        paragraph = paragraphs[start_index]
+        start = OxmlElement("w:bookmarkStart")
+        start.set(qn("w:id"), str(bookmark_id))
+        start.set(qn("w:name"), anchor)
+        end = OxmlElement("w:bookmarkEnd")
+        end.set(qn("w:id"), str(bookmark_id))
+        # w:pPr must stay the first child of w:p, so the anchor goes after it.
+        properties = paragraph._p.find(qn("w:pPr"))
+        paragraph._p.insert(1 if properties is not None else 0, start)
+        paragraph._p.append(end)
+        anchors[number] = anchor
+        bookmark_id += 1
+    return anchors
+
+
+def _set_cell_text(cell: Any, text: str) -> Paragraph:
+    """Replace a cell's text while keeping the first run's formatting."""
+    paragraphs = cell.paragraphs
+    first = paragraphs[0]
+    for paragraph in paragraphs[1:]:
+        _delete_paragraph(paragraph)
+    runs = first.runs
+    if runs:
+        runs[0].text = text
+        for run in runs[1:]:
+            parent = run._element.getparent()
+            if parent is not None:
+                parent.remove(run._element)
+    else:
+        first.add_run(text)
+    return first
+
+
+def _append_hyperlink(paragraph: Paragraph, anchor: str, text: str) -> None:
+    """Append an internal hyperlink that jumps to a bookmark in this document."""
+    link = OxmlElement("w:hyperlink")
+    link.set(qn("w:anchor"), anchor)
+    run = OxmlElement("w:r")
+    properties = OxmlElement("w:rPr")
+    style = OxmlElement("w:rStyle")
+    style.set(qn("w:val"), "Hyperlink")
+    properties.append(style)
+    run.append(properties)
+    text_element = OxmlElement("w:t")
+    text_element.text = text
+    text_element.set(qn("xml:space"), "preserve")
+    run.append(text_element)
+    link.append(run)
+    paragraph._p.append(link)
+
+
+def _rebuild_key_provision_table(
+    document: Document,
+    provisions: list[dict[str, Any]],
+    anchors: dict[str, str],
+) -> None:
+    """Replace every row of the summary table with the app's provision list.
+
+    An existing row is cloned as the prototype so column widths, shading, fonts
+    and the merge across the two value columns are carried over exactly.
+    """
+    if not document.tables:
+        return
+    table = document.tables[0]
+
+    prototype = None
+    for row in table.rows:
+        cells = row.cells
+        if len(cells) >= 2 and cells[0].text.strip() and cells[1].text.strip():
+            # Prefer a row whose value cell spans the remaining columns.
+            if len(cells) < 3 or cells[1]._tc is cells[2]._tc:
+                prototype = row._tr
+                break
+    if prototype is None:
+        return
+    prototype_xml = copy.deepcopy(prototype)
+    # The prototype may contain a legacy Tx_* bookmark. Cloning it once per row
+    # would emit duplicate bookmark names and ids, which Word reports as a
+    # damaged document, so the clone is stripped of bookmarks first.
+    for tag in (qn("w:bookmarkStart"), qn("w:bookmarkEnd")):
+        for element in list(prototype_xml.iter(tag)):
+            parent = element.getparent()
+            if parent is not None:
+                parent.remove(element)
+
+    body = table._tbl
+    for row_element in list(body.tr_lst):
+        body.remove(row_element)
+
+    for item in provisions:
+        if not bool(item.get("include", True)):
+            continue
+        field = str(item.get("field", "")).strip()
+        value = str(item.get("value", "")).strip()
+        if not field and not value:
+            continue
+        body.append(copy.deepcopy(prototype_xml))
+        row = table.rows[-1]
+        _set_cell_text(row.cells[0], field)
+        paragraph = _set_cell_text(row.cells[1], value)
+        if bool(item.get("link")):
+            anchor = anchors.get(str(item.get("section", "")).strip())
+            if anchor:
+                _append_hyperlink(paragraph, anchor, f"  (see Section {item['section']})")
 
 
 def _section_contains_ref(paragraphs: list[Paragraph], bookmark_name: str) -> bool:
@@ -502,8 +713,16 @@ def build_word_document(
     additional_choices: list[dict[str, Any]] | None = None,
     clean_drafting_notes: bool = True,
     document_title: str = "MSP Lease Draft",
+    preserve_template_structure: bool = False,
+    key_provision_rows: list[dict[str, Any]] | None = None,
 ) -> bytes:
-    """Build a redline-ready DOCX and return its bytes."""
+    """Build a redline-ready DOCX and return its bytes.
+
+    With preserve_template_structure the output is meant to be re-used as a base
+    template rather than signed, so every key-provision row is kept even when its
+    value is blank. Dropping those rows would delete the bookmarks with them and
+    the published file would silently lose those provisions.
+    """
     document = Document(str(template_path))
     sections = scan_sections(document)
     original_paragraphs = list(document.paragraphs)
@@ -523,17 +742,25 @@ def build_word_document(
             for paragraph in reversed(clause_paragraphs[1:]):
                 _delete_paragraph(paragraph)
 
-    if bookmark_values:
+    # The app owns the provision list: rebuild the summary table from it and drop
+    # the legacy bookmark path entirely. Sections are already included/excluded
+    # by this point, so anchors only exist for sections that survived.
+    app_owned_provisions = key_provision_rows is not None
+    if app_owned_provisions:
+        section_anchors = _add_section_anchors(document)
+        _rebuild_key_provision_table(document, key_provision_rows, section_anchors)
+
+    if bookmark_values and not app_owned_provisions:
         values = dict(bookmark_values)
         if "Tx_Landlord" in values:
             values.setdefault("Tx_Landlord1", values["Tx_Landlord"])
         for bookmark_name, value in values.items():
             _replace_bookmark_text(document, bookmark_name, str(value))
 
-    if included_bookmarks is not None:
+    if included_bookmarks is not None and not preserve_template_structure and not app_owned_provisions:
         _apply_key_provision_inclusions(document, set(included_bookmarks))
 
-    if custom_provisions and document.tables:
+    if custom_provisions and not app_owned_provisions and document.tables:
         table = document.tables[0]
         for item in custom_provisions:
             if not item.get("include"):
@@ -552,7 +779,9 @@ def build_word_document(
     current_sections = {section["number"]: section for section in scan_sections(document)}
     current_paragraphs = list(document.paragraphs)
 
-    if linked_provisions:
+    # Linking is a hyperlink in the summary table now, not text copied into the
+    # clause, so the old injection is skipped once the app owns the provisions.
+    if linked_provisions and not app_owned_provisions:
         grouped_links: dict[str, list[dict[str, Any]]] = {}
         for item in linked_provisions:
             section_number = str(item.get("section", ""))
@@ -581,7 +810,8 @@ def build_word_document(
             _insert_after(anchor, str(item.get("title", "Additional Provision")), str(item["text"]))
 
     _remove_template_markers(document)
-    _remove_empty_key_provision_rows(document)
+    if not preserve_template_structure and not app_owned_provisions:
+        _remove_empty_key_provision_rows(document)
 
     if clean_drafting_notes:
         _clean_drafting_notes(document)

@@ -38,6 +38,8 @@ try:
         discover_templates,
         inspect_template,
         load_clause_library,
+        publish_template_docx,
+        PUBLISHED_PREFIX,
     )
     LEASE_BUILDER_AVAILABLE = True
 except ImportError:
@@ -5183,6 +5185,19 @@ def _lb_build_current_word(template_path, draft_name, clean_notes, sections, dra
         for row in draft_state["key_provisions"]
         if str(row.get("Bookmark", "")).startswith("Custom_")
     ]
+    # The provision list is app-owned: the summary table is rebuilt from these
+    # rows, and Link adds a hyperlink to the section anchor rather than copying
+    # the value into the clause.
+    key_provision_rows = [
+        {
+            "field": row.get("Field", "Key Provision"),
+            "value": row.get("Value", ""),
+            "include": is_used(row),
+            "link": bool(row.get("Link")),
+            "section": section_labels.get(str(row.get("Section", "")), str(row.get("Section", ""))),
+        }
+        for row in draft_state["key_provisions"]
+    ]
     return build_word_document(
         template_path,
         section_choices=section_choices,
@@ -5194,6 +5209,7 @@ def _lb_build_current_word(template_path, draft_name, clean_notes, sections, dra
         additional_choices=[],
         clean_drafting_notes=clean_notes,
         document_title=draft_name,
+        key_provision_rows=key_provision_rows,
     )
 
 
@@ -5580,6 +5596,49 @@ def render_lease_builder_tab():
         else:
             count_col.caption(f"{selected_count} used · {len(edited_rows) - selected_count} excluded")
 
+        # The provision list is app-owned, so template mode can add and remove
+        # rows freely — the old bookmark scheme allowed neither.
+        if template_mode:
+            add_col, remove_col = st.columns([3, 3])
+            new_field = add_col.text_input(
+                "Add a provision", key="lb_new_provision_name", placeholder="e.g., Signage Allowance"
+            )
+            if add_col.button("➕ Add Provision", key="lb_add_provision", width="stretch"):
+                if not new_field.strip():
+                    st.warning("Name the provision first.")
+                elif any(str(r.get("Field", "")).strip().lower() == new_field.strip().lower()
+                         for r in draft_state["key_provisions"]):
+                    st.warning("A provision with that name already exists.")
+                else:
+                    draft_state["key_provisions"].append({
+                        "Group": "Optional",
+                        "Include": True,
+                        "Field": new_field.strip(),
+                        "Value": "",
+                        "Alternates": [""] * 10,
+                        "Link": False,
+                        "Section": section_labels[section_numbers[0]],
+                        "Bookmark": "Custom_" + uuid4().hex[:12],
+                    })
+                    draft_state["kp_version"] += 1
+                    st.success(f"Added “{new_field.strip()}”.")
+                    st.rerun()
+            removable = [str(r.get("Field", "")) for r in draft_state["key_provisions"]]
+            to_remove = remove_col.selectbox(
+                "Remove a provision", ["—"] + removable, key="lb_remove_provision_name"
+            )
+            if remove_col.button("🗑️ Remove Provision", key="lb_remove_provision", width="stretch"):
+                if to_remove == "—":
+                    st.warning("Pick a provision to remove.")
+                else:
+                    draft_state["key_provisions"] = [
+                        r for r in draft_state["key_provisions"]
+                        if str(r.get("Field", "")) != to_remove
+                    ]
+                    draft_state["kp_version"] += 1
+                    st.success(f"Removed “{to_remove}”.")
+                    st.rerun()
+
         # ---- Off-menu value check (lease mode only) ----------------------
         if not template_mode and template_names:
             off_menu_rows = [
@@ -5886,6 +5945,67 @@ def render_lease_builder_tab():
                         st.rerun()
                     else:
                         st.error("Could not save the template to Google Sheets.")
+
+            with st.expander("📦 Publish as a Word Template", expanded=False):
+                st.caption(
+                    "Writes a real .docx into data/Lease Builder/Published with every choice applied. "
+                    "That file then appears in the base-template picker, so it becomes the starting "
+                    "point going forward — and you can open it in Word to adjust formatting by hand. "
+                    "Publishing keeps all sections and every key provision."
+                )
+                publish_name_col, publish_button_col = st.columns([3, 1.6])
+                publish_name = publish_name_col.text_input(
+                    "Published file name",
+                    value=working_template if working_template != LB_NEW_TEMPLATE else "",
+                    key="lb_publish_name",
+                    placeholder="e.g., MSP NNN Retail 2026",
+                )
+                if publish_button_col.button("📦 Publish", key="lb_publish_docx", width="stretch"):
+                    if not publish_name.strip():
+                        st.warning("Name the published file first.")
+                    else:
+                        try:
+                            publish_choices = {}
+                            for section in sections:
+                                number = str(section["number"])
+                                config = draft_state["sections"][number]
+                                configured = str(config.get("text", section["text"]))
+                                base_text = str(section["text"])
+                                publish_choices[number] = {
+                                    "include": True,
+                                    "title": section["title"],
+                                    "replacement_text": (
+                                        "" if configured.strip() == base_text.strip()
+                                        else _lb_section_body(number, configured)
+                                    ),
+                                }
+                            published_path = publish_template_docx(
+                                template["path"],
+                                publish_name.strip(),
+                                publish_choices,
+                                None,
+                                None,
+                                clean_notes,
+                                key_provision_rows=[
+                                    {
+                                        "field": row.get("Field", "Key Provision"),
+                                        "value": row.get("Value", ""),
+                                        "include": True,
+                                        "link": bool(row.get("Link")),
+                                        "section": section_labels.get(
+                                            str(row.get("Section", "")), str(row.get("Section", ""))
+                                        ),
+                                    }
+                                    for row in draft_state["key_provisions"]
+                                ],
+                            )
+                            st.success(
+                                f"Published {published_path.name}. It now appears in the base-template "
+                                f"picker as “{PUBLISHED_PREFIX}{published_path.stem}”. "
+                                "Commit and push so the live app can see it."
+                            )
+                        except Exception as exc:
+                            st.error(f"Publish failed: {exc}")
         else:
             st.markdown("### Save Lease")
             existing_lease = lease_choice != LB_NEW_LEASE
