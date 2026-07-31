@@ -310,32 +310,56 @@ def _set_update_fields(document: Document) -> None:
 
 
 def _clean_drafting_formatting(document: Document) -> None:
-    """Accept tracked insertions/deletions and remove template drafting highlights."""
-    root = document.element.body
+    """Accept revisions and remove template drafting markup from every Word story."""
+    roots = []
+    seen = set()
 
-    # Accept insertions by unwrapping their contents into the document.
-    for insertion in list(root.iter(qn("w:ins"))):
-        parent = insertion.getparent()
-        if parent is None:
-            continue
-        position = parent.index(insertion)
-        for child in list(insertion):
-            insertion.remove(child)
-            parent.insert(position, child)
-            position += 1
-        parent.remove(insertion)
+    # Main document plus headers/footers, comments and other OOXML story parts.
+    for part in document.part.package.parts:
+        root = getattr(part, "_element", None)
+        if root is None:
+            root = getattr(part, "element", None)
+        if root is not None and id(root) not in seen:
+            roots.append(root)
+            seen.add(id(root))
 
-    # Reject deleted text from the clean draft.
-    for deletion in list(root.iter(qn("w:del"))):
-        parent = deletion.getparent()
-        if parent is not None:
-            parent.remove(deletion)
+    for root in roots:
+        # Accept tracked insertions by unwrapping their contents into the document.
+        for insertion in list(root.iter(qn("w:ins"))):
+            parent = insertion.getparent()
+            if parent is None:
+                continue
+            position = parent.index(insertion)
+            for child in list(insertion):
+                insertion.remove(child)
+                parent.insert(position, child)
+                position += 1
+            parent.remove(insertion)
 
-    # The source template uses highlight/color as drafting guidance. Output is clean.
-    for run_properties in root.iter(qn("w:rPr")):
-        for tag in (qn("w:highlight"), qn("w:color")):
-            for element in list(run_properties.findall(tag)):
-                run_properties.remove(element)
+        # Reject deletions and remove comment anchors/references.
+        remove_tags = (qn("w:del"), qn("w:commentRangeStart"), qn("w:commentRangeEnd"), qn("w:commentReference"))
+        for tag in remove_tags:
+            for element in list(root.iter(tag)):
+                parent = element.getparent()
+                if parent is not None:
+                    parent.remove(element)
+
+        # The source template uses red/blue/highlight/shading as drafting guidance.
+        # A built lease is a clean document, so retain typography/layout but strip markup.
+        for run_properties in root.iter(qn("w:rPr")):
+            for tag in (qn("w:highlight"), qn("w:color"), qn("w:shd")):
+                for element in list(run_properties.findall(tag)):
+                    run_properties.remove(element)
+        for tag in (qn("w:shd"), qn("w:highlight")):
+            for element in list(root.iter(tag)):
+                parent = element.getparent()
+                if parent is not None:
+                    parent.remove(element)
+
+    settings = document.settings._element
+    for tag in (qn("w:trackRevisions"), qn("w:showInsDel"), qn("w:showMarkup")):
+        for element in list(settings.findall(tag)):
+            settings.remove(element)
 
 
 def _clean_drafting_notes(document: Document) -> None:

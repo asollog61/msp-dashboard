@@ -37,6 +37,12 @@ try:
 except ImportError:
     LEASE_BUILDER_AVAILABLE = False
 
+try:
+    from streamlit_sortables import sort_items
+    HAS_SORTABLES = True
+except ImportError:
+    HAS_SORTABLES = False
+
 from st_aggrid import AgGrid, GridOptionsBuilder, GridUpdateMode, JsCode
 
 # --- CONFIG ---
@@ -4494,6 +4500,12 @@ def render_lead_sheet_tab():
 # LEASE BUILDER TAB
 # =====================
 
+LEASE_MANDATORY_BOOKMARKS = {
+    "Tx_BuildingAddress", "Tx_Landlord", "Tx_Tenant", "Tx_Premises", "Tx_Sqft",
+    "Tx_PermittedUse", "Tx_LeaseType", "Tx_LeaseCommenceDt", "Tx_RentCommDt",
+    "Tx_LeaseExpDt", "Tx_LeaseTerm",
+}
+
 LEASE_DEFAULT_LINKS = {
     "Tx_BuildingAddress": "1",
     "Tx_Premises": "1",
@@ -4739,6 +4751,7 @@ def render_lease_builder_tab():
         st.session_state[draft_state_key] = {
             "key_provisions": [
                 {
+                    "Group": "Mandatory" if item["bookmark"] in LEASE_MANDATORY_BOOKMARKS else "Optional",
                     "Include": True,
                     "Field": item["field"],
                     "Value": item["value"],
@@ -4760,6 +4773,13 @@ def render_lease_builder_tab():
             "section_version": 0,
         }
     draft_state = st.session_state[draft_state_key]
+    # Backward-compatible migration for configurations saved before group support.
+    for provision in draft_state["key_provisions"]:
+        bookmark = str(provision.get("Bookmark", ""))
+        provision.setdefault("Group", "Mandatory" if bookmark in LEASE_MANDATORY_BOOKMARKS else "Optional")
+        provision.setdefault("Include", True)
+        provision.setdefault("Link", bookmark in LEASE_DEFAULT_LINKS)
+        provision.setdefault("Section", LEASE_DEFAULT_LINKS.get(bookmark, section_numbers[0]))
 
     load_marker = f"{selected_label}|{saved_choice}"
     if saved_choice != "Current Draft" and st.session_state.get("lb_loaded_saved_marker") != load_marker:
@@ -4796,14 +4816,52 @@ def render_lease_builder_tab():
             st.session_state[master_applied_key] = master_value
             st.rerun()
 
+        # Drag provisions between Mandatory and Optional; the editor below retains their controls.
+        label_to_bookmark = {
+            f"{row.get('Field', 'Key Provision')} · {row.get('Bookmark', '')}": row.get("Bookmark", "")
+            for row in draft_state["key_provisions"]
+        }
+        mandatory_labels = [
+            label for label, bookmark in label_to_bookmark.items()
+            if next(row for row in draft_state["key_provisions"] if row.get("Bookmark") == bookmark).get("Group") == "Mandatory"
+        ]
+        optional_labels = [
+            label for label, bookmark in label_to_bookmark.items()
+            if next(row for row in draft_state["key_provisions"] if row.get("Bookmark") == bookmark).get("Group") != "Mandatory"
+        ]
+        if HAS_SORTABLES:
+            grouped_items = sort_items(
+                [
+                    {"header": "Mandatory Key Provisions", "items": mandatory_labels},
+                    {"header": "Optional Key Provisions", "items": optional_labels},
+                ],
+                multi_containers=True,
+                direction="horizontal",
+                custom_style="""
+                    .sortable-container { min-width: 230px; background: #161b22; border: 1px solid #2d333b; border-radius: 8px; }
+                    .sortable-container-header { font-weight: 700; padding: 10px 12px; color: #c8d4ff; }
+                    .sortable-item { margin: 5px 8px; padding: 8px 10px; border-radius: 5px; background: #26354d; color: #e6edf3; cursor: grab; font-size: 12px; }
+                """,
+                key=f"lb_kp_groups_{Path(template['path']).stem}",
+            )
+            for container in grouped_items:
+                group_name = "Mandatory" if container.get("header") == "Mandatory Key Provisions" else "Optional"
+                for label in container.get("items", []):
+                    bookmark = label_to_bookmark.get(label)
+                    if bookmark:
+                        next(row for row in draft_state["key_provisions"] if row.get("Bookmark") == bookmark)["Group"] = group_name
+        else:
+            st.info("Install streamlit-sortables to enable drag-and-drop grouping.")
+
         kp_df = pd.DataFrame(draft_state["key_provisions"])
         edited_kp = st.data_editor(
             kp_df,
             hide_index=True,
             width="stretch",
             height=580,
-            disabled=["Field", "Bookmark"],
+            disabled=["Group", "Field", "Bookmark"],
             column_config={
+                "Group": st.column_config.TextColumn("Group", width="small"),
                 "Include": st.column_config.CheckboxColumn("Use", width="small"),
                 "Field": st.column_config.TextColumn("Key Provision", width="medium"),
                 "Value": st.column_config.TextColumn("Value", width="large"),
@@ -4815,7 +4873,8 @@ def render_lease_builder_tab():
         )
         draft_state["key_provisions"] = edited_kp.to_dict("records")
         selected_count = int(edited_kp["Include"].fillna(False).sum())
-        count_col.caption(f"{selected_count} of {len(edited_kp)} key provisions included")
+        mandatory_count = int((edited_kp["Group"] == "Mandatory").sum())
+        count_col.caption(f"{mandatory_count} mandatory · {len(edited_kp) - mandatory_count} optional · {selected_count} used")
 
         st.markdown("### Lease Sections")
         st.caption("Every numbered section is listed below. Use the table to include/exclude sections, then select one to edit its language.")
