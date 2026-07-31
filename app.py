@@ -39,13 +39,7 @@ try:
 except ImportError:
     LEASE_BUILDER_AVAILABLE = False
 
-try:
-    from streamlit_sortables import sort_items
-    HAS_SORTABLES = True
-except ImportError:
-    HAS_SORTABLES = False
-
-from st_aggrid import AgGrid, GridOptionsBuilder, GridUpdateMode, JsCode
+from st_aggrid import AgGrid, DataReturnMode, GridOptionsBuilder, GridUpdateMode, JsCode
 
 # --- CONFIG ---
 SHEET_ID = "1Jqdnf9JFPLBoYirN7ZpBiicDo13meTcEdaI19usbZss"
@@ -4843,59 +4837,58 @@ def render_lease_builder_tab():
             st.session_state[master_applied_key] = master_value
             st.rerun()
 
-        # One ordered list: every row has its own Mandatory/Optional dropdown.
-        # Checked items are always kept above unchecked items; drag changes order within those bands.
+        # The provision grid is the only drag surface. The first column is a handle;
+        # clicking/editing elsewhere does not reorder anything.
         draft_state["key_provisions"] = sorted(
             draft_state["key_provisions"],
             key=lambda row: 0 if bool(row.get("Include")) else 1,
         )
-        field_to_bookmark = {
-            str(row.get("Field", "Key Provision")): str(row.get("Bookmark", ""))
-            for row in draft_state["key_provisions"]
-        }
-        order_labels = list(field_to_bookmark)
-        if HAS_SORTABLES:
-            dragged_labels = sort_items(
-                order_labels,
-                header="Drag to reorder key provisions",
-                direction="vertical",
-                custom_style="""
-                    .sortable-component.vertical { max-height: 280px; overflow-y: auto; background: #161b22; border: 1px solid #2d333b; border-radius: 8px; padding: 6px; }
-                    .sortable-item { margin: 4px; padding: 7px 10px; border-radius: 5px; background: #26354d; color: #e6edf3; cursor: grab; font-size: 12px; }
-                """,
-                key=f"lb_kp_order_v4_{Path(template['path']).stem}",
-            )
-            row_by_bookmark = {str(row.get("Bookmark", "")): row for row in draft_state["key_provisions"]}
-            reordered = [row_by_bookmark[field_to_bookmark[label]] for label in dragged_labels if label in field_to_bookmark]
-            if len(reordered) == len(draft_state["key_provisions"]):
-                draft_state["key_provisions"] = reordered
-        else:
-            st.info("Install streamlit-sortables to enable drag-to-reorder.")
-
-        st.caption("Use the Group dropdown to classify each provision. Dragging changes the document order; checked provisions stay above unchecked provisions.")
         kp_df = pd.DataFrame(draft_state["key_provisions"])
-        edited_kp = st.data_editor(
-            kp_df,
-            hide_index=True,
-            width="stretch",
-            height=min(650, 86 + len(kp_df) * 34),
-            disabled=["Field", "Bookmark"],
-            column_config={
-                "Group": st.column_config.SelectboxColumn("Group", options=["Mandatory", "Optional"], width="small"),
-                "Include": st.column_config.CheckboxColumn("Use", width="small"),
-                "Field": st.column_config.TextColumn("Key Provision", width="medium"),
-                "Value": st.column_config.TextColumn("Value", width="large"),
-                "Link": st.column_config.CheckboxColumn("Link", width="small"),
-                "Section": st.column_config.SelectboxColumn("Target Section", options=list(section_labels.values()), width="medium"),
-                "Bookmark": None,
-            },
-            key=f"lb_kp_editor_v4_{Path(template['path']).stem}_{draft_state['kp_version']}",
+        kp_df.insert(0, "Drag", "")
+        grid_builder = GridOptionsBuilder.from_dataframe(kp_df)
+        grid_builder.configure_default_column(resizable=True, sortable=False, filter=False, editable=False)
+        grid_builder.configure_column("Drag", header_name="", rowDrag=True, editable=False, width=42, suppressMenu=True)
+        grid_builder.configure_column("Group", header_name="Group", editable=True, width=105,
+                                      cellEditor="agSelectCellEditor",
+                                      cellEditorParams={"values": ["Mandatory", "Optional"]})
+        grid_builder.configure_column("Include", header_name="Use", editable=True, width=68,
+                                      cellRenderer="agCheckboxCellRenderer", cellEditor="agCheckboxCellEditor")
+        grid_builder.configure_column("Field", header_name="Key Provision", editable=False, width=165)
+        grid_builder.configure_column("Value", header_name="Value", editable=True, width=330)
+        grid_builder.configure_column("Link", header_name="Link", editable=True, width=68,
+                                      cellRenderer="agCheckboxCellRenderer", cellEditor="agCheckboxCellEditor")
+        grid_builder.configure_column("Section", header_name="Target Section", editable=True, width=210,
+                                      cellEditor="agSelectCellEditor",
+                                      cellEditorParams={"values": list(section_labels.values())})
+        grid_builder.configure_column("Bookmark", hide=True)
+        grid_builder.configure_grid_options(
+            rowDragManaged=True,
+            animateRows=True,
+            suppressMoveWhenRowDragging=False,
+            rowDragEntireRow=False,
         )
+        grid_result = AgGrid(
+            kp_df,
+            gridOptions=grid_builder.build(),
+            height=min(650, 96 + len(kp_df) * 34),
+            theme="streamlit",
+            update_mode=GridUpdateMode.MODEL_CHANGED,
+            data_return_mode=DataReturnMode.AS_INPUT,
+            fit_columns_on_grid_load=False,
+            allow_unsafe_jscode=True,
+            key=f"lb_kp_grid_v5_{Path(template['path']).stem}",
+        )
+        edited_kp = grid_result.data if hasattr(grid_result, "data") else grid_result["data"]
+        if edited_kp is None:
+            edited_kp = kp_df
+        edited_kp = edited_kp.drop(columns=["Drag"], errors="ignore")
         draft_state["key_provisions"] = edited_kp.to_dict("records")
         selected_count = int(edited_kp["Include"].fillna(False).sum())
         count_col.caption(f"{selected_count} used · {len(edited_kp) - selected_count} excluded")
+        st.caption("Drag only from the ↕ handle column. Checked provisions stay above unchecked provisions after edits.")
 
         # Add a new custom key provision.
+
         with st.expander("➕ Add Key Provision", expanded=False):
             with st.form("lb_add_key_provision", clear_on_submit=True):
                 add_name, add_group = st.columns([3, 2])
