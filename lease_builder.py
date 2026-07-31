@@ -37,6 +37,8 @@ def discover_templates() -> list[dict[str, str]]:
     if not TEMPLATE_DIR.exists():
         return templates
     for path in sorted(TEMPLATE_DIR.glob("*.docx")):
+        if path.name.startswith("~$") or " TEST" in path.stem.upper():
+            continue
         stem = path.stem
         label = re.sub(r"^\d{4}_\d{2}_\d{2}\s+", "", stem)
         label = re.sub(r"\s*\.v(\d+)\s*", r" — v\1 ", label, flags=re.IGNORECASE)
@@ -207,6 +209,85 @@ def _delete_paragraph(paragraph: Paragraph) -> None:
         parent.remove(element)
 
 
+def _ancestor(element: Any, tag: str) -> Any | None:
+    current = element
+    while current is not None:
+        if current.tag == tag:
+            return current
+        current = current.getparent()
+    return None
+
+
+def _relocate_empty_bookmark(document: Document, start: Any, end: Any) -> None:
+    """Keep an excluded bookmark valid while removing its visible source row."""
+    for element in (start, end):
+        parent = element.getparent()
+        if parent is not None:
+            parent.remove(element)
+
+    paragraph = OxmlElement("w:p")
+    run = OxmlElement("w:r")
+    run_properties = OxmlElement("w:rPr")
+    run_properties.append(OxmlElement("w:vanish"))
+    run.append(run_properties)
+    text = OxmlElement("w:t")
+    text.text = ""
+    run.append(text)
+    paragraph.extend([start, run, end])
+
+    body = document.element.body
+    section_properties = body.find(qn("w:sectPr"))
+    if section_properties is not None:
+        section_properties.addprevious(paragraph)
+    else:
+        body.append(paragraph)
+
+
+def _apply_key_provision_inclusions(document: Document, included_bookmarks: set[str]) -> None:
+    """Remove fully excluded KPS rows while preserving blank REF sources."""
+    ranges = _bookmark_ranges(document)
+    row_groups: dict[int, dict[str, Any]] = {}
+    for name in BOOKMARK_LABELS:
+        target = ranges.get(name)
+        if not target:
+            continue
+        row = _ancestor(target[0], qn("w:tr"))
+        if row is None:
+            if name not in included_bookmarks:
+                _replace_bookmark_text(document, name, "")
+            continue
+        group = row_groups.setdefault(id(row), {"row": row, "names": []})
+        group["names"].append(name)
+
+    for group in row_groups.values():
+        names = group["names"]
+        excluded = [name for name in names if name not in included_bookmarks]
+        if not excluded:
+            continue
+        if len(excluded) == len(names):
+            current_ranges = _bookmark_ranges(document)
+            for name in names:
+                target = current_ranges.get(name)
+                if target:
+                    _relocate_empty_bookmark(document, target[0], target[1])
+            row = group["row"]
+            parent = row.getparent()
+            if parent is not None:
+                parent.remove(row)
+        else:
+            for name in excluded:
+                _replace_bookmark_text(document, name, "")
+
+
+def _section_contains_ref(paragraphs: list[Paragraph], bookmark_name: str) -> bool:
+    pattern = re.compile(rf"\bREF\s+{re.escape(bookmark_name)}\b", re.IGNORECASE)
+    for paragraph in paragraphs:
+        for instruction in paragraph._p.iter(qn("w:instrText")):
+            if pattern.search(instruction.text or ""):
+                return True
+    return False
+
+
 def _insert_after(paragraph: Paragraph, title: str, text: str) -> Paragraph:
     new_element = OxmlElement("w:p")
     paragraph._p.addnext(new_element)
@@ -250,6 +331,8 @@ def build_word_document(
     template_path: str | Path,
     section_choices: dict[str, dict[str, Any]],
     bookmark_values: dict[str, str] | None = None,
+    included_bookmarks: set[str] | list[str] | None = None,
+    linked_provisions: list[dict[str, Any]] | None = None,
     additional_choices: list[dict[str, Any]] | None = None,
     clean_drafting_notes: bool = True,
     document_title: str = "MSP Lease Draft",
@@ -274,9 +357,38 @@ def build_word_document(
             for paragraph in reversed(clause_paragraphs[1:]):
                 _delete_paragraph(paragraph)
 
+    if bookmark_values:
+        values = dict(bookmark_values)
+        if "Tx_Landlord" in values:
+            values.setdefault("Tx_Landlord1", values["Tx_Landlord"])
+        for bookmark_name, value in values.items():
+            _replace_bookmark_text(document, bookmark_name, str(value))
+
+    if included_bookmarks is not None:
+        _apply_key_provision_inclusions(document, set(included_bookmarks))
+
+    current_sections = {section["number"]: section for section in scan_sections(document)}
+    current_paragraphs = list(document.paragraphs)
+
+    if linked_provisions:
+        grouped_links: dict[str, list[dict[str, Any]]] = {}
+        for item in linked_provisions:
+            section_number = str(item.get("section", ""))
+            if item.get("include") and section_number and str(item.get("value", "")).strip():
+                grouped_links.setdefault(section_number, []).append(item)
+        for section_number, items in grouped_links.items():
+            anchor_section = current_sections.get(section_number)
+            if not anchor_section:
+                continue
+            section_paragraphs = current_paragraphs[anchor_section["start"]:anchor_section["end"]]
+            anchor = section_paragraphs[-1]
+            for item in items:
+                bookmark_name = str(item.get("bookmark", ""))
+                if bookmark_name and _section_contains_ref(section_paragraphs, bookmark_name):
+                    continue
+                anchor = _insert_after(anchor, str(item.get("field", "Key Provision")), str(item["value"]))
+
     if additional_choices:
-        current_sections = {section["number"]: section for section in scan_sections(document)}
-        current_paragraphs = list(document.paragraphs)
         for item in additional_choices:
             if not item.get("include") or not str(item.get("text", "")).strip():
                 continue
@@ -285,13 +397,6 @@ def build_word_document(
                 continue
             anchor = current_paragraphs[anchor_section["end"] - 1]
             _insert_after(anchor, str(item.get("title", "Additional Provision")), str(item["text"]))
-
-    if bookmark_values:
-        values = dict(bookmark_values)
-        if "Tx_Landlord" in values:
-            values.setdefault("Tx_Landlord1", values["Tx_Landlord"])
-        for bookmark_name, value in values.items():
-            _replace_bookmark_text(document, bookmark_name, str(value))
 
     if clean_drafting_notes:
         _clean_drafting_notes(document)
