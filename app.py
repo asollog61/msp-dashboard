@@ -4816,18 +4816,16 @@ def render_lease_builder_tab():
             st.session_state[master_applied_key] = master_value
             st.rerun()
 
-        # Drag provisions between Mandatory and Optional; the editor below retains their controls.
-        label_to_bookmark = {
-            f"{row.get('Field', 'Key Provision')} · {row.get('Bookmark', '')}": row.get("Bookmark", "")
-            for row in draft_state["key_provisions"]
-        }
+        # Drag provisions between Mandatory and Optional; the two grids below retain their controls.
+        bookmark_to_row = {row.get("Bookmark", ""): row for row in draft_state["key_provisions"]}
+        label_to_bookmark = {row.get("Field", "Key Provision"): row.get("Bookmark", "") for row in draft_state["key_provisions"]}
         mandatory_labels = [
             label for label, bookmark in label_to_bookmark.items()
-            if next(row for row in draft_state["key_provisions"] if row.get("Bookmark") == bookmark).get("Group") == "Mandatory"
+            if bookmark_to_row[bookmark].get("Group") == "Mandatory"
         ]
         optional_labels = [
             label for label, bookmark in label_to_bookmark.items()
-            if next(row for row in draft_state["key_provisions"] if row.get("Bookmark") == bookmark).get("Group") != "Mandatory"
+            if bookmark_to_row[bookmark].get("Group") != "Mandatory"
         ]
         if HAS_SORTABLES:
             grouped_items = sort_items(
@@ -4844,37 +4842,54 @@ def render_lease_builder_tab():
                 """,
                 key=f"lb_kp_groups_{Path(template['path']).stem}",
             )
+            reordered = []
             for container in grouped_items:
                 group_name = "Mandatory" if container.get("header") == "Mandatory Key Provisions" else "Optional"
                 for label in container.get("items", []):
                     bookmark = label_to_bookmark.get(label)
                     if bookmark:
-                        next(row for row in draft_state["key_provisions"] if row.get("Bookmark") == bookmark)["Group"] = group_name
+                        row = bookmark_to_row[bookmark]
+                        row["Group"] = group_name
+                        reordered.append(row)
+            if len(reordered) == len(draft_state["key_provisions"]):
+                draft_state["key_provisions"] = reordered
         else:
             st.info("Install streamlit-sortables to enable drag-and-drop grouping.")
 
-        kp_df = pd.DataFrame(draft_state["key_provisions"])
-        edited_kp = st.data_editor(
-            kp_df,
-            hide_index=True,
-            width="stretch",
-            height=580,
-            disabled=["Group", "Field", "Bookmark"],
-            column_config={
-                "Group": st.column_config.TextColumn("Group", width="small"),
-                "Include": st.column_config.CheckboxColumn("Use", width="small"),
-                "Field": st.column_config.TextColumn("Key Provision", width="medium"),
-                "Value": st.column_config.TextColumn("Value", width="large"),
-                "Link": st.column_config.CheckboxColumn("Link", width="small"),
-                "Section": st.column_config.SelectboxColumn("Target Section", options=section_numbers, width="small"),
-                "Bookmark": None,
-            },
-            key=f"lb_kp_editor_{Path(template['path']).stem}_{draft_state['kp_version']}",
-        )
-        draft_state["key_provisions"] = edited_kp.to_dict("records")
-        selected_count = int(edited_kp["Include"].fillna(False).sum())
-        mandatory_count = int((edited_kp["Group"] == "Mandatory").sum())
-        count_col.caption(f"{mandatory_count} mandatory · {len(edited_kp) - mandatory_count} optional · {selected_count} used")
+        st.caption("Edit **Use**, **Value**, **Link**, and **Target Section** within the group where the provision lives.")
+        grouped_rows = []
+        for group_name in ("Mandatory", "Optional"):
+            st.markdown(f"#### {group_name} Provisions")
+            group_df = pd.DataFrame([
+                row for row in draft_state["key_provisions"] if row.get("Group") == group_name
+            ])
+            if group_df.empty:
+                st.info(f"Drag provisions here to make them {group_name.lower()}.")
+                continue
+            edited_group = st.data_editor(
+                group_df,
+                hide_index=True,
+                width="stretch",
+                height=min(460, 76 + len(group_df) * 36),
+                disabled=["Field", "Bookmark", "Group"],
+                column_config={
+                    "Group": None,
+                    "Include": st.column_config.CheckboxColumn("Use", width="small"),
+                    "Field": st.column_config.TextColumn("Key Provision", width="medium"),
+                    "Value": st.column_config.TextColumn("Value", width="large"),
+                    "Link": st.column_config.CheckboxColumn("Link", width="small"),
+                    "Section": st.column_config.SelectboxColumn("Target Section", options=section_numbers, width="small"),
+                    "Bookmark": None,
+                },
+                key=f"lb_kp_editor_{group_name.lower()}_{Path(template['path']).stem}_{draft_state['kp_version']}",
+            )
+            grouped_rows.extend(edited_group.to_dict("records"))
+        if grouped_rows:
+            draft_state["key_provisions"] = grouped_rows
+        all_kp = pd.DataFrame(draft_state["key_provisions"])
+        selected_count = int(all_kp["Include"].fillna(False).sum())
+        mandatory_count = int((all_kp["Group"] == "Mandatory").sum())
+        count_col.caption(f"{mandatory_count} mandatory · {len(all_kp) - mandatory_count} optional · {selected_count} used")
 
         st.markdown("### Lease Sections")
         st.caption("Every numbered section is listed below. Use the table to include/exclude sections, then select one to edit its language.")

@@ -362,6 +362,52 @@ def _clean_drafting_formatting(document: Document) -> None:
             settings.remove(element)
 
 
+def _remove_template_markers(document: Document) -> None:
+    """Remove Word-template bookmark labels such as (#Property) from output text."""
+    marker_in_parentheses = re.compile(r"\s*\(\s*#[A-Za-z_][A-Za-z0-9_]*\s*\)")
+    bare_marker = re.compile(r"\s+#[A-Za-z_][A-Za-z0-9_]*")
+    roots = []
+    seen = set()
+    for part in document.part.package.parts:
+        root = getattr(part, "_element", None)
+        if root is None:
+            root = getattr(part, "element", None)
+        if root is not None and id(root) not in seen:
+            roots.append(root)
+            seen.add(id(root))
+    for root in roots:
+        # Hyperlinked display markers are split across separate runs: "(" + #Property + ")".
+        for hyperlink in list(root.iter(qn("w:hyperlink"))):
+            hyperlink_text = "".join(
+                item.text or "" for item in hyperlink.iter(qn("w:t"))
+            ).strip()
+            if not re.fullmatch(r"#[A-Za-z_][A-Za-z0-9_]*", hyperlink_text):
+                continue
+            parent = hyperlink.getparent()
+            if parent is None:
+                continue
+            index = parent.index(hyperlink)
+            neighbors = []
+            if index > 0:
+                neighbors.append(parent[index - 1])
+            if index + 1 < len(parent):
+                neighbors.append(parent[index + 1])
+            parent.remove(hyperlink)
+            for neighbor in neighbors:
+                neighbor_text = "".join(item.text or "" for item in neighbor.iter(qn("w:t"))).strip()
+                if neighbor_text in {"(", ")"} and neighbor.getparent() is parent:
+                    parent.remove(neighbor)
+        for text_element in root.iter(qn("w:t")):
+            original = text_element.text or ""
+            cleaned = bare_marker.sub("", marker_in_parentheses.sub("", original))
+            if re.fullmatch(r"#[A-Za-z_][A-Za-z0-9_]*", cleaned.strip()):
+                cleaned = ""
+            if cleaned != original:
+                text_element.text = cleaned
+                if cleaned.startswith(" ") or cleaned.endswith(" "):
+                    text_element.set(qn("xml:space"), "preserve")
+
+
 def _clean_drafting_notes(document: Document) -> None:
     """Remove template directions and scratch clauses before the formal lease body."""
     paragraphs = list(document.paragraphs)
@@ -450,6 +496,8 @@ def build_word_document(
                 continue
             anchor = current_paragraphs[anchor_section["end"] - 1]
             _insert_after(anchor, str(item.get("title", "Additional Provision")), str(item["text"]))
+
+    _remove_template_markers(document)
 
     if clean_drafting_notes:
         _clean_drafting_notes(document)
