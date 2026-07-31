@@ -5035,24 +5035,28 @@ def render_lease_builder_tab():
 
     with right:
         st.markdown("### Draft Preview")
+        st.caption("Independent preview pane — scroll these pages without moving the editor.")
         if live_word_bytes:
             with st.spinner("Rendering the actual Word draft…"):
                 rendered_pages = _lb_render_word_pages(live_word_bytes)
         else:
             rendered_pages = []
 
-        if rendered_pages:
-            st.caption("Rendered directly from the generated Word file. Numbering, included sections, and clean formatting match the downloadable draft.")
-            for page_number, page_image in enumerate(rendered_pages, start=1):
-                st.image(page_image, caption=f"Page {page_number}", width="stretch")
-        else:
-            st.caption("Exact Word rendering is unavailable on this server, so the content-faithful fallback preview is shown.")
-            preview_html = _lb_preview_html(
-                draft_state["key_provisions"],
-                preview_sections,
-                st.session_state.get("lb_preview_focus_section", ""),
-            )
-            st.components.v1.html(preview_html, height=1220, scrolling=True)
+        # Fixed-height native container keeps preview scrolling separate from the editor.
+        preview_pane = st.container(height=1180, border=True)
+        with preview_pane:
+            if rendered_pages:
+                st.caption("Rendered directly from the generated Word file. Numbering, included sections, and clean formatting match the downloadable draft.")
+                for page_number, page_image in enumerate(rendered_pages, start=1):
+                    st.image(page_image, caption=f"Page {page_number}", width="stretch")
+            else:
+                st.caption("Exact Word rendering is unavailable on this server, so the content-faithful fallback preview is shown.")
+                preview_html = _lb_preview_html(
+                    draft_state["key_provisions"],
+                    preview_sections,
+                    st.session_state.get("lb_preview_focus_section", ""),
+                )
+                st.components.v1.html(preview_html, height=1120, scrolling=True)
 
 
 # =====================
