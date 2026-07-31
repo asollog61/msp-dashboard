@@ -4822,7 +4822,11 @@ def render_lease_builder_tab():
 
         # Drag provisions between Mandatory and Optional; the two grids below retain their controls.
         bookmark_to_row = {row.get("Bookmark", ""): row for row in draft_state["key_provisions"]}
-        label_to_bookmark = {row.get("Field", "Key Provision"): row.get("Bookmark", "") for row in draft_state["key_provisions"]}
+        # Sortable labels are display-only. Never expose bookmark/internal names in the UI.
+        label_to_bookmark = {
+            BOOKMARK_LABELS.get(str(row.get("Bookmark", "")), str(row.get("Field", "Key Provision")).split(" — ")[0].split(" · ")[0].strip()): row.get("Bookmark", "")
+            for row in draft_state["key_provisions"]
+        }
         mandatory_labels = [
             label for label, bookmark in label_to_bookmark.items()
             if bookmark_to_row[bookmark].get("Group") == "Mandatory"
@@ -4844,7 +4848,8 @@ def render_lease_builder_tab():
                     .sortable-container-header { font-weight: 700; padding: 10px 12px; color: #c8d4ff; }
                     .sortable-item { margin: 5px 8px; padding: 8px 10px; border-radius: 5px; background: #26354d; color: #e6edf3; cursor: grab; font-size: 12px; }
                 """,
-                key=f"lb_kp_groups_{Path(template['path']).stem}",
+                # v3 key forces streamlit-sortables to discard its old internal-label state.
+                key=f"lb_kp_groups_v3_{Path(template['path']).stem}",
             )
             reordered = []
             for container in grouped_items:
