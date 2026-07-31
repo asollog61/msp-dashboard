@@ -4555,6 +4555,7 @@ def _lb_export_key_provisions_xlsx(rows):
             "Use": bool(row.get("Include", True)),
             "Key Provision": row.get("Field", ""),
             "Current Value": row.get("Value", ""),
+            "Use Choice": row.get("Choice", "Current Value"),
             "Link": bool(row.get("Link", False)),
             "Target Section": row.get("Section", ""),
             "Bookmark": row.get("Bookmark", ""),
@@ -4582,7 +4583,7 @@ def _lb_import_key_provisions_xlsx(uploaded_file, existing_rows, section_labels)
     aliases = {
         "Group": "Group", "Use": "Include", "Include": "Include",
         "Key Provision": "Field", "Field": "Field", "Name": "Field",
-        "Current Value": "Value", "Value": "Value", "Link": "Link", "Target Section": "Section",
+        "Current Value": "Value", "Value": "Value", "Use Choice": "Choice", "Link": "Link", "Target Section": "Section",
         "Section": "Section", "Bookmark": "Bookmark",
     }
     normalized = {}
@@ -4606,6 +4607,8 @@ def _lb_import_key_provisions_xlsx(uploaded_file, existing_rows, section_labels)
                 "Include": True,
                 "Field": field or "New Key Provision",
                 "Value": "",
+                "Alternates": [],
+                "Choice": "Current Value",
                 "Link": False,
                 "Section": next(iter(section_labels.values())),
                 "Bookmark": "Custom_" + uuid4().hex[:12],
@@ -4620,6 +4623,8 @@ def _lb_import_key_provisions_xlsx(uploaded_file, existing_rows, section_labels)
             row["Field"] = field
         if "Value" in normalized:
             row["Value"] = str(source[normalized["Value"]])
+        if "Choice" in normalized:
+            row["Choice"] = str(source[normalized["Choice"]]).strip() or "Current Value"
         alternate_values = []
         for index in range(1, 11):
             column = next((column_name for column_name in imported.columns if str(column_name).strip().lower() == f"alt {index}".lower()), None)
@@ -4889,6 +4894,7 @@ def render_lease_builder_tab():
                     "Field": item["field"],
                     "Value": item["value"],
                     "Alternates": [],
+                    "Choice": "Current Value",
                     "Link": item["bookmark"] in LEASE_DEFAULT_LINKS,
                     "Section": section_labels.get(str(LEASE_DEFAULT_LINKS.get(item["bookmark"], section_numbers[0])), section_labels[section_numbers[0]]),
                     "Bookmark": item["bookmark"],
@@ -4917,6 +4923,7 @@ def render_lease_builder_tab():
         provision.setdefault("Include", True)
         provision.setdefault("Alternates", [])
         provision["Alternates"] = list(dict.fromkeys(str(value) for value in provision.get("Alternates", []) if str(value).strip()))[:10]
+        provision.setdefault("Choice", "Current Value")
         provision.setdefault("Link", bookmark in LEASE_DEFAULT_LINKS)
         raw_section = provision.get("Section", LEASE_DEFAULT_LINKS.get(bookmark, section_numbers[0]))
         provision["Section"] = section_labels.get(str(raw_section), str(raw_section) if str(raw_section) in section_labels.values() else section_labels[section_numbers[0]])
@@ -4982,13 +4989,23 @@ def render_lease_builder_tab():
                 except Exception as exc:
                     st.error(f"Key Provisions import failed: {exc}")
 
-        # The provision grid is the only drag surface. The first column is a handle;
-        # clicking/editing elsewhere does not reorder anything.
+        # This is the single editable Key Provisions grid. The drag handle is the only reorder control.
         draft_state["key_provisions"] = sorted(
             draft_state["key_provisions"],
             key=lambda row: 0 if bool(row.get("Include")) else 1,
         )
-        kp_df = pd.DataFrame(draft_state["key_provisions"])
+        grid_rows = []
+        for source_row in draft_state["key_provisions"]:
+            row = dict(source_row)
+            alternates = list(row.get("Alternates", []))[:10]
+            row["Current Value"] = row.get("Value", "")
+            row["Use Choice"] = row.get("Choice", "Current Value")
+            for index in range(10):
+                row[f"Alt {index + 1}"] = alternates[index] if index < len(alternates) else ""
+            row.pop("Value", None)
+            row.pop("Alternates", None)
+            grid_rows.append(row)
+        kp_df = pd.DataFrame(grid_rows)
         kp_df.insert(0, "Drag", "")
         grid_builder = GridOptionsBuilder.from_dataframe(kp_df)
         grid_builder.configure_default_column(resizable=True, sortable=False, filter=False, editable=False)
@@ -4999,14 +5016,18 @@ def render_lease_builder_tab():
         grid_builder.configure_column("Include", header_name="Use", editable=True, width=68,
                                       cellRenderer="agCheckboxCellRenderer", cellEditor="agCheckboxCellEditor")
         grid_builder.configure_column("Field", header_name="Key Provision", editable=False, width=165)
-        grid_builder.configure_column("Value", header_name="Value", editable=True, width=330)
+        grid_builder.configure_column("Current Value", header_name="Current Value", editable=True, width=330)
+        grid_builder.configure_column("Use Choice", header_name="Use Choice", editable=True, width=110,
+                                      cellEditor="agSelectCellEditor",
+                                      cellEditorParams={"values": ["Current Value"] + [f"Alt {i}" for i in range(1, 11)]})
         grid_builder.configure_column("Link", header_name="Link", editable=True, width=68,
                                       cellRenderer="agCheckboxCellRenderer", cellEditor="agCheckboxCellEditor")
         grid_builder.configure_column("Section", header_name="Target Section", editable=True, width=210,
                                       cellEditor="agSelectCellEditor",
                                       cellEditorParams={"values": list(section_labels.values())})
+        for index in range(1, 11):
+            grid_builder.configure_column(f"Alt {index}", header_name=f"Alt {index}", editable=False, width=185)
         grid_builder.configure_column("Bookmark", hide=True)
-        grid_builder.configure_column("Alternates", hide=True)
         grid_builder.configure_grid_options(
             rowDragManaged=True,
             animateRows=True,
@@ -5016,105 +5037,38 @@ def render_lease_builder_tab():
         grid_result = AgGrid(
             kp_df,
             gridOptions=grid_builder.build(),
-            height=min(650, 96 + len(kp_df) * 34),
+            height=min(760, 96 + len(kp_df) * 42),
             theme="streamlit",
             update_mode=GridUpdateMode.MODEL_CHANGED,
             data_return_mode=DataReturnMode.AS_INPUT,
             fit_columns_on_grid_load=False,
             allow_unsafe_jscode=True,
-            key=f"lb_kp_grid_v5_{Path(template['path']).stem}",
+            key=f"lb_kp_grid_v6_{Path(template['path']).stem}",
         )
         edited_kp = grid_result.data if hasattr(grid_result, "data") else grid_result["data"]
         if edited_kp is None:
             edited_kp = kp_df
-        edited_kp = edited_kp.drop(columns=["Drag"], errors="ignore")
-        draft_state["key_provisions"] = edited_kp.to_dict("records")
-        selected_count = int(edited_kp["Include"].fillna(False).sum())
-        count_col.caption(f"{selected_count} used · {len(edited_kp) - selected_count} excluded")
-        st.caption("Drag only from the ↕ handle column. Checked provisions stay above unchecked provisions after edits.")
-
-        # Add a new custom key provision.
-
-        with st.expander("➕ Add Key Provision", expanded=False):
-            with st.form("lb_add_key_provision", clear_on_submit=True):
-                add_name, add_group = st.columns([3, 2])
-                new_field = add_name.text_input("Provision name", placeholder="e.g., Garbage Service")
-                new_group = add_group.selectbox("Group", ["Mandatory", "Optional"])
-                new_value = st.text_area("Initial value", placeholder="Enter the provision value")
-                add_link, add_section = st.columns([1, 3])
-                new_link = add_link.checkbox("Link to section")
-                new_section = add_section.selectbox("Target Section", list(section_labels.values()), disabled=not new_link)
-                add_submitted = st.form_submit_button("Add Provision")
-            if add_submitted:
-                if not new_field.strip():
-                    st.warning("Enter a provision name first.")
-                else:
-                    new_bookmark = "Custom_" + uuid4().hex[:12]
-                    draft_state["key_provisions"].append({
-                        "Group": new_group,
-                        "Include": True,
-                        "Field": new_field.strip(),
-                        "Value": new_value.strip(),
-                        "Alternates": [],
-                        "Link": new_link,
-                        "Section": new_section,
-                        "Bookmark": new_bookmark,
-                    })
-                    draft_state["kp_version"] += 1
-                    st.rerun()
-
-        # Saved value choices for the currently selected provision.
-        st.markdown("#### Saved Values")
-        provision_options = [str(row.get("Field", "Key Provision")) for row in draft_state["key_provisions"]]
-        selected_value_field = st.selectbox("Provision", provision_options, key="lb_value_choice_field")
-        selected_value_row = next(row for row in draft_state["key_provisions"] if row.get("Field") == selected_value_field)
-        value_key = str(selected_value_row.get("Bookmark") or selected_value_field)
-        template_values = saved_value_choices.setdefault(selected_label, {}) if isinstance(saved_value_choices, dict) else {}
-        stored_values = list(selected_value_row.get("Alternates", [])) + list(template_values.get(value_key, []))
-        saved_values = list(dict.fromkeys(str(value) for value in stored_values if str(value).strip()))[:10]
-        count_col, add_col = st.columns([3, 2])
-        count_col.metric("Saved value choices", len(saved_values))
-        add_value_open_key = f"lb_add_value_open_{value_key}"
-        st.session_state.setdefault(add_value_open_key, False)
-        if add_col.button("➕ Add Value", key=f"lb_add_value_button_{value_key}"):
-            st.session_state[add_value_open_key] = True
-        if st.session_state[add_value_open_key]:
-            new_alternate = st.text_area("New alternate value", key=f"lb_new_alternate_{value_key}", height=75)
-            if st.button("Save Alternate Value", key=f"lb_save_alternate_{value_key}"):
-                if new_alternate.strip():
-                    selected_value_row.setdefault("Alternates", [])
-                    selected_value_row["Alternates"] = list(dict.fromkeys(
-                        selected_value_row["Alternates"] + [new_alternate.strip()]
-                    ))[:10]
-                    template_values[value_key] = list(dict.fromkeys(
-                        list(template_values.get(value_key, [])) + [new_alternate.strip()]
-                    ))[:10]
-                    if _write_gsheet_config("Lease Provision Values", saved_value_choices):
-                        st.session_state[add_value_open_key] = False
-                        st.success("Saved alternate value.")
-                        st.rerun()
-                else:
-                    st.warning("Enter an alternate value first.")
-        choice_options = ["Current value"] + saved_values
-        selected_choice = st.selectbox("Current Value", choice_options, key=f"lb_value_choice_{value_key}")
-        if selected_choice != "Current value":
-            selected_value_row["Value"] = selected_choice
-        edited_value = st.text_area("Edit current value", value=str(selected_value_row.get("Value", "")), key=f"lb_value_edit_{value_key}", height=90)
-        selected_value_row["Value"] = edited_value
-        if st.button("Save Current Value as Choice", key=f"lb_save_value_{value_key}"):
-            if edited_value.strip():
-                selected_value_row.setdefault("Alternates", [])
-                selected_value_row["Alternates"] = list(dict.fromkeys(
-                    selected_value_row["Alternates"] + [edited_value.strip()]
-                ))[:10]
-                template_values[value_key] = list(dict.fromkeys(
-                    list(template_values.get(value_key, [])) + [edited_value.strip()]
-                ))[:10]
-                if _write_gsheet_config("Lease Provision Values", saved_value_choices):
-                    st.success("Saved value choice.")
-                    st.rerun()
-            else:
-                st.warning("Enter a value before saving it as a choice.")
+        edited_rows = []
+        for row in edited_kp.drop(columns=["Drag"], errors="ignore").to_dict("records"):
+            alternates = [str(row.pop(f"Alt {index}", "")).strip() for index in range(1, 11)]
+            alternates = [value for value in alternates if value]
+            choice = str(row.pop("Use Choice", "Current Value"))
+            current_value = str(row.pop("Current Value", ""))
+            if choice.startswith("Alt "):
+                try:
+                    alt_index = int(choice.split(" ", 1)[1]) - 1
+                    if 0 <= alt_index < len(alternates):
+                        current_value = alternates[alt_index]
+                except ValueError:
+                    choice = "Current Value"
+            row["Value"] = current_value
+            row["Alternates"] = alternates[:10]
+            row["Choice"] = choice
+            edited_rows.append(row)
+        draft_state["key_provisions"] = edited_rows
+        selected_count = sum(1 for row in edited_rows if bool(row.get("Include")))
+        count_col.caption(f"{selected_count} used · {len(edited_rows) - selected_count} excluded")
+        st.caption("Drag only from the ↕ handle. Choose Alt 1–Alt 10 from Use Choice to make it the Current Value.")
 
         st.markdown("### Lease Sections")
         st.caption("Every numbered section is listed below. Use the table to include/exclude sections, then select one to edit its language.")
