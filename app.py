@@ -7,6 +7,9 @@ import html as html_lib
 import json
 import os
 import re
+import shutil
+import subprocess
+import tempfile
 import time
 from datetime import datetime, date, timedelta
 from pathlib import Path
@@ -4513,64 +4516,50 @@ LEASE_DEFAULT_LINKS = {
 }
 
 
-def _lb_toggle_all_key_provisions(bookmark_names):
-    selected = bool(st.session_state.get("lb_kp_select_all", True))
-    for bookmark in bookmark_names:
-        st.session_state[f"lb_kp_include_{bookmark}"] = selected
-
-
-def _lb_sync_select_all(bookmark_names):
-    st.session_state["lb_kp_select_all"] = all(
-        st.session_state.get(f"lb_kp_include_{bookmark}", True)
-        for bookmark in bookmark_names
+def _lb_section_body(section_number, text):
+    text = str(text or "").strip()
+    pattern = re.compile(
+        rf"^\s*Section\s+{re.escape(str(section_number))}(?:\.(?:\s+|$)|\s+)",
+        re.IGNORECASE,
     )
+    return pattern.sub("", text, count=1).strip()
 
 
-def _lb_focus_linked_section(bookmark):
-    st.session_state["lb_preview_focus_section"] = st.session_state.get(
-        f"lb_kp_section_{bookmark}", ""
-    )
-
-
-def _lease_preview_html(provisions, sections, focus_section=""):
-    included = [item for item in provisions if item["include"]]
-    links_by_section = {}
-    for item in included:
-        if item.get("linked") and item.get("section"):
-            links_by_section.setdefault(str(item["section"]), []).append(item)
+def _lb_preview_html(key_provisions, preview_sections, focus_section=""):
+    selected_provisions = [item for item in key_provisions if bool(item.get("Include"))]
+    linked_by_section = {}
+    for item in selected_provisions:
+        if bool(item.get("Link")) and item.get("Section"):
+            linked_by_section.setdefault(str(item["Section"]), []).append(item)
 
     summary_rows = "".join(
-        "<tr><th>" + html_lib.escape(str(item["field"])) + "</th><td>" +
-        html_lib.escape(str(item["value"])).replace("\n", "<br>") + "</td></tr>"
-        for item in included
+        "<tr><th>" + html_lib.escape(str(item.get("Field", ""))) + "</th><td>" +
+        html_lib.escape(str(item.get("Value", ""))).replace("\n", "<br>") + "</td></tr>"
+        for item in selected_provisions
     ) or '<tr><td colspan="2" class="empty">No key provisions selected.</td></tr>'
 
-    section_html = []
-    for section in sections:
+    section_blocks = []
+    for section in preview_sections:
+        if not bool(section.get("include", True)):
+            continue
         number = str(section["number"])
         section_id = "section-" + re.sub(r"[^A-Za-z0-9_-]", "-", number)
-        raw_text = str(section["text"])
-        prefix = re.compile(
-            rf"^\s*Section\s+{re.escape(number)}(?:\.(?:\s+|$)|\s+)",
-            re.IGNORECASE,
-        )
-        body = prefix.sub("", raw_text, count=1)
+        body = _lb_section_body(number, section.get("text", ""))
         paragraphs = "".join(
             f"<p>{html_lib.escape(part.strip())}</p>"
             for part in re.split(r"\n\s*\n", body)
             if part.strip()
         )
-        linked_html = "".join(
-            '<div class="linked-provision"><span>LINKED KEY PROVISION</span><strong>' +
-            html_lib.escape(str(item["field"])) + ":</strong> " +
-            html_lib.escape(str(item["value"])) + "</div>"
-            for item in links_by_section.get(number, [])
+        linked_paragraphs = "".join(
+            "<p><strong>" + html_lib.escape(str(item.get("Field", ""))) + ".</strong> " +
+            html_lib.escape(str(item.get("Value", ""))) + "</p>"
+            for item in linked_by_section.get(number, [])
         )
-        focus_class = " focus" if number == str(focus_section) else ""
-        section_html.append(
-            f'<section id="{section_id}" class="lease-section{focus_class}">'
-            f'<h3>Section {html_lib.escape(number)} — {html_lib.escape(str(section["title"]))}</h3>'
-            f'{paragraphs}{linked_html}</section>'
+        section_blocks.append(
+            f'<section id="{section_id}" class="lease-section">'
+            f'<p class="section-heading"><strong>Section {html_lib.escape(number)}. '
+            f'{html_lib.escape(str(section.get("title", "")))}.</strong></p>'
+            f'{paragraphs}{linked_paragraphs}</section>'
         )
 
     focus_id = "section-" + re.sub(r"[^A-Za-z0-9_-]", "-", str(focus_section))
@@ -4578,45 +4567,134 @@ def _lease_preview_html(provisions, sections, focus_section=""):
     if focus_section:
         scroll_script = (
             "<script>setTimeout(function(){var e=document.getElementById('" + focus_id +
-            "');if(e){e.scrollIntoView({behavior:'smooth',block:'center'});}},120);</script>"
+            "');if(e){e.scrollIntoView({behavior:'smooth',block:'start'});}},100);</script>"
         )
 
     return f"""
     <!doctype html>
     <html><head><style>
       * {{ box-sizing: border-box; }}
-      body {{ margin: 0; padding: 18px; background: #cfd3d8; font-family: Georgia, 'Times New Roman', serif; color: #161616; }}
-      .preview-label {{ position: sticky; top: 0; z-index: 5; margin: -18px -18px 14px; padding: 9px 16px; background: #1a2332; color: #dce7ff; font: 700 12px Arial, sans-serif; letter-spacing: .7px; }}
-      .page {{ width: 100%; max-width: 760px; min-height: 980px; margin: 0 auto 18px; padding: 56px 58px; background: white; box-shadow: 0 2px 12px rgba(0,0,0,.24); }}
-      h1 {{ text-align: center; font-size: 20px; margin: 0 0 6px; }}
-      h2 {{ text-align: center; font-size: 15px; margin: 0 0 26px; }}
-      table {{ width: 100%; border-collapse: collapse; font-size: 11px; }}
-      th, td {{ border: 1px solid #777; padding: 7px 8px; vertical-align: top; line-height: 1.35; }}
-      th {{ width: 31%; text-align: left; background: #f1f1f1; }}
+      body {{ margin: 0; padding: 16px; background: #cfd3d8; color: #111; font-family: 'Times New Roman', Times, serif; }}
+      .preview-label {{ position: sticky; top: 0; z-index: 5; margin: -16px -16px 14px; padding: 9px 15px; background: #1a2332; color: #e6edf3; font: 700 12px Arial, sans-serif; letter-spacing: .6px; }}
+      .page {{ width: 100%; max-width: 780px; min-height: 990px; margin: 0 auto 18px; padding: 58px 62px; background: #fff; box-shadow: 0 2px 12px rgba(0,0,0,.25); }}
+      h1 {{ text-align: center; font-size: 19px; margin: 0 0 5px; }}
+      h2 {{ text-align: center; font-size: 14px; margin: 0 0 24px; }}
+      table {{ width: 100%; border-collapse: collapse; font-size: 10.5px; }}
+      th, td {{ border: 1px solid #666; padding: 6px 7px; vertical-align: top; line-height: 1.35; }}
+      th {{ width: 31%; text-align: left; background: #f3f3f3; }}
       .empty {{ text-align: center; color: #777; padding: 20px; }}
-      .lease-section {{ padding: 8px 0 14px; border-bottom: 1px solid #ddd; scroll-margin-top: 48px; }}
-      .lease-section h3 {{ font-size: 12px; margin: 0 0 7px; }}
-      .lease-section p {{ font-size: 10.5px; line-height: 1.48; text-align: justify; margin: 0 0 8px; }}
-      .lease-section.focus {{ outline: 3px solid #4f8cff; background: #f1f6ff; padding: 10px; margin: 3px -10px 10px; }}
-      .linked-provision {{ margin: 8px 0 2px; padding: 8px 10px; border-left: 4px solid #2c6fd6; background: #eaf2ff; font-size: 10.5px; line-height: 1.4; }}
-      .linked-provision span {{ display: block; font: 700 8px Arial, sans-serif; color: #2c6fd6; letter-spacing: .5px; margin-bottom: 3px; }}
-      .note {{ text-align: center; color: #555; font: 10px Arial, sans-serif; margin-bottom: 12px; }}
+      .lease-section {{ margin: 0 0 13px; scroll-margin-top: 42px; }}
+      .lease-section p {{ font-size: 10.5px; line-height: 1.45; text-align: justify; margin: 0 0 7px; }}
+      .section-heading {{ text-align: left !important; margin-top: 12px !important; }}
+      .note {{ text-align: center; color: #555; font: 10px Arial, sans-serif; margin-bottom: 10px; }}
     </style></head><body>
-      <div class="preview-label">LIVE WORD-STYLE PREVIEW</div>
-      <div class="note">The downloaded Word file retains the original template formatting.</div>
-      <div class="page">
-        <h1>LEASE AGREEMENT</h1><h2>KEY PROVISIONS SUMMARY</h2>
-        <table>{summary_rows}</table>
-      </div>
-      <div class="page">{''.join(section_html)}</div>
+      <div class="preview-label">LIVE DRAFT PREVIEW — CURRENT SELECTIONS</div>
+      <div class="note">No drafting highlights are added. Word export uses the original layout with the selected content.</div>
+      <div class="page"><h1>LEASE AGREEMENT</h1><h2>KEY PROVISIONS SUMMARY</h2><table>{summary_rows}</table></div>
+      <div class="page">{''.join(section_blocks)}</div>
       {scroll_script}
     </body></html>
     """
 
 
+def _lb_build_current_word(template_path, draft_name, clean_notes, sections, draft_state):
+    section_choices = {}
+    for section in sections:
+        number = str(section["number"])
+        config = draft_state["sections"][number]
+        configured_text = str(config.get("text", section["text"]))
+        base_text = str(section["text"])
+        replacement_text = "" if configured_text.strip() == base_text.strip() else _lb_section_body(number, configured_text)
+        section_choices[number] = {
+            "include": bool(config.get("include", True)),
+            "title": section["title"],
+            "replacement_text": replacement_text,
+        }
+
+    bookmark_values = {
+        str(row["Bookmark"]): row.get("Value", "")
+        for row in draft_state["key_provisions"]
+    }
+    included_bookmarks = {
+        str(row["Bookmark"])
+        for row in draft_state["key_provisions"] if bool(row.get("Include"))
+    }
+    linked_provisions = [
+        {
+            "bookmark": str(row["Bookmark"]),
+            "field": row.get("Field", "Key Provision"),
+            "value": row.get("Value", ""),
+            "include": bool(row.get("Include")),
+            "section": str(row.get("Section", "")),
+        }
+        for row in draft_state["key_provisions"] if bool(row.get("Link"))
+    ]
+    return build_word_document(
+        template_path,
+        section_choices=section_choices,
+        bookmark_values=bookmark_values,
+        included_bookmarks=included_bookmarks,
+        linked_provisions=linked_provisions,
+        additional_choices=[],
+        clean_drafting_notes=clean_notes,
+        document_title=draft_name,
+    )
+
+
+@st.cache_data(show_spinner=False, max_entries=3)
+def _lb_render_word_pages(word_bytes):
+    """Render the actual generated DOCX to page images for a faithful live preview."""
+    office = shutil.which("libreoffice") or shutil.which("soffice")
+    if not office or not HAS_PYMUPDF:
+        return []
+    with tempfile.TemporaryDirectory(prefix="msp-lease-preview-") as temp_dir:
+        temp_path = Path(temp_dir)
+        docx_path = temp_path / "lease-preview.docx"
+        docx_path.write_bytes(word_bytes)
+        profile_path = temp_path / "lo-profile"
+        command = [
+            office,
+            "--headless",
+            f"-env:UserInstallation=file://{profile_path}",
+            "--convert-to", "pdf",
+            "--outdir", str(temp_path),
+            str(docx_path),
+        ]
+        result = subprocess.run(
+            command,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=75,
+            check=False,
+            env={**os.environ, "HOME": temp_dir},
+        )
+        pdf_path = temp_path / "lease-preview.pdf"
+        if result.returncode != 0 or not pdf_path.exists():
+            print("Lease preview conversion failed:", result.stderr.decode("utf-8", errors="ignore")[-500:])
+            return []
+        document = fitz.open(pdf_path)
+        pages = []
+        matrix = fitz.Matrix(1.05, 1.05)
+        for page in document:
+            pixmap = page.get_pixmap(matrix=matrix, alpha=False)
+            pages.append(pixmap.tobytes("png"))
+        document.close()
+        return pages
+
+
+def _lb_reset_editor_widget_state():
+    prefixes = (
+        "lb_kp_editor_", "lb_section_editor_", "lb_section_choice_",
+        "lb_section_text_", "lb_new_choice_name_",
+    )
+    for key in list(st.session_state.keys()):
+        if key.startswith(prefixes):
+            del st.session_state[key]
+
+
 def render_lease_builder_tab():
     st.markdown("## 🧱 Lease Builder")
-    st.caption("Key Provisions workspace — configure the summary on the left and watch the lease update on the right.")
+    st.caption("Build the actual lease content, save reusable templates, and maintain clause choices by section.")
 
     if not LEASE_BUILDER_AVAILABLE:
         st.error("Lease Builder dependency is unavailable. Install python-docx from requirements.txt.")
@@ -4627,12 +4705,19 @@ def render_lease_builder_tab():
         st.warning("No DOCX lease templates were found in data/Lease Builder.")
         return
 
-    header1, header2, header3 = st.columns([3, 2, 1])
+    saved_templates = _read_gsheet_config("Lease Builder Templates") or {}
+    saved_clause_library = _read_gsheet_config("Lease Clause Library") or {}
+    built_in_library = load_clause_library().get("sections", {})
+
+    header1, header2, header3, header4 = st.columns([3, 2, 2, 1])
     selected_label = header1.selectbox(
-        "Lease template", [template["label"] for template in templates], key="lb_template"
+        "Base lease template", [template["label"] for template in templates], key="lb_template"
     )
-    draft_name = header2.text_input("Draft name", value="MSP Lease Draft", key="lb_draft_name")
-    clean_notes = header3.toggle("Clean draft", value=True, key="lb_clean_notes")
+    saved_choice = header2.selectbox(
+        "Saved configuration", ["Current Draft"] + sorted(saved_templates.keys()), key="lb_saved_choice"
+    )
+    draft_name = header3.text_input("Draft name", value="MSP Lease Draft", key="lb_draft_name")
+    clean_notes = header4.toggle("Clean draft", value=True, key="lb_clean_notes")
     template = next(template for template in templates if template["label"] == selected_label)
 
     try:
@@ -4642,115 +4727,230 @@ def render_lease_builder_tab():
         return
 
     sections = template_data["sections"]
-    detail_rows = template_data["bookmarks"]
-    bookmark_names = tuple(item["bookmark"] for item in detail_rows)
     section_numbers = [str(section["number"]) for section in sections]
     section_labels = {
         str(section["number"]): f"Section {section['number']} — {section['title']}"
         for section in sections
     }
+    section_by_number = {str(section["number"]): section for section in sections}
 
-    for item in detail_rows:
-        bookmark = item["bookmark"]
-        st.session_state.setdefault(f"lb_kp_include_{bookmark}", True)
-        st.session_state.setdefault(f"lb_kp_value_{bookmark}", item["value"])
-        default_section = LEASE_DEFAULT_LINKS.get(bookmark, section_numbers[0])
-        st.session_state.setdefault(f"lb_kp_link_{bookmark}", bookmark in LEASE_DEFAULT_LINKS)
-        st.session_state.setdefault(f"lb_kp_section_{bookmark}", default_section)
-    st.session_state.setdefault("lb_kp_select_all", True)
+    draft_state_key = f"lb_draft_state_{Path(template['path']).stem}"
+    if draft_state_key not in st.session_state:
+        st.session_state[draft_state_key] = {
+            "key_provisions": [
+                {
+                    "Include": True,
+                    "Field": item["field"],
+                    "Value": item["value"],
+                    "Link": item["bookmark"] in LEASE_DEFAULT_LINKS,
+                    "Section": LEASE_DEFAULT_LINKS.get(item["bookmark"], section_numbers[0]),
+                    "Bookmark": item["bookmark"],
+                }
+                for item in template_data["bookmarks"]
+            ],
+            "sections": {
+                str(section["number"]): {
+                    "include": True,
+                    "choice": "Template language",
+                    "text": section["text"],
+                }
+                for section in sections
+            },
+            "kp_version": 0,
+            "section_version": 0,
+        }
+    draft_state = st.session_state[draft_state_key]
 
-    left, right = st.columns([1.08, 0.92], gap="large")
-    provision_state = []
+    load_marker = f"{selected_label}|{saved_choice}"
+    if saved_choice != "Current Draft" and st.session_state.get("lb_loaded_saved_marker") != load_marker:
+        saved = saved_templates.get(saved_choice, {})
+        if saved.get("base_template") == selected_label:
+            draft_state["key_provisions"] = saved.get("key_provisions", draft_state["key_provisions"])
+            loaded_sections = saved.get("sections", {})
+            for number, config in loaded_sections.items():
+                if number in draft_state["sections"]:
+                    draft_state["sections"][number].update(config)
+            draft_state["kp_version"] += 1
+            draft_state["section_version"] += 1
+            _lb_reset_editor_widget_state()
+            st.session_state["lb_loaded_saved_marker"] = load_marker
+            st.rerun()
+        else:
+            st.warning("That saved configuration belongs to a different base template.")
+
+    left, right = st.columns([1.12, 0.88], gap="large")
+    live_word_bytes = None
 
     with left:
         st.markdown("### Key Provisions")
-        st.checkbox(
-            "Select all key provisions",
-            key="lb_kp_select_all",
-            on_change=_lb_toggle_all_key_provisions,
-            args=(bookmark_names,),
-        )
-        st.caption("Uncheck a provision to remove it from the summary. Turn on Link to place it into a lease section.")
+        command_col, count_col = st.columns([2, 3])
+        master_key = f"lb_kp_master_{Path(template['path']).stem}"
+        master_applied_key = master_key + "_applied"
+        st.session_state.setdefault(master_key, True)
+        st.session_state.setdefault(master_applied_key, True)
+        master_value = command_col.checkbox("Include all / clear all", key=master_key)
+        if master_value != st.session_state[master_applied_key]:
+            for row in draft_state["key_provisions"]:
+                row["Include"] = master_value
+            draft_state["kp_version"] += 1
+            st.session_state[master_applied_key] = master_value
+            st.rerun()
 
-        for item in detail_rows:
-            bookmark = item["bookmark"]
-            with st.container(border=True):
-                check_col, content_col = st.columns([1, 11])
-                include = check_col.checkbox(
-                    "Include",
-                    key=f"lb_kp_include_{bookmark}",
-                    label_visibility="collapsed",
-                    on_change=_lb_sync_select_all,
-                    args=(bookmark_names,),
-                )
-                content_col.markdown(f"**{item['field']}**")
-                value = content_col.text_area(
-                    "Provision value",
-                    key=f"lb_kp_value_{bookmark}",
-                    height=82,
-                    disabled=not include,
-                    label_visibility="collapsed",
-                )
-                link_col, section_col = content_col.columns([2, 5])
-                linked = link_col.checkbox(
-                    "Link to section",
-                    key=f"lb_kp_link_{bookmark}",
-                    disabled=not include,
-                )
-                target_section = section_col.selectbox(
-                    "Linked section",
-                    section_numbers,
-                    format_func=lambda number: section_labels[number],
-                    key=f"lb_kp_section_{bookmark}",
-                    disabled=not include or not linked,
-                    label_visibility="collapsed",
-                    on_change=_lb_focus_linked_section,
-                    args=(bookmark,),
-                )
-                provision_state.append({
-                    "bookmark": bookmark,
-                    "field": item["field"],
-                    "value": value,
-                    "include": include,
-                    "linked": linked,
-                    "section": target_section,
-                })
+        kp_df = pd.DataFrame(draft_state["key_provisions"])
+        edited_kp = st.data_editor(
+            kp_df,
+            hide_index=True,
+            width="stretch",
+            height=580,
+            disabled=["Field", "Bookmark"],
+            column_config={
+                "Include": st.column_config.CheckboxColumn("Use", width="small"),
+                "Field": st.column_config.TextColumn("Key Provision", width="medium"),
+                "Value": st.column_config.TextColumn("Value", width="large"),
+                "Link": st.column_config.CheckboxColumn("Link", width="small"),
+                "Section": st.column_config.SelectboxColumn("Target Section", options=section_numbers, width="small"),
+                "Bookmark": None,
+            },
+            key=f"lb_kp_editor_{Path(template['path']).stem}_{draft_state['kp_version']}",
+        )
+        draft_state["key_provisions"] = edited_kp.to_dict("records")
+        selected_count = int(edited_kp["Include"].fillna(False).sum())
+        count_col.caption(f"{selected_count} of {len(edited_kp)} key provisions included")
+
+        st.markdown("### Lease Sections")
+        st.caption("Every numbered section is listed below. Use the table to include/exclude sections, then select one to edit its language.")
+        section_rows = [
+            {
+                "Include": bool(draft_state["sections"][str(section["number"])].get("include", True)),
+                "Number": str(section["number"]),
+                "Section": section["title"],
+            }
+            for section in sections
+        ]
+        section_df = pd.DataFrame(section_rows)
+        edited_sections = st.data_editor(
+            section_df,
+            hide_index=True,
+            width="stretch",
+            height=520,
+            disabled=["Number", "Section"],
+            column_config={
+                "Include": st.column_config.CheckboxColumn("Use", width="small"),
+                "Number": st.column_config.TextColumn("#", width="small"),
+                "Section": st.column_config.TextColumn("Section", width="large"),
+            },
+            key=f"lb_section_editor_{Path(template['path']).stem}_{draft_state['section_version']}",
+        )
+        for row in edited_sections.to_dict("records"):
+            draft_state["sections"][str(row["Number"])]["include"] = bool(row["Include"])
+
+        whole_numbers = sorted(int(number) for number in section_numbers if number.isdigit())
+        missing_numbers = [number for number in range(whole_numbers[0], whole_numbers[-1] + 1) if number not in whole_numbers]
+        if missing_numbers:
+            st.warning("Source-template numbering gap: " + ", ".join(f"Section {number}" for number in missing_numbers))
+
+        selected_section = st.selectbox(
+            "Edit section",
+            section_numbers,
+            format_func=lambda number: section_labels[number],
+            key="lb_selected_section",
+        )
+        st.session_state["lb_preview_focus_section"] = selected_section
+        section_config = draft_state["sections"][selected_section]
+
+        built_variants = built_in_library.get(selected_section, {}).get("variants", [])
+        cloud_variants = (
+            saved_clause_library.get(selected_label, {}).get(selected_section, [])
+            if isinstance(saved_clause_library, dict) else []
+        )
+        variants = []
+        seen_names = set()
+        for variant in built_variants + cloud_variants:
+            if variant.get("name") and variant["name"] not in seen_names:
+                variants.append(variant)
+                seen_names.add(variant["name"])
+        variant_map = {variant["name"]: variant["text"] for variant in variants}
+        choice_options = ["Template language"] + list(variant_map.keys()) + ["Custom language"]
+        current_choice = section_config.get("choice", "Template language")
+        if current_choice not in choice_options:
+            current_choice = "Custom language"
+        choice = st.selectbox(
+            "Clause choice",
+            choice_options,
+            index=choice_options.index(current_choice),
+            key=f"lb_section_choice_{selected_section}",
+        )
+        if choice == "Template language":
+            default_text = section_by_number[selected_section]["text"]
+        elif choice == "Custom language":
+            default_text = section_config.get("text", section_by_number[selected_section]["text"])
+        else:
+            default_text = variant_map[choice]
+        text_key = f"lb_section_text_{selected_section}_{re.sub(r'[^A-Za-z0-9]+', '_', choice)}"
+        section_text = st.text_area("Section language", value=default_text, height=260, key=text_key)
+        section_config.update({"choice": choice, "text": section_text})
+
+        save_choice_col, choice_name_col = st.columns([2, 3])
+        new_choice_name = choice_name_col.text_input(
+            "New clause-choice name",
+            key=f"lb_new_choice_name_{selected_section}",
+            placeholder="e.g., Customer parking only",
+        )
+        if save_choice_col.button("Save as clause choice", key=f"lb_save_choice_{selected_section}"):
+            if not new_choice_name.strip():
+                st.warning("Enter a name for the clause choice.")
+            else:
+                updated_library = dict(saved_clause_library) if isinstance(saved_clause_library, dict) else {}
+                template_library = updated_library.setdefault(selected_label, {})
+                section_library = template_library.setdefault(selected_section, [])
+                section_library = [item for item in section_library if item.get("name") != new_choice_name.strip()]
+                section_library.append({"name": new_choice_name.strip(), "text": section_text})
+                template_library[selected_section] = section_library
+                if _write_gsheet_config("Lease Clause Library", updated_library):
+                    st.success(f"Saved clause choice: {new_choice_name.strip()}")
+                    st.rerun()
+                else:
+                    st.error("Could not save the clause choice to Google Sheets.")
+
+        st.markdown("### Save This Configuration as a Template")
+        save_name_col, save_button_col = st.columns([3, 2])
+        save_name = save_name_col.text_input("Template name", key="lb_save_template_name", placeholder="e.g., MSP NNN Retail — Restaurant")
+        if save_button_col.button("💾 Save New Template", type="primary", key="lb_save_template"):
+            if not save_name.strip():
+                st.warning("Enter a template name first.")
+            else:
+                template_config = {
+                    "base_template": selected_label,
+                    "key_provisions": draft_state["key_provisions"],
+                    "sections": draft_state["sections"],
+                    "saved_at": datetime.now().isoformat(timespec="seconds"),
+                }
+                updated_templates = dict(saved_templates)
+                updated_templates[save_name.strip()] = template_config
+                if _write_gsheet_config("Lease Builder Templates", updated_templates):
+                    st.success(f"Saved template: {save_name.strip()}")
+                    st.rerun()
+                else:
+                    st.error("Could not save the template to Google Sheets.")
 
         st.caption("Drafting tool only. Final lease language should be reviewed by New Jersey counsel.")
-        if st.button("📝 Build Word Document", type="primary", key="lb_build_word", use_container_width=True):
-            section_choices = {
-                str(section["number"]): {
-                    "include": True,
-                    "title": section["title"],
-                    "replacement_text": "",
-                }
-                for section in sections
-            }
-            bookmark_values = {
-                item["bookmark"]: item["value"] for item in provision_state
-            }
-            included_bookmarks = {
-                item["bookmark"] for item in provision_state if item["include"]
-            }
-            linked_provisions = [item for item in provision_state if item["include"] and item["linked"]]
-            try:
-                word_bytes = build_word_document(
-                    template["path"],
-                    section_choices=section_choices,
-                    bookmark_values=bookmark_values,
-                    included_bookmarks=included_bookmarks,
-                    linked_provisions=linked_provisions,
-                    additional_choices=[],
-                    clean_drafting_notes=clean_notes,
-                    document_title=draft_name,
-                )
-                st.session_state["lb_word_bytes"] = word_bytes
+
+        try:
+            live_word_bytes = _lb_build_current_word(
+                template["path"], draft_name, clean_notes, sections, draft_state
+            )
+        except Exception as exc:
+            st.error(f"Current draft could not be generated: {exc}")
+
+        if st.button("📝 Build Word Document", type="primary", key="lb_build_word", width="stretch"):
+            if live_word_bytes:
+                st.session_state["lb_word_bytes"] = live_word_bytes
                 st.session_state["lb_word_filename"] = (
                     re.sub(r"[^A-Za-z0-9._-]+", "_", draft_name).strip("_") or "MSP_Lease_Draft"
                 ) + ".docx"
-                st.success("Word draft built from the current preview selections.")
-            except Exception as exc:
-                st.error(f"Word generation failed: {exc}")
+                st.success("Word draft built from the current selections.")
+            else:
+                st.error("The Word draft is not available because generation failed.")
 
         if st.session_state.get("lb_word_bytes"):
             st.download_button(
@@ -4760,13 +4960,40 @@ def render_lease_builder_tab():
                 mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
                 type="primary",
                 key="lb_download_word",
-                use_container_width=True,
+                width="stretch",
             )
 
+    preview_sections = []
+    for section in sections:
+        number = str(section["number"])
+        config = draft_state["sections"][number]
+        preview_sections.append({
+            "number": number,
+            "title": section["title"],
+            "include": bool(config.get("include", True)),
+            "text": config.get("text", section["text"]),
+        })
+
     with right:
-        focus_section = st.session_state.get("lb_preview_focus_section", "")
-        preview_html = _lease_preview_html(provision_state, sections, focus_section)
-        st.components.v1.html(preview_html, height=1120, scrolling=True)
+        st.markdown("### Draft Preview")
+        if live_word_bytes:
+            with st.spinner("Rendering the actual Word draft…"):
+                rendered_pages = _lb_render_word_pages(live_word_bytes)
+        else:
+            rendered_pages = []
+
+        if rendered_pages:
+            st.caption("Rendered directly from the generated Word file. Numbering, included sections, and clean formatting match the downloadable draft.")
+            for page_number, page_image in enumerate(rendered_pages, start=1):
+                st.image(page_image, caption=f"Page {page_number}", width="stretch")
+        else:
+            st.caption("Exact Word rendering is unavailable on this server, so the content-faithful fallback preview is shown.")
+            preview_html = _lb_preview_html(
+                draft_state["key_provisions"],
+                preview_sections,
+                st.session_state.get("lb_preview_focus_section", ""),
+            )
+            st.components.v1.html(preview_html, height=1220, scrolling=True)
 
 
 # =====================
