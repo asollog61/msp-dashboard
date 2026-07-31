@@ -22,6 +22,7 @@ import pandas as pd
 import gspread
 from google.oauth2.service_account import Credentials
 import openpyxl
+from openpyxl.styles import Font as _XLFont
 import json
 
 try:
@@ -4768,8 +4769,7 @@ def _lb_rent_cell(value):
     return "" if text.lower() in {"nan", "none"} else text
 
 
-RENT_BASE_SHEET = "Base Rent"
-RENT_OPTION_SHEET = "Option Rent"
+RENT_SHEET_NAME = "Rent Schedule"
 RENT_COLUMNS = ["Period", "Monthly Rent", "Annual Rent"]
 
 
@@ -4797,99 +4797,216 @@ def _lb_normalize_rent_rows(rows):
     return clean
 
 
+def _lb_rent_is_absent(monthly, annual):
+    """A period with blank or zero rent does not exist.
+
+    The upload sheet uses 0 as a placeholder for options a deal never granted,
+    so a zero row is dropped exactly like an empty one.
+    """
+    for value in (monthly, annual):
+        number = _lb_money_or_none(value)
+        if number is None:
+            if str(value).strip():
+                return False  # Text such as "Free" is a real, intentional entry.
+        elif number != 0:
+            return False
+    return True
+
+
+def _lb_split_option_rows(option_rows):
+    """Group flat option rows back into blocks keyed by their option label.
+
+    'Option 1 — Year 2' carries both the block and the year, so the flat list the
+    Word builder consumes can be rebuilt into the stacked sheet layout.
+    """
+    blocks = []
+    index = {}
+    for row in option_rows or []:
+        period = str(row.get("Period", "")).strip()
+        match = re.match(r"^\s*(Option\s*\d*)\s*[—\-–:]\s*(.+)$", period, flags=re.IGNORECASE)
+        if match:
+            label = re.sub(r"\s+", " ", match.group(1)).title()
+            year = match.group(2).strip()
+        else:
+            label, year = "Option 1", period
+        if label not in index:
+            index[label] = {"label": label, "rows": []}
+            blocks.append(index[label])
+        index[label]["rows"].append({
+            "Period": year,
+            "Monthly Rent": row.get("Monthly Rent", ""),
+            "Annual Rent": row.get("Annual Rent", ""),
+        })
+    return blocks
+
+
 def _lb_export_rent_schedule_xlsx(rent_state):
-    """Write the base and option rent tables to a two-sheet workbook for offline editing."""
+    """Write the rent schedule in the upload layout.
+
+    One sheet: the base term in columns A-C under a Term header, and each option
+    as its own block in columns F-H separated by a blank row.
+    """
     rent_state = rent_state or {}
-    sheets = {
-        RENT_BASE_SHEET: _lb_normalize_rent_rows(rent_state.get("base")),
-        RENT_OPTION_SHEET: _lb_normalize_rent_rows(rent_state.get("options")),
-    }
-    defaults = _lb_default_rent_schedules()
-    if not sheets[RENT_BASE_SHEET]:
-        sheets[RENT_BASE_SHEET] = defaults["base"]
-    if not sheets[RENT_OPTION_SHEET]:
-        sheets[RENT_OPTION_SHEET] = defaults["options"]
+    base_rows = _lb_normalize_rent_rows(rent_state.get("base"))
+    option_blocks = _lb_split_option_rows(_lb_normalize_rent_rows(rent_state.get("options")))
+    if not base_rows:
+        base_rows = _lb_blank_rent_rows([f"Year {year}" for year in range(1, 11)])
+    if not option_blocks:
+        option_blocks = [
+            {"label": "Option 1", "rows": _lb_blank_rent_rows([f"Year {year}" for year in range(1, 6)])},
+            {"label": "Option 2", "rows": _lb_blank_rent_rows([f"Year {year}" for year in range(1, 6)])},
+        ]
+
+    workbook = openpyxl.Workbook()
+    worksheet = workbook.active
+    worksheet.title = RENT_SHEET_NAME
+    money_format = '"$"#,##0.00'
+
+    def write_cell(row_index, column_index, value, is_money=False):
+        cell = worksheet.cell(row=row_index, column=column_index)
+        if is_money:
+            number = _lb_money_or_none(value)
+            cell.value = number if number is not None else (str(value).strip() or None)
+            if number is not None:
+                cell.number_format = money_format
+        else:
+            cell.value = value
+        return cell
+
+    header_font = _XLFont(bold=True)
+    for column, title in ((1, "Term"), (2, "Monthly Amount"), (3, "Annual Amount")):
+        write_cell(1, column, title).font = header_font
+    for offset, row in enumerate(base_rows, start=2):
+        write_cell(offset, 1, row.get("Period", ""))
+        write_cell(offset, 2, row.get("Monthly Rent", ""), is_money=True)
+        write_cell(offset, 3, row.get("Annual Rent", ""), is_money=True)
+
+    cursor = 1
+    for block in option_blocks:
+        for column, title in ((6, block["label"]), (7, "Monthly Amount"), (8, "Annual Amount")):
+            write_cell(cursor, column, title).font = header_font
+        cursor += 1
+        for row in block["rows"]:
+            write_cell(cursor, 6, row.get("Period", ""))
+            write_cell(cursor, 7, row.get("Monthly Rent", ""), is_money=True)
+            write_cell(cursor, 8, row.get("Annual Rent", ""), is_money=True)
+            cursor += 1
+        cursor += 1  # Blank spacer row between option blocks.
+
+    for column, width in (("A", 16), ("B", 18), ("C", 18), ("D", 3), ("E", 3), ("F", 16), ("G", 18), ("H", 18)):
+        worksheet.column_dimensions[column].width = width
+    worksheet.freeze_panes = "A2"
 
     output = BytesIO()
-    with pd.ExcelWriter(output, engine="openpyxl") as writer:
-        for sheet_name, rows in sheets.items():
-            frame = pd.DataFrame(rows, columns=RENT_COLUMNS)
-            # Write rents as real numbers so Excel math and fill-down work naturally.
-            for column in ("Monthly Rent", "Annual Rent"):
-                frame[column] = [
-                    _lb_money_or_none(value) if _lb_money_or_none(value) is not None else value
-                    for value in frame[column]
-                ]
-            frame.to_excel(writer, index=False, sheet_name=sheet_name)
-            worksheet = writer.book[sheet_name]
-            worksheet.freeze_panes = "A2"
-            worksheet.column_dimensions["A"].width = 30
-            worksheet.column_dimensions["B"].width = 18
-            worksheet.column_dimensions["C"].width = 18
-            for excel_row in worksheet.iter_rows(min_row=2, min_col=2, max_col=3):
-                for cell in excel_row:
-                    cell.number_format = '"$"#,##0.00'
+    workbook.save(output)
     return output.getvalue()
 
 
-def _lb_import_rent_schedule_xlsx(uploaded_file):
-    """Read an edited rent workbook back into {'base': [...], 'options': [...]}.
+def _lb_read_rent_block(grid, start_row, start_col, stop_labels):
+    """Read Period/Monthly/Annual down from a header cell until the block ends."""
+    rows = []
+    row_index = start_row + 1
+    while row_index < len(grid):
+        line = grid[row_index]
+        period = str(line[start_col]).strip() if start_col < len(line) else ""
+        monthly = line[start_col + 1] if start_col + 1 < len(line) else ""
+        annual = line[start_col + 2] if start_col + 2 < len(line) else ""
+        if not period and not str(monthly).strip() and not str(annual).strip():
+            break  # Blank row closes the block.
+        if period.strip().lower() in stop_labels:
+            break  # Next block's header closes this one.
+        rows.append({"Period": period, "Monthly Rent": monthly, "Annual Rent": annual})
+        row_index += 1
+    return rows
 
-    Accepts the two-sheet layout produced by the download, a single sheet with a
-    Schedule column, or a single sheet treated entirely as the base table.
+
+def _lb_import_rent_schedule_xlsx(uploaded_file):
+    """Read an uploaded rent workbook into {'base': [...], 'options': [...]}.
+
+    Primary layout is the upload sheet: a Term block in columns A-C and any
+    number of stacked Option blocks elsewhere on the same sheet. The older
+    two-sheet Base Rent / Option Rent workbook is still accepted so previously
+    downloaded files keep working. Blank or zero periods are dropped, and an
+    option whose every year is blank or zero is treated as not granted.
     """
     uploaded_file.seek(0)
-    book = pd.read_excel(uploaded_file, sheet_name=None, dtype=object)
-    if not book:
-        raise ValueError("The workbook has no sheets.")
+    workbook = openpyxl.load_workbook(uploaded_file, data_only=True)
 
-    aliases = {
-        "period": "Period", "year": "Period", "term": "Period",
-        "monthly rent": "Monthly Rent", "monthly": "Monthly Rent", "rent/month": "Monthly Rent",
-        "annual rent": "Annual Rent", "annual": "Annual Rent", "yearly rent": "Annual Rent",
-        "schedule": "Schedule", "table": "Schedule", "type": "Schedule",
-    }
+    base_rows = []
+    option_rows = []
+    found_block = False
 
-    def read_sheet(frame):
-        frame = frame.astype(object).where(frame.notna(), "")
-        mapping = {}
-        for column in frame.columns:
-            key = aliases.get(str(column).strip().lower())
-            if key and key not in mapping.values():
-                mapping[column] = key
-        frame = frame.rename(columns=mapping)
-        if "Period" not in frame.columns:
-            raise ValueError("Each sheet needs a Period column (plus Monthly Rent and Annual Rent).")
-        for column in RENT_COLUMNS:
-            if column not in frame.columns:
-                frame[column] = ""
-        keep = RENT_COLUMNS + (["Schedule"] if "Schedule" in frame.columns else [])
-        return frame[keep].to_dict("records")
+    for worksheet in workbook.worksheets:
+        grid = [
+            ["" if value is None else value for value in row]
+            for row in worksheet.iter_rows(values_only=True)
+        ]
+        if not grid:
+            continue
+        width = max(len(row) for row in grid)
+        grid = [list(row) + [""] * (width - len(row)) for row in grid]
 
-    base_rows, option_rows = [], []
-    matched_named_sheet = False
-    for sheet_name, frame in book.items():
-        rows = read_sheet(frame)
-        label = str(sheet_name).strip().lower()
-        if "option" in label:
-            option_rows.extend(rows)
-            matched_named_sheet = True
-        elif "base" in label:
-            base_rows.extend(rows)
-            matched_named_sheet = True
-        elif len(book) == 1:
-            for row in rows:
-                bucket = str(row.get("Schedule", "")).strip().lower()
-                target = option_rows if "option" in bucket else base_rows
-                target.append(row)
-        else:
-            base_rows.extend(rows)
-    if not matched_named_sheet and not base_rows and not option_rows:
-        raise ValueError("No rent rows found in the workbook.")
+        # Locate every block header on this sheet before reading any of them, so
+        # a block knows where the next one starts.
+        base_headers, option_headers = [], []
+        for row_index, line in enumerate(grid):
+            for col_index, value in enumerate(line):
+                label = re.sub(r"\s+", " ", str(value)).strip()
+                if not label:
+                    continue
+                if label.lower() in {"term", "period", "base rent", "base term"}:
+                    base_headers.append((row_index, col_index))
+                elif re.fullmatch(r"option\s*\d*", label, flags=re.IGNORECASE):
+                    option_headers.append((row_index, col_index, label.title()))
+
+        stop_labels = {"term", "period", "base rent", "base term"}
+        stop_labels |= {label.lower() for _, _, label in option_headers}
+
+        # A legacy "Option Rent" sheet also heads its table with Period, so the
+        # sheet name decides where a generic header's rows belong.
+        sheet_is_option = "option" in str(worksheet.title).strip().lower()
+        for row_index, col_index in base_headers:
+            found_block = True
+            rows = _lb_read_rent_block(grid, row_index, col_index, stop_labels)
+            (option_rows if sheet_is_option else base_rows).extend(rows)
+
+        for row_index, col_index, label in option_headers:
+            found_block = True
+            block = _lb_read_rent_block(grid, row_index, col_index, stop_labels)
+            live = [
+                row for row in block
+                if not _lb_rent_is_absent(row.get("Monthly Rent", ""), row.get("Annual Rent", ""))
+            ]
+            if not live:
+                continue  # Every year blank or zero: this option was not granted.
+            for row in live:
+                year = str(row.get("Period", "")).strip()
+                row["Period"] = f"{label} — {year}" if year else label
+            option_rows.extend(live)
+
+        # Fall back to the older two-sheet workbook, which has no Term header.
+        if not base_headers and not option_headers:
+            title = str(worksheet.title).strip().lower()
+            legacy = _lb_read_rent_block(grid, 0, 0, set())
+            if legacy:
+                found_block = True
+                (option_rows if "option" in title else base_rows).extend(legacy)
+
+    if not found_block:
+        raise ValueError(
+            "No rent tables found. Expected a 'Term' header above the base years, "
+            "and an 'Option 1' header above each option."
+        )
+
+    def live_only(rows):
+        return [
+            row for row in rows
+            if not _lb_rent_is_absent(row.get("Monthly Rent", ""), row.get("Annual Rent", ""))
+        ]
 
     return {
-        "base": _lb_normalize_rent_rows(base_rows),
-        "options": _lb_normalize_rent_rows(option_rows),
+        "base": _lb_normalize_rent_rows(live_only(base_rows)),
+        "options": _lb_normalize_rent_rows(live_only(option_rows)),
     }
 
 
@@ -5550,9 +5667,11 @@ def render_lease_builder_tab():
                         st.error(f"Rent schedule import failed: {exc}")
 
                 st.caption(
-                    "Workbook layout: a **Base Rent** sheet and an **Option Rent** sheet, each with "
-                    "Period, Monthly Rent, and Annual Rent columns. Add or delete rows freely — "
-                    "row count is not fixed. Blank rows are ignored."
+                    "Workbook layout: the base term under a **Term** header in columns A–C, and each "
+                    "option under an **Option 1 / Option 2 …** header in columns F–H, separated by a "
+                    "blank row. Add or delete rows and option blocks freely. **A year left blank or "
+                    "set to 0 does not exist**, and an option whose every year is blank or 0 is "
+                    "dropped entirely."
                 )
 
                 st.markdown("#### Base Rent Table")
