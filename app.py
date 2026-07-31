@@ -13,6 +13,7 @@ import tempfile
 import time
 from datetime import datetime, date, timedelta
 from pathlib import Path
+from uuid import uuid4
 
 import pandas as pd
 import gspread
@@ -4540,10 +4541,15 @@ def _lb_section_body(section_number, text):
 
 def _lb_preview_html(key_provisions, preview_sections, focus_section=""):
     selected_provisions = [item for item in key_provisions if bool(item.get("Include"))]
+    section_name_to_number = {
+        f"Section {section['number']} — {section['title']}": str(section['number'])
+        for section in preview_sections
+    }
     linked_by_section = {}
     for item in selected_provisions:
         if bool(item.get("Link")) and item.get("Section"):
-            linked_by_section.setdefault(str(item["Section"]), []).append(item)
+            target = section_name_to_number.get(str(item["Section"]), str(item["Section"]))
+            linked_by_section.setdefault(target, []).append(item)
 
     summary_rows = "".join(
         "<tr><th>" + html_lib.escape(str(item.get("Field", ""))) + "</th><td>" +
@@ -4611,6 +4617,10 @@ def _lb_preview_html(key_provisions, preview_sections, focus_section=""):
 
 
 def _lb_build_current_word(template_path, draft_name, clean_notes, sections, draft_state):
+    section_labels = {
+        f"Section {section['number']} — {section['title']}": str(section['number'])
+        for section in sections
+    }
     section_choices = {}
     for section in sections:
         number = str(section["number"])
@@ -4638,9 +4648,19 @@ def _lb_build_current_word(template_path, draft_name, clean_notes, sections, dra
             "field": row.get("Field", "Key Provision"),
             "value": row.get("Value", ""),
             "include": bool(row.get("Include")),
-            "section": str(row.get("Section", "")),
+            "section": section_labels.get(str(row.get("Section", "")), str(row.get("Section", ""))),
         }
         for row in draft_state["key_provisions"] if bool(row.get("Link"))
+    ]
+    custom_provisions = [
+        {
+            "field": row.get("Field", "Key Provision"),
+            "value": row.get("Value", ""),
+            "include": bool(row.get("Include")),
+            "section": section_labels.get(str(row.get("Section", "")), str(row.get("Section", ""))),
+        }
+        for row in draft_state["key_provisions"]
+        if str(row.get("Bookmark", "")).startswith("Custom_")
     ]
     return build_word_document(
         template_path,
@@ -4648,6 +4668,7 @@ def _lb_build_current_word(template_path, draft_name, clean_notes, sections, dra
         bookmark_values=bookmark_values,
         included_bookmarks=included_bookmarks,
         linked_provisions=linked_provisions,
+        custom_provisions=custom_provisions,
         additional_choices=[],
         clean_drafting_notes=clean_notes,
         document_title=draft_name,
@@ -4720,6 +4741,7 @@ def render_lease_builder_tab():
 
     saved_templates = _read_gsheet_config("Lease Builder Templates") or {}
     saved_clause_library = _read_gsheet_config("Lease Clause Library") or {}
+    saved_value_choices = _read_gsheet_config("Lease Provision Values") or {}
     built_in_library = load_clause_library().get("sections", {})
 
     header1, header2, header3, header4 = st.columns([3, 2, 2, 1])
@@ -4757,7 +4779,7 @@ def render_lease_builder_tab():
                     "Field": item["field"],
                     "Value": item["value"],
                     "Link": item["bookmark"] in LEASE_DEFAULT_LINKS,
-                    "Section": LEASE_DEFAULT_LINKS.get(item["bookmark"], section_numbers[0]),
+                    "Section": section_labels.get(str(LEASE_DEFAULT_LINKS.get(item["bookmark"], section_numbers[0])), section_labels[section_numbers[0]]),
                     "Bookmark": item["bookmark"],
                 }
                 for item in template_data["bookmarks"]
@@ -4783,7 +4805,8 @@ def render_lease_builder_tab():
         provision.setdefault("Group", "Mandatory" if bookmark in LEASE_MANDATORY_BOOKMARKS else "Optional")
         provision.setdefault("Include", True)
         provision.setdefault("Link", bookmark in LEASE_DEFAULT_LINKS)
-        provision.setdefault("Section", LEASE_DEFAULT_LINKS.get(bookmark, section_numbers[0]))
+        raw_section = provision.get("Section", LEASE_DEFAULT_LINKS.get(bookmark, section_numbers[0]))
+        provision["Section"] = section_labels.get(str(raw_section), str(raw_section) if str(raw_section) in section_labels.values() else section_labels[section_numbers[0]])
 
     load_marker = f"{selected_label}|{saved_choice}"
     if saved_choice != "Current Draft" and st.session_state.get("lb_loaded_saved_marker") != load_marker:
@@ -4820,85 +4843,111 @@ def render_lease_builder_tab():
             st.session_state[master_applied_key] = master_value
             st.rerun()
 
-        # Drag provisions between Mandatory and Optional; the two grids below retain their controls.
-        bookmark_to_row = {row.get("Bookmark", ""): row for row in draft_state["key_provisions"]}
-        # Sortable labels are display-only. Never expose bookmark/internal names in the UI.
-        label_to_bookmark = {
-            BOOKMARK_LABELS.get(str(row.get("Bookmark", "")), str(row.get("Field", "Key Provision")).split(" — ")[0].split(" · ")[0].strip()): row.get("Bookmark", "")
+        # One ordered list: every row has its own Mandatory/Optional dropdown.
+        # Checked items are always kept above unchecked items; drag changes order within those bands.
+        draft_state["key_provisions"] = sorted(
+            draft_state["key_provisions"],
+            key=lambda row: 0 if bool(row.get("Include")) else 1,
+        )
+        field_to_bookmark = {
+            str(row.get("Field", "Key Provision")): str(row.get("Bookmark", ""))
             for row in draft_state["key_provisions"]
         }
-        mandatory_labels = [
-            label for label, bookmark in label_to_bookmark.items()
-            if bookmark_to_row[bookmark].get("Group") == "Mandatory"
-        ]
-        optional_labels = [
-            label for label, bookmark in label_to_bookmark.items()
-            if bookmark_to_row[bookmark].get("Group") != "Mandatory"
-        ]
+        order_labels = list(field_to_bookmark)
         if HAS_SORTABLES:
-            grouped_items = sort_items(
-                [
-                    {"header": "Mandatory Key Provisions", "items": mandatory_labels},
-                    {"header": "Optional Key Provisions", "items": optional_labels},
-                ],
-                multi_containers=True,
-                direction="horizontal",
+            dragged_labels = sort_items(
+                order_labels,
+                header="Drag to reorder key provisions",
+                direction="vertical",
                 custom_style="""
-                    .sortable-container { min-width: 230px; background: #161b22; border: 1px solid #2d333b; border-radius: 8px; }
-                    .sortable-container-header { font-weight: 700; padding: 10px 12px; color: #c8d4ff; }
-                    .sortable-item { margin: 5px 8px; padding: 8px 10px; border-radius: 5px; background: #26354d; color: #e6edf3; cursor: grab; font-size: 12px; }
+                    .sortable-component.vertical { max-height: 280px; overflow-y: auto; background: #161b22; border: 1px solid #2d333b; border-radius: 8px; padding: 6px; }
+                    .sortable-item { margin: 4px; padding: 7px 10px; border-radius: 5px; background: #26354d; color: #e6edf3; cursor: grab; font-size: 12px; }
                 """,
-                # v3 key forces streamlit-sortables to discard its old internal-label state.
-                key=f"lb_kp_groups_v3_{Path(template['path']).stem}",
+                key=f"lb_kp_order_v4_{Path(template['path']).stem}",
             )
-            reordered = []
-            for container in grouped_items:
-                group_name = "Mandatory" if container.get("header") == "Mandatory Key Provisions" else "Optional"
-                for label in container.get("items", []):
-                    bookmark = label_to_bookmark.get(label)
-                    if bookmark:
-                        row = bookmark_to_row[bookmark]
-                        row["Group"] = group_name
-                        reordered.append(row)
+            row_by_bookmark = {str(row.get("Bookmark", "")): row for row in draft_state["key_provisions"]}
+            reordered = [row_by_bookmark[field_to_bookmark[label]] for label in dragged_labels if label in field_to_bookmark]
             if len(reordered) == len(draft_state["key_provisions"]):
                 draft_state["key_provisions"] = reordered
         else:
-            st.info("Install streamlit-sortables to enable drag-and-drop grouping.")
+            st.info("Install streamlit-sortables to enable drag-to-reorder.")
 
-        st.caption("Edit **Use**, **Value**, **Link**, and **Target Section** within the group where the provision lives.")
-        grouped_rows = []
-        for group_name in ("Mandatory", "Optional"):
-            st.markdown(f"#### {group_name} Provisions")
-            group_df = pd.DataFrame([
-                row for row in draft_state["key_provisions"] if row.get("Group") == group_name
-            ])
-            if group_df.empty:
-                st.info(f"Drag provisions here to make them {group_name.lower()}.")
-                continue
-            edited_group = st.data_editor(
-                group_df,
-                hide_index=True,
-                width="stretch",
-                height=min(460, 76 + len(group_df) * 36),
-                disabled=["Field", "Bookmark", "Group"],
-                column_config={
-                    "Group": None,
-                    "Include": st.column_config.CheckboxColumn("Use", width="small"),
-                    "Field": st.column_config.TextColumn("Key Provision", width="medium"),
-                    "Value": st.column_config.TextColumn("Value", width="large"),
-                    "Link": st.column_config.CheckboxColumn("Link", width="small"),
-                    "Section": st.column_config.SelectboxColumn("Target Section", options=section_numbers, width="small"),
-                    "Bookmark": None,
-                },
-                key=f"lb_kp_editor_{group_name.lower()}_{Path(template['path']).stem}_{draft_state['kp_version']}",
-            )
-            grouped_rows.extend(edited_group.to_dict("records"))
-        if grouped_rows:
-            draft_state["key_provisions"] = grouped_rows
-        all_kp = pd.DataFrame(draft_state["key_provisions"])
-        selected_count = int(all_kp["Include"].fillna(False).sum())
-        mandatory_count = int((all_kp["Group"] == "Mandatory").sum())
-        count_col.caption(f"{mandatory_count} mandatory · {len(all_kp) - mandatory_count} optional · {selected_count} used")
+        st.caption("Use the Group dropdown to classify each provision. Dragging changes the document order; checked provisions stay above unchecked provisions.")
+        kp_df = pd.DataFrame(draft_state["key_provisions"])
+        edited_kp = st.data_editor(
+            kp_df,
+            hide_index=True,
+            width="stretch",
+            height=min(650, 86 + len(kp_df) * 34),
+            disabled=["Field", "Bookmark"],
+            column_config={
+                "Group": st.column_config.SelectboxColumn("Group", options=["Mandatory", "Optional"], width="small"),
+                "Include": st.column_config.CheckboxColumn("Use", width="small"),
+                "Field": st.column_config.TextColumn("Key Provision", width="medium"),
+                "Value": st.column_config.TextColumn("Value", width="large"),
+                "Link": st.column_config.CheckboxColumn("Link", width="small"),
+                "Section": st.column_config.SelectboxColumn("Target Section", options=list(section_labels.values()), width="medium"),
+                "Bookmark": None,
+            },
+            key=f"lb_kp_editor_v4_{Path(template['path']).stem}_{draft_state['kp_version']}",
+        )
+        draft_state["key_provisions"] = edited_kp.to_dict("records")
+        selected_count = int(edited_kp["Include"].fillna(False).sum())
+        count_col.caption(f"{selected_count} used · {len(edited_kp) - selected_count} excluded")
+
+        # Add a new custom key provision.
+        with st.expander("➕ Add Key Provision", expanded=False):
+            with st.form("lb_add_key_provision", clear_on_submit=True):
+                add_name, add_group = st.columns([3, 2])
+                new_field = add_name.text_input("Provision name", placeholder="e.g., Garbage Service")
+                new_group = add_group.selectbox("Group", ["Mandatory", "Optional"])
+                new_value = st.text_area("Initial value", placeholder="Enter the provision value")
+                add_link, add_section = st.columns([1, 3])
+                new_link = add_link.checkbox("Link to section")
+                new_section = add_section.selectbox("Target Section", list(section_labels.values()), disabled=not new_link)
+                add_submitted = st.form_submit_button("Add Provision")
+            if add_submitted:
+                if not new_field.strip():
+                    st.warning("Enter a provision name first.")
+                else:
+                    new_bookmark = "Custom_" + uuid4().hex[:12]
+                    draft_state["key_provisions"].append({
+                        "Group": new_group,
+                        "Include": True,
+                        "Field": new_field.strip(),
+                        "Value": new_value.strip(),
+                        "Link": new_link,
+                        "Section": new_section,
+                        "Bookmark": new_bookmark,
+                    })
+                    draft_state["kp_version"] += 1
+                    st.rerun()
+
+        # Saved value choices for the currently selected provision.
+        st.markdown("#### Saved Values")
+        provision_options = [str(row.get("Field", "Key Provision")) for row in draft_state["key_provisions"]]
+        selected_value_field = st.selectbox("Provision", provision_options, key="lb_value_choice_field")
+        selected_value_row = next(row for row in draft_state["key_provisions"] if row.get("Field") == selected_value_field)
+        value_key = str(selected_value_row.get("Bookmark") or selected_value_field)
+        template_values = saved_value_choices.setdefault(selected_label, {}) if isinstance(saved_value_choices, dict) else {}
+        saved_values = list(template_values.get(value_key, []))
+        choice_options = ["Current value"] + saved_values
+        selected_choice = st.selectbox("Saved value", choice_options, key=f"lb_value_choice_{value_key}")
+        if selected_choice != "Current value":
+            selected_value_row["Value"] = selected_choice
+        edited_value = st.text_area("Edit value", value=str(selected_value_row.get("Value", "")), key=f"lb_value_edit_{value_key}", height=90)
+        selected_value_row["Value"] = edited_value
+        if st.button("Save Current Value as Choice", key=f"lb_save_value_{value_key}"):
+            if edited_value.strip():
+                template_values.setdefault(value_key, [])
+                saved_text = edited_value.strip()
+                template_values[value_key] = [v for v in template_values[value_key] if v != saved_text]
+                template_values[value_key].append(saved_text)
+                if _write_gsheet_config("Lease Provision Values", saved_value_choices):
+                    st.success("Saved value choice.")
+                    st.rerun()
+            else:
+                st.warning("Enter a value before saving it as a choice.")
 
         st.markdown("### Lease Sections")
         st.caption("Every numbered section is listed below. Use the table to include/exclude sections, then select one to edit its language.")

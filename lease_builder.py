@@ -432,6 +432,7 @@ def build_word_document(
     bookmark_values: dict[str, str] | None = None,
     included_bookmarks: set[str] | list[str] | None = None,
     linked_provisions: list[dict[str, Any]] | None = None,
+    custom_provisions: list[dict[str, Any]] | None = None,
     additional_choices: list[dict[str, Any]] | None = None,
     clean_drafting_notes: bool = True,
     document_title: str = "MSP Lease Draft",
@@ -465,6 +466,20 @@ def build_word_document(
 
     if included_bookmarks is not None:
         _apply_key_provision_inclusions(document, set(included_bookmarks))
+
+    if custom_provisions and document.tables:
+        table = document.tables[0]
+        for item in custom_provisions:
+            if not item.get("include"):
+                continue
+            field = str(item.get("field", "Key Provision")).strip()
+            value = str(item.get("value", "")).strip()
+            if not field or not value:
+                continue
+            row = table.add_row()
+            row.cells[0].text = field
+            row.cells[1].text = value
+            row.cells[2].text = value
 
     current_sections = {section["number"]: section for section in scan_sections(document)}
     current_paragraphs = list(document.paragraphs)
