@@ -5926,19 +5926,19 @@ def render_lease_builder_tab():
         section_config.update({"choice": choice, "text": section_text})
 
         st.caption(
-            "Cite a key provision by typing **KP:** followed by its exact name — for example "
-            "`KP:Lease Execution Date`. The value from the Key Provisions summary is substituted "
-            "when the document is built, and the provision's Linked column updates automatically."
+            "Cite a key provision with **[KP:Name]** — for example `[KP:Lease Execution Date]`. "
+            "The value from the Key Provisions summary is substituted when the document is built, "
+            "printed in green as a link back up to that row, and the Linked column updates itself."
         )
         cited_here = sorted(find_kp_references(
             section_text, [str(r.get("Field", "")) for r in draft_state["key_provisions"]]
         ))
         if cited_here:
-            st.caption("Cited in this section: " + ", ".join(f"`KP:{name}`" for name in cited_here))
-        with st.popover("📋 Key provision names", width="stretch"):
-            st.caption("Copy a name into the clause text after KP:")
+            st.caption("Cited in this section: " + ", ".join(f"`[KP:{name}]`" for name in cited_here))
+        with st.popover("📋 Key provision tokens", width="stretch"):
+            st.caption("Copy a token into the clause text.")
             for row in draft_state["key_provisions"]:
-                st.code(f"KP:{row.get('Field', '')}", language=None)
+                st.code(f"[KP:{row.get('Field', '')}]", language=None)
 
         approved_texts = [section_by_number[selected_section]["text"]] + _lb_section_variant_texts(
             selected_label, selected_section, built_in_library, saved_clause_library
@@ -6176,10 +6176,10 @@ def render_lease_builder_tab():
                 f"⚠️ {len(unresolved) + len(blank_refs)} cross-reference issue(s)", expanded=bool(unresolved)
             ):
                 if unresolved:
-                    st.markdown("**Unrecognised `KP:` names** — these print as-is, so fix the spelling "
+                    st.markdown("**Unrecognised tokens** — these print literally, so fix the spelling "
                                 "or add the provision:")
                     for name in unresolved:
-                        st.markdown(f"- `KP:{name}`")
+                        st.markdown(f"- `[KP:{name}]`")
                 if blank_refs:
                     st.markdown("**Cited but not used in this lease** — these resolve to nothing, "
                                 "leaving a gap in the clause:")

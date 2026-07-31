@@ -403,9 +403,20 @@ ANCHOR_PREFIX = "_MSP_Sec_"
 # Execution Date resolves to that provision rather than stopping at "Lease".
 # ---------------------------------------------------------------------------
 
-KP_PREFIX_RE = re.compile(r"\bKPS?:\s*", re.IGNORECASE)
-# Used only to report a token whose name matches no provision.
-KP_LOOSE_RE = re.compile(r"\bKPS?:\s*([A-Za-z][A-Za-z0-9 _/&'\-]*)", re.IGNORECASE)
+# The closing bracket delimits the name, so multi-word provisions need no
+# guessing and a misspelled name is reported exactly as typed.
+KP_TOKEN_RE = re.compile(r"\[\s*KPS?\s*:\s*([^\]]+?)\s*\]", re.IGNORECASE)
+KP_ANCHOR_PREFIX = "_MSP_KP_"
+# Green so a substituted cross-reference is obvious against the black body text.
+KP_LINK_COLOR = "1F7A33"
+
+
+def kp_token(name: str) -> str:
+    return f"[KP:{name}]"
+
+
+def _kp_anchor_name(field: str) -> str:
+    return KP_ANCHOR_PREFIX + re.sub(r"[^A-Za-z0-9_]", "_", str(field))[:24]
 
 
 def humanize_bookmark(bookmark: str) -> str:
@@ -416,57 +427,47 @@ def humanize_bookmark(bookmark: str) -> str:
     return re.sub(r"\s+", " ", spaced).strip() or str(bookmark)
 
 
-def _kp_token_pattern(names: Any) -> Any:
-    """Match KP:<name> for known names, longest first so prefixes lose."""
-    ordered = sorted({str(name).strip() for name in names if str(name).strip()},
-                     key=len, reverse=True)
-    if not ordered:
-        return None
-    alternation = "|".join(re.escape(name) for name in ordered)
-    return re.compile(r"\bKPS?:\s*(" + alternation + r")", re.IGNORECASE)
+def _kp_segments(text: str, values: dict[str, str], lookup: dict[str, str]) -> tuple[list, set, set]:
+    """Split text into plain and cross-reference pieces.
+
+    Each piece is (kind, text, provision_name). An unrecognised token is left
+    visible so it cannot slip into a signed lease unnoticed.
+    """
+    segments: list[tuple[str, str, str | None]] = []
+    referenced: set[str] = set()
+    unresolved: set[str] = set()
+    position = 0
+    source = str(text or "")
+    for match in KP_TOKEN_RE.finditer(source):
+        if position < match.start():
+            segments.append(("text", source[position:match.start()], None))
+        raw = match.group(1).strip()
+        actual = lookup.get(raw.lower())
+        if actual is None:
+            unresolved.add(raw)
+            segments.append(("text", match.group(0), None))
+        else:
+            referenced.add(actual)
+            # An unused provision resolves to nothing; the caller reports it.
+            segments.append(("link", str(values.get(actual, "") or ""), actual))
+        position = match.end()
+    if position < len(source):
+        segments.append(("text", source[position:], None))
+    return segments, referenced, unresolved
 
 
 def resolve_kp_text(text: str, values: dict[str, str]) -> tuple[str, set[str], set[str]]:
-    """Substitute KP: tokens in a string.
-
-    Returns the resolved text, the provision names it referenced, and any token
-    names that matched no provision.
-    """
-    source = str(text or "")
-    if ":" not in source:
-        return source, set(), set()
-
-    referenced: set[str] = set()
+    """Plain-text substitution of [KP:Name] tokens, used for previews."""
     lookup = {str(name).strip().lower(): name for name in values}
-    pattern = _kp_token_pattern(values.keys())
-
-    if pattern is not None:
-        def swap(match: Any) -> str:
-            actual = lookup.get(match.group(1).strip().lower())
-            if actual is None:
-                return match.group(0)
-            referenced.add(actual)
-            # An unused provision resolves to nothing; the caller reports it.
-            return str(values.get(actual, "") or "")
-
-        source = pattern.sub(swap, source)
-
-    unresolved = {
-        match.group(1).strip()
-        for match in KP_LOOSE_RE.finditer(source)
-        if match.group(1).strip()
-    }
-    return source, referenced, unresolved
+    segments, referenced, unresolved = _kp_segments(text, values, lookup)
+    return "".join(piece for _, piece, _ in segments), referenced, unresolved
 
 
 def find_kp_references(text: str, names: Any) -> set[str]:
-    """Provision names cited by KP: tokens in a piece of clause text."""
-    pattern = _kp_token_pattern(names)
-    if pattern is None or ":" not in str(text or ""):
-        return set()
-    lookup = {str(name).strip().lower(): name for name in names}
+    """Provision names cited by [KP:Name] tokens in a piece of clause text."""
+    lookup = {str(name).strip().lower(): str(name) for name in names}
     found = set()
-    for match in pattern.finditer(str(text)):
+    for match in KP_TOKEN_RE.finditer(str(text or "")):
         actual = lookup.get(match.group(1).strip().lower())
         if actual:
             found.add(actual)
@@ -534,7 +535,7 @@ def _convert_ref_fields_in_paragraph(paragraph: Paragraph, names_by_id: dict[str
             for stale in list(run.findall(tag)):
                 run.remove(stale)
         text_element = OxmlElement("w:t")
-        text_element.text = f"KP:{name}"
+        text_element.text = kp_token(name)
         text_element.set(qn("xml:space"), "preserve")
         run.append(text_element)
         body.insert(start_index, run)
@@ -563,32 +564,90 @@ def convert_ref_fields_to_tokens(document: Document, names_by_id: dict[str, str]
     )
 
 
-def _set_paragraph_text_keeping_style(paragraph: Paragraph, text: str) -> None:
-    runs = paragraph.runs
-    if runs:
-        runs[0].text = text
-        for run in runs[1:]:
-            parent = run._element.getparent()
-            if parent is not None:
-                parent.remove(run._element)
+def _clone_run(prototype: Any, text: str) -> Any:
+    """A run carrying the paragraph's existing character formatting."""
+    if prototype is not None:
+        run = copy.deepcopy(prototype)
+        for tag in (qn("w:t"), qn("w:fldChar"), qn("w:instrText"), qn("w:br")):
+            for stale in list(run.findall(tag)):
+                run.remove(stale)
     else:
-        paragraph.add_run(text)
+        run = OxmlElement("w:r")
+    text_element = OxmlElement("w:t")
+    text_element.text = text
+    text_element.set(qn("xml:space"), "preserve")
+    run.append(text_element)
+    return run
 
 
-def substitute_kp_tokens(document: Document, values: dict[str, str]) -> tuple[set[str], set[str]]:
-    """Replace KP: tokens throughout the document. Returns (referenced, unresolved)."""
+def _green_link_run(prototype: Any, text: str) -> Any:
+    """A cross-reference run: green and underlined so it reads as a link."""
+    run = _clone_run(prototype, text)
+    properties = run.find(qn("w:rPr"))
+    if properties is None:
+        properties = OxmlElement("w:rPr")
+        run.insert(0, properties)
+    for tag in (qn("w:color"), qn("w:u")):
+        for stale in list(properties.findall(tag)):
+            properties.remove(stale)
+    color = OxmlElement("w:color")
+    color.set(qn("w:val"), KP_LINK_COLOR)
+    properties.append(color)
+    underline = OxmlElement("w:u")
+    underline.set(qn("w:val"), "single")
+    properties.append(underline)
+    return run
+
+
+def substitute_kp_tokens(
+    document: Document,
+    values: dict[str, str],
+    kp_anchors: dict[str, str] | None = None,
+) -> tuple[set[str], set[str]]:
+    """Replace [KP:Name] tokens throughout the document.
+
+    A resolved value becomes a green underlined hyperlink pointing back up to
+    that provision's row in the Key Provisions summary. Returns the provision
+    names referenced and any token names that matched nothing.
+    """
+    kp_anchors = kp_anchors or {}
+    lookup = {str(name).strip().lower(): name for name in values}
     referenced: set[str] = set()
     unresolved: set[str] = set()
+
     for paragraph in _iter_all_paragraphs(document):
         original = paragraph.text
-        if ":" not in original:
+        if "[" not in original or ":" not in original:
             continue
-        resolved, found, missing = resolve_kp_text(original, values)
+        segments, found, missing = _kp_segments(original, values, lookup)
         referenced |= found
         unresolved |= missing
-        if resolved != original:
-            # Only paragraphs that actually contain a token are rewritten.
-            _set_paragraph_text_keeping_style(paragraph, resolved)
+        if not any(kind == "link" for kind, _, _ in segments) and not missing:
+            continue
+
+        runs = paragraph.runs
+        prototype = runs[0]._element if runs else None
+        body = paragraph._p
+        for child in list(body):
+            if child.tag in (qn("w:r"), qn("w:hyperlink")):
+                body.remove(child)
+
+        for kind, piece, name in segments:
+            if not piece:
+                continue  # An excluded provision contributes nothing.
+            if kind == "text":
+                body.append(_clone_run(prototype, piece))
+                continue
+            anchor = kp_anchors.get(name)
+            run = _green_link_run(prototype, piece)
+            if anchor:
+                link = OxmlElement("w:hyperlink")
+                link.set(qn("w:anchor"), anchor)
+                link.append(run)
+                body.append(link)
+            else:
+                body.append(run)
+
     return referenced, unresolved
 
 
@@ -663,14 +722,14 @@ def _rebuild_key_provision_table(
     document: Document,
     provisions: list[dict[str, Any]],
     anchors: dict[str, str],
-) -> None:
+) -> dict[str, str]:
     """Replace every row of the summary table with the app's provision list.
 
     An existing row is cloned as the prototype so column widths, shading, fonts
     and the merge across the two value columns are carried over exactly.
     """
     if not document.tables:
-        return
+        return {}
     table = document.tables[0]
 
     prototype = None
@@ -682,7 +741,7 @@ def _rebuild_key_provision_table(
                 prototype = row._tr
                 break
     if prototype is None:
-        return
+        return {}
     prototype_xml = copy.deepcopy(prototype)
     # The prototype may contain a legacy Tx_* bookmark. Cloning it once per row
     # would emit duplicate bookmark names and ids, which Word reports as a
@@ -697,6 +756,8 @@ def _rebuild_key_provision_table(
     for row_element in list(body.tr_lst):
         body.remove(row_element)
 
+    kp_anchors: dict[str, str] = {}
+    bookmark_id = 9500
     for item in provisions:
         if not bool(item.get("include", True)):
             continue
@@ -706,12 +767,27 @@ def _rebuild_key_provision_table(
             continue
         body.append(copy.deepcopy(prototype_xml))
         row = table.rows[-1]
-        _set_cell_text(row.cells[0], field)
+        label_paragraph = _set_cell_text(row.cells[0], field)
         paragraph = _set_cell_text(row.cells[1], value)
+
+        # Anchor the row so cross-references in the body can jump back up to it.
+        anchor = _kp_anchor_name(field)
+        start = OxmlElement("w:bookmarkStart")
+        start.set(qn("w:id"), str(bookmark_id))
+        start.set(qn("w:name"), anchor)
+        end = OxmlElement("w:bookmarkEnd")
+        end.set(qn("w:id"), str(bookmark_id))
+        properties = label_paragraph._p.find(qn("w:pPr"))
+        label_paragraph._p.insert(1 if properties is not None else 0, start)
+        label_paragraph._p.append(end)
+        kp_anchors[field] = anchor
+        bookmark_id += 1
+
         if bool(item.get("link")):
-            anchor = anchors.get(str(item.get("section", "")).strip())
-            if anchor:
-                _append_hyperlink(paragraph, anchor, f"  (see Section {item['section']})")
+            section_anchor = anchors.get(str(item.get("section", "")).strip())
+            if section_anchor:
+                _append_hyperlink(paragraph, section_anchor, f"  (see Section {item['section']})")
+    return kp_anchors
 
 
 def _section_contains_ref(paragraphs: list[Paragraph], bookmark_name: str) -> bool:
@@ -982,9 +1058,10 @@ def build_word_document(
     # the legacy bookmark path entirely. Sections are already included/excluded
     # by this point, so anchors only exist for sections that survived.
     app_owned_provisions = key_provision_rows is not None
+    kp_row_anchors: dict[str, str] = {}
     if app_owned_provisions:
         section_anchors = _add_section_anchors(document)
-        _rebuild_key_provision_table(document, key_provision_rows, section_anchors)
+        kp_row_anchors = _rebuild_key_provision_table(document, key_provision_rows, section_anchors)
 
     if bookmark_values and not app_owned_provisions:
         values = dict(bookmark_values)
@@ -1045,6 +1122,18 @@ def build_word_document(
             anchor = current_paragraphs[anchor_section["end"] - 1]
             _insert_after(anchor, str(item.get("title", "Additional Provision")), str(item["text"]))
 
+    _remove_template_markers(document)
+    if not preserve_template_structure and not app_owned_provisions:
+        _remove_empty_key_provision_rows(document)
+
+    if clean_drafting_notes:
+        _clean_drafting_notes(document)
+        _clean_drafting_formatting(document)
+
+    # Substitution runs last on purpose. _clean_drafting_formatting strips every
+    # w:color to clear the template's red/blue drafting guidance, which would
+    # take the green cross-reference styling with it. Running afterwards also
+    # means tracked insertions are already resolved into the text.
     if app_owned_provisions:
         # An excluded provision resolves to nothing rather than leaving a broken
         # reference; the caller is told so the gap can be reviewed.
@@ -1058,19 +1147,11 @@ def build_word_document(
             )
             for row in key_provision_rows if str(row.get("field", "")).strip()
         }
-        referenced, unresolved = substitute_kp_tokens(document, values)
+        referenced, unresolved = substitute_kp_tokens(document, values, kp_row_anchors)
         if token_report is not None:
             token_report["referenced"] = sorted(referenced)
             token_report["unresolved"] = sorted(unresolved)
             token_report["blank"] = sorted(referenced & excluded_names)
-
-    _remove_template_markers(document)
-    if not preserve_template_structure and not app_owned_provisions:
-        _remove_empty_key_provision_rows(document)
-
-    if clean_drafting_notes:
-        _clean_drafting_notes(document)
-        _clean_drafting_formatting(document)
 
     document.core_properties.title = document_title
     document.core_properties.subject = "Generated by MSP Lease Builder"
