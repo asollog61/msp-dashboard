@@ -3,6 +3,8 @@ MSP Property Dashboard — Streamlit App
 Shared multi-user dashboard with Google Sheets backend.
 """
 import streamlit as st
+import base64
+import gzip
 import html as html_lib
 import json
 from io import BytesIO
@@ -213,6 +215,9 @@ def _read_gsheet_config(tab_name):
         ws = sheet.worksheet(tab_name)
         val = ws.acell('A1').value
         if val:
+            if val.startswith("__GZIP64__"):
+                payload = base64.b64decode(val[len("__GZIP64__"):])
+                val = gzip.decompress(payload).decode("utf-8")
             data = json.loads(val)
             st.session_state[cache_key] = data
             return data
@@ -231,7 +236,10 @@ def _write_gsheet_config(tab_name, data):
             ws = sheet.worksheet(tab_name)
         except Exception:
             ws = sheet.add_worksheet(title=tab_name, rows=1, cols=1)
-        ws.update_acell('A1', json.dumps(data))
+        payload = json.dumps(data, ensure_ascii=False, separators=(",", ":"))
+        if len(payload) > 45000:
+            payload = "__GZIP64__" + base64.b64encode(gzip.compress(payload.encode("utf-8"), compresslevel=9)).decode("ascii")
+        ws.update_acell('A1', payload)
         # Clear session_state cache for this tab
         cache_key = f"_gsheet_cfg_{tab_name}"
         if cache_key in st.session_state:
@@ -4541,15 +4549,19 @@ def _lb_export_key_provisions_xlsx(rows):
     """Export the editable key-provision table; Bookmark is hidden but retained for re-import."""
     export_rows = []
     for row in rows:
-        export_rows.append({
+        alternates = list(row.get("Alternates", []))[:10]
+        export_row = {
             "Group": row.get("Group", "Optional"),
             "Use": bool(row.get("Include", True)),
             "Key Provision": row.get("Field", ""),
-            "Value": row.get("Value", ""),
+            "Current Value": row.get("Value", ""),
             "Link": bool(row.get("Link", False)),
             "Target Section": row.get("Section", ""),
             "Bookmark": row.get("Bookmark", ""),
-        })
+        }
+        for index in range(10):
+            export_row[f"Alt {index + 1}"] = alternates[index] if index < len(alternates) else ""
+        export_rows.append(export_row)
     output = BytesIO()
     with pd.ExcelWriter(output, engine="openpyxl") as writer:
         pd.DataFrame(export_rows).to_excel(writer, index=False, sheet_name="Key Provisions")
@@ -4570,7 +4582,7 @@ def _lb_import_key_provisions_xlsx(uploaded_file, existing_rows, section_labels)
     aliases = {
         "Group": "Group", "Use": "Include", "Include": "Include",
         "Key Provision": "Field", "Field": "Field", "Name": "Field",
-        "Value": "Value", "Link": "Link", "Target Section": "Section",
+        "Current Value": "Value", "Value": "Value", "Link": "Link", "Target Section": "Section",
         "Section": "Section", "Bookmark": "Bookmark",
     }
     normalized = {}
@@ -4608,6 +4620,17 @@ def _lb_import_key_provisions_xlsx(uploaded_file, existing_rows, section_labels)
             row["Field"] = field
         if "Value" in normalized:
             row["Value"] = str(source[normalized["Value"]])
+        alternate_values = []
+        for index in range(1, 11):
+            column = next((column_name for column_name in imported.columns if str(column_name).strip().lower() == f"alt {index}".lower()), None)
+            if column is not None:
+                value = str(source[column]).strip()
+                if value:
+                    alternate_values.append(value)
+        if alternate_values:
+            row["Alternates"] = list(dict.fromkeys(alternate_values))[:10]
+        else:
+            row.setdefault("Alternates", [])
         if "Link" in normalized:
             row["Link"] = _lb_bool(source[normalized["Link"]], row.get("Link", False))
         if "Section" in normalized:
@@ -4865,6 +4888,7 @@ def render_lease_builder_tab():
                     "Include": True,
                     "Field": item["field"],
                     "Value": item["value"],
+                    "Alternates": [],
                     "Link": item["bookmark"] in LEASE_DEFAULT_LINKS,
                     "Section": section_labels.get(str(LEASE_DEFAULT_LINKS.get(item["bookmark"], section_numbers[0])), section_labels[section_numbers[0]]),
                     "Bookmark": item["bookmark"],
@@ -4891,6 +4915,8 @@ def render_lease_builder_tab():
         provision["Field"] = BOOKMARK_LABELS.get(bookmark, str(provision.get("Field", "Key Provision")))
         provision.setdefault("Group", "Mandatory" if bookmark in LEASE_MANDATORY_BOOKMARKS else "Optional")
         provision.setdefault("Include", True)
+        provision.setdefault("Alternates", [])
+        provision["Alternates"] = list(dict.fromkeys(str(value) for value in provision.get("Alternates", []) if str(value).strip()))[:10]
         provision.setdefault("Link", bookmark in LEASE_DEFAULT_LINKS)
         raw_section = provision.get("Section", LEASE_DEFAULT_LINKS.get(bookmark, section_numbers[0]))
         provision["Section"] = section_labels.get(str(raw_section), str(raw_section) if str(raw_section) in section_labels.values() else section_labels[section_numbers[0]])
@@ -4980,6 +5006,7 @@ def render_lease_builder_tab():
                                       cellEditor="agSelectCellEditor",
                                       cellEditorParams={"values": list(section_labels.values())})
         grid_builder.configure_column("Bookmark", hide=True)
+        grid_builder.configure_column("Alternates", hide=True)
         grid_builder.configure_grid_options(
             rowDragManaged=True,
             animateRows=True,
@@ -5028,6 +5055,7 @@ def render_lease_builder_tab():
                         "Include": True,
                         "Field": new_field.strip(),
                         "Value": new_value.strip(),
+                        "Alternates": [],
                         "Link": new_link,
                         "Section": new_section,
                         "Bookmark": new_bookmark,
@@ -5042,19 +5070,46 @@ def render_lease_builder_tab():
         selected_value_row = next(row for row in draft_state["key_provisions"] if row.get("Field") == selected_value_field)
         value_key = str(selected_value_row.get("Bookmark") or selected_value_field)
         template_values = saved_value_choices.setdefault(selected_label, {}) if isinstance(saved_value_choices, dict) else {}
-        saved_values = list(template_values.get(value_key, []))
+        stored_values = list(selected_value_row.get("Alternates", [])) + list(template_values.get(value_key, []))
+        saved_values = list(dict.fromkeys(str(value) for value in stored_values if str(value).strip()))[:10]
+        count_col, add_col = st.columns([3, 2])
+        count_col.metric("Saved value choices", len(saved_values))
+        add_value_open_key = f"lb_add_value_open_{value_key}"
+        st.session_state.setdefault(add_value_open_key, False)
+        if add_col.button("➕ Add Value", key=f"lb_add_value_button_{value_key}"):
+            st.session_state[add_value_open_key] = True
+        if st.session_state[add_value_open_key]:
+            new_alternate = st.text_area("New alternate value", key=f"lb_new_alternate_{value_key}", height=75)
+            if st.button("Save Alternate Value", key=f"lb_save_alternate_{value_key}"):
+                if new_alternate.strip():
+                    selected_value_row.setdefault("Alternates", [])
+                    selected_value_row["Alternates"] = list(dict.fromkeys(
+                        selected_value_row["Alternates"] + [new_alternate.strip()]
+                    ))[:10]
+                    template_values[value_key] = list(dict.fromkeys(
+                        list(template_values.get(value_key, [])) + [new_alternate.strip()]
+                    ))[:10]
+                    if _write_gsheet_config("Lease Provision Values", saved_value_choices):
+                        st.session_state[add_value_open_key] = False
+                        st.success("Saved alternate value.")
+                        st.rerun()
+                else:
+                    st.warning("Enter an alternate value first.")
         choice_options = ["Current value"] + saved_values
-        selected_choice = st.selectbox("Saved value", choice_options, key=f"lb_value_choice_{value_key}")
+        selected_choice = st.selectbox("Current Value", choice_options, key=f"lb_value_choice_{value_key}")
         if selected_choice != "Current value":
             selected_value_row["Value"] = selected_choice
-        edited_value = st.text_area("Edit value", value=str(selected_value_row.get("Value", "")), key=f"lb_value_edit_{value_key}", height=90)
+        edited_value = st.text_area("Edit current value", value=str(selected_value_row.get("Value", "")), key=f"lb_value_edit_{value_key}", height=90)
         selected_value_row["Value"] = edited_value
         if st.button("Save Current Value as Choice", key=f"lb_save_value_{value_key}"):
             if edited_value.strip():
-                template_values.setdefault(value_key, [])
-                saved_text = edited_value.strip()
-                template_values[value_key] = [v for v in template_values[value_key] if v != saved_text]
-                template_values[value_key].append(saved_text)
+                selected_value_row.setdefault("Alternates", [])
+                selected_value_row["Alternates"] = list(dict.fromkeys(
+                    selected_value_row["Alternates"] + [edited_value.strip()]
+                ))[:10]
+                template_values[value_key] = list(dict.fromkeys(
+                    list(template_values.get(value_key, [])) + [edited_value.strip()]
+                ))[:10]
                 if _write_gsheet_config("Lease Provision Values", saved_value_choices):
                     st.success("Saved value choice.")
                     st.rerun()
@@ -5163,10 +5218,22 @@ def render_lease_builder_tab():
             if not save_name.strip():
                 st.warning("Enter a template name first.")
             else:
+                compact_sections = {}
+                for section in sections:
+                    number = str(section["number"])
+                    config = draft_state["sections"][number]
+                    compact_entry = {
+                        "include": bool(config.get("include", True)),
+                        "choice": config.get("choice", "Template language"),
+                    }
+                    # Do not store unchanged template text; it is what exceeded the cell limit.
+                    if compact_entry["choice"] != "Template language":
+                        compact_entry["text"] = config.get("text", "")
+                    compact_sections[number] = compact_entry
                 template_config = {
                     "base_template": selected_label,
                     "key_provisions": draft_state["key_provisions"],
-                    "sections": draft_state["sections"],
+                    "sections": compact_sections,
                     "saved_at": datetime.now().isoformat(timespec="seconds"),
                 }
                 updated_templates = dict(saved_templates)
