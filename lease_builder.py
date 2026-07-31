@@ -415,6 +415,29 @@ def kp_token(name: str) -> str:
     return f"[KP:{name}]"
 
 
+# A caret starts a new line inside a key-provision value, so an address can be
+# written as "123 Main St^Westfield, NJ^07090". The grid's cell editor commits on
+# Enter and cannot hold a real newline, so a visible marker is needed there; an
+# Alt+Enter newline typed in Excel means the same thing and is folded into it.
+KP_LINE_BREAK = "^"
+
+
+def kp_value_lines(value: Any) -> list[str]:
+    """Split a key-provision value into its display lines."""
+    text = str(value or "").replace("\r\n", "\n").replace("\r", "\n")
+    return [line.strip() for line in re.split(r"\^|\n", text)]
+
+
+def normalize_kp_value(value: Any) -> str:
+    """Canonical single-line storage form: real newlines become carets."""
+    return KP_LINE_BREAK.join(kp_value_lines(value))
+
+
+def kp_value_plain(value: Any) -> str:
+    """Value with real newlines, for Excel cells and previews."""
+    return "\n".join(kp_value_lines(value))
+
+
 def _kp_anchor_name(field: str) -> str:
     return KP_ANCHOR_PREFIX + re.sub(r"[^A-Za-z0-9_]", "_", str(field))[:24]
 
@@ -589,8 +612,12 @@ def convert_ref_fields_to_tokens(document: Document, names_by_id: dict[str, str]
     )
 
 
-def _clone_run(prototype: Any, text: str) -> Any:
-    """A run carrying the paragraph's existing character formatting."""
+def _clone_run(prototype: Any, text: str, split_lines: bool = False) -> Any:
+    """A run carrying the paragraph's existing character formatting.
+
+    split_lines applies only to substituted provision values; ordinary clause
+    prose is never split, so a stray caret in the lease text is left alone.
+    """
     if prototype is not None:
         run = copy.deepcopy(prototype)
         for tag in (qn("w:t"), qn("w:fldChar"), qn("w:instrText"), qn("w:br")):
@@ -598,16 +625,13 @@ def _clone_run(prototype: Any, text: str) -> Any:
                 run.remove(stale)
     else:
         run = OxmlElement("w:r")
-    text_element = OxmlElement("w:t")
-    text_element.text = text
-    text_element.set(qn("xml:space"), "preserve")
-    run.append(text_element)
+    _fill_run_lines(run, kp_value_lines(text) if split_lines else [str(text)])
     return run
 
 
 def _green_link_run(prototype: Any, text: str) -> Any:
     """A cross-reference run: green and underlined so it reads as a link."""
-    run = _clone_run(prototype, text)
+    run = _clone_run(prototype, text, split_lines=True)
     properties = run.find(qn("w:rPr"))
     if properties is None:
         properties = OxmlElement("w:rPr")
@@ -707,21 +731,36 @@ def _add_section_anchors(document: Document) -> dict[str, str]:
     return anchors
 
 
+def _fill_run_lines(run_element: Any, lines: list[str]) -> None:
+    """Write one or more lines into a run, separated by soft line breaks."""
+    for tag in (qn("w:t"), qn("w:br")):
+        for stale in list(run_element.findall(tag)):
+            run_element.remove(stale)
+    for index, line in enumerate(lines or [""]):
+        if index:
+            run_element.append(OxmlElement("w:br"))
+        text_element = OxmlElement("w:t")
+        text_element.text = line
+        text_element.set(qn("xml:space"), "preserve")
+        run_element.append(text_element)
+
+
 def _set_cell_text(cell: Any, text: str) -> Paragraph:
-    """Replace a cell's text while keeping the first run's formatting."""
+    """Replace a cell's text, honouring caret line breaks, keeping run formatting."""
     paragraphs = cell.paragraphs
     first = paragraphs[0]
     for paragraph in paragraphs[1:]:
         _delete_paragraph(paragraph)
     runs = first.runs
     if runs:
-        runs[0].text = text
+        target = runs[0]._element
         for run in runs[1:]:
             parent = run._element.getparent()
             if parent is not None:
                 parent.remove(run._element)
     else:
-        first.add_run(text)
+        target = first.add_run("")._element
+    _fill_run_lines(target, kp_value_lines(text))
     return first
 
 

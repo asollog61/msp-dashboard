@@ -22,7 +22,7 @@ import pandas as pd
 import gspread
 from google.oauth2.service_account import Credentials
 import openpyxl
-from openpyxl.styles import Font as _XLFont
+from openpyxl.styles import Alignment, Font as _XLFont
 import json
 
 try:
@@ -39,9 +39,12 @@ try:
         find_kp_references,
         humanize_bookmark,
         inspect_template,
+        KP_LINE_BREAK,
         KP_LINK_COLOR,
         KP_TOKEN_RE,
+        kp_value_plain,
         normalize_kp_tokens,
+        normalize_kp_value,
         load_clause_library,
         publish_template_docx,
         PUBLISHED_PREFIX,
@@ -4566,13 +4569,17 @@ def _lb_export_key_provisions_xlsx(rows):
             "Group": row.get("Group", "Optional"),
             "Use": bool(row.get("Include", True)),
             "Key Provision": row.get("Field", ""),
-            "Current Value": row.get("Value", ""),
+            # Carets become real newlines so the cell reads naturally in Excel;
+            # Alt+Enter there comes back as a caret on import.
+            "Current Value": kp_value_plain(row.get("Value", "")),
             "Link": bool(row.get("Link", False)),
             "Target Section": row.get("Section", ""),
             "Bookmark": row.get("Bookmark", ""),
         }
         for index in range(10):
-            export_row[f"Alt {index + 1}"] = alternates[index] if index < len(alternates) else ""
+            export_row[f"Alt {index + 1}"] = (
+                kp_value_plain(alternates[index]) if index < len(alternates) else ""
+            )
         export_rows.append(export_row)
     output = BytesIO()
     with pd.ExcelWriter(output, engine="openpyxl") as writer:
@@ -4584,13 +4591,18 @@ def _lb_export_key_provisions_xlsx(rows):
         widths = {"A": 14, "B": 9, "C": 28, "D": 70, "E": 9, "F": 34}
         for column, width in widths.items():
             worksheet.column_dimensions[column].width = width
+        # Multi-line values are only visible in Excel when the cell wraps.
+        for excel_row in worksheet.iter_rows(min_row=2, min_col=4):
+            for cell in excel_row:
+                cell.alignment = Alignment(wrap_text=True, vertical="top")
     return output.getvalue()
 
 
 def _lb_import_key_provisions_xlsx(uploaded_file, existing_rows, section_labels):
     """Merge an uploaded key-provision workbook into the current draft by Bookmark or name."""
     uploaded_file.seek(0)
-    imported = pd.read_excel(uploaded_file, sheet_name=0, dtype=object).fillna("")
+    imported = pd.read_excel(uploaded_file, sheet_name=0, dtype=object)
+    imported = imported.astype(object).where(imported.notna(), "")
     aliases = {
         "Group": "Group", "Use": "Include", "Include": "Include",
         "Key Provision": "Field", "Field": "Field", "Name": "Field",
@@ -4633,7 +4645,8 @@ def _lb_import_key_provisions_xlsx(uploaded_file, existing_rows, section_labels)
         if "Field" in normalized and field:
             row["Field"] = field
         if "Value" in normalized:
-            row["Value"] = str(source[normalized["Value"]])
+            # An Alt+Enter newline typed in Excel is stored as a caret.
+            row["Value"] = normalize_kp_value(source[normalized["Value"]])
         # Keep literal Alt 1–Alt 10 positions. Empty earlier cells must not
         # shift Alt 3 into Alt 1.
         alternate_slots = []
@@ -4643,7 +4656,9 @@ def _lb_import_key_provisions_xlsx(uploaded_file, existing_rows, section_labels)
                  if str(column_name).strip().lower() == f"alt {index}".lower()),
                 None,
             )
-            alternate_slots.append(str(source[column]).strip() if column is not None else "")
+            alternate_slots.append(
+                normalize_kp_value(source[column]) if column is not None else ""
+            )
         row["Alternates"] = alternate_slots
         if "Link" in normalized:
             row["Link"] = _lb_bool(source[normalized["Link"]], row.get("Link", False))
@@ -4679,7 +4694,7 @@ def _lb_preview_html(key_provisions, preview_sections, focus_section="", show_al
 
     summary_rows = "".join(
         "<tr><th>" + html_lib.escape(str(item.get("Field", ""))) + "</th><td>" +
-        html_lib.escape(str(item.get("Value", ""))).replace("\n", "<br>") + "</td></tr>"
+        html_lib.escape(kp_value_plain(item.get("Value", ""))).replace("\n", "<br>") + "</td></tr>"
         for item in selected_provisions
     ) or '<tr><td colspan="2" class="empty">No key provisions selected.</td></tr>'
 
@@ -5723,6 +5738,12 @@ def render_lease_builder_tab():
         else:
             count_col.caption(f"{selected_count} used · {len(edited_rows) - selected_count} excluded")
 
+        st.caption(
+            f"Use **{KP_LINE_BREAK}** inside a value to start a new line — "
+            f"`123 Main St{KP_LINE_BREAK}Westfield, NJ{KP_LINE_BREAK}07090`. "
+            "The grid commits on Enter so it cannot hold a real line break; in Excel you can use "
+            "Alt+Enter instead and it converts on import."
+        )
         render_column_config_editor(KP_TAB_KEY, configurable_columns)
 
         # The provision list is app-owned, so template mode can add and remove
