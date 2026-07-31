@@ -44,8 +44,12 @@ try:
         PUBLISHED_PREFIX,
     )
     LEASE_BUILDER_AVAILABLE = True
-except ImportError:
+    LEASE_BUILDER_ERROR = ""
+except ImportError as exc:
+    # Keep the real reason: this fires for a missing package and for a name that
+    # lease_builder no longer exports, and those need different fixes.
     LEASE_BUILDER_AVAILABLE = False
+    LEASE_BUILDER_ERROR = f"{type(exc).__name__}: {exc}"
 
 from st_aggrid import AgGrid, DataReturnMode, GridOptionsBuilder, GridUpdateMode, JsCode
 
@@ -5298,7 +5302,14 @@ def render_lease_builder_tab():
     st.markdown("## 🧱 Lease Builder")
 
     if not LEASE_BUILDER_AVAILABLE:
-        st.error("Lease Builder dependency is unavailable. Install python-docx from requirements.txt.")
+        st.error(f"Lease Builder could not load — {LEASE_BUILDER_ERROR}")
+        st.markdown(
+            "Run this from the project folder, then restart the app:\n\n"
+            "```\npip install -r requirements.txt\n```\n\n"
+            "The package is named `python-docx` but imports as `docx`. If the message above "
+            "names something other than a missing module, `lease_builder.py` and `app.py` are "
+            "out of step — pull the latest of both."
+        )
         return
 
     templates = discover_templates()
