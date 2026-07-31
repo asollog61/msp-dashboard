@@ -4742,45 +4742,153 @@ def _lb_parse_money(value):
         return 0.0
 
 
-def _lb_fill_thereafter(rows, manual_years, escalation_pct, total_years):
-    rows = [dict(row) for row in rows]
-    manual_years = max(1, min(int(manual_years), int(total_years)))
-    while len(rows) < manual_years:
-        rows.append({"Period": f"Year {len(rows) + 1}", "Monthly Rent": "$0.00", "Annual Rent": "$0.00"})
-    monthly = _lb_parse_money(rows[manual_years - 1].get("Monthly Rent", 0))
-    rows = rows[:manual_years]
-    for year in range(manual_years + 1, int(total_years) + 1):
-        monthly *= 1 + float(escalation_pct or 0) / 100
-        rows.append({"Period": f"Year {year}", "Monthly Rent": _lb_money(monthly), "Annual Rent": _lb_money(monthly * 12)})
-    return rows
+def _lb_money_or_none(value):
+    """Return a float for anything that reads as currency, else None."""
+    text = str(value).strip().replace("$", "").replace(",", "")
+    if text in {"", "nan", "NaN", "None", "-"}:
+        return None
+    negative = text.startswith("(") and text.endswith(")")
+    if negative:
+        text = text[1:-1]
+    try:
+        number = float(text)
+    except (ValueError, TypeError):
+        return None
+    return -number if negative else number
 
 
-def _lb_make_base_rent(start_monthly, escalation_pct, years=10):
-    rows = []
-    monthly = float(start_monthly or 0)
-    for year in range(1, int(years) + 1):
-        if year > 1:
-            monthly *= 1 + float(escalation_pct or 0) / 100
-        rows.append({"Period": f"Year {year}", "Monthly Rent": _lb_money(monthly), "Annual Rent": _lb_money(monthly * 12)})
-    return rows
+def _lb_rent_cell(value):
+    """Normalize one rent cell: currency-looking values format as $x,xxx.xx, everything else passes through."""
+    number = _lb_money_or_none(value)
+    if number is not None:
+        return _lb_money(number)
+    text = str(value).strip()
+    return "" if text.lower() in {"nan", "none"} else text
 
 
-def _lb_make_option_rent(base_rows, option_count, option_years, jump_pct, escalation_pct):
-    last_monthly = 0.0
-    if base_rows:
-        try:
-            last_monthly = float(str(base_rows[-1].get("Monthly Rent", "0")).replace("$", "").replace(",", ""))
-        except ValueError:
-            pass
-    rows = []
-    for option in range(1, int(option_count) + 1):
-        monthly = last_monthly * (1 + float(jump_pct or 0) / 100)
-        for year in range(1, int(option_years) + 1):
-            if year > 1:
-                monthly *= 1 + float(escalation_pct or 0) / 100
-            rows.append({"Period": f"Option {option} — Year {year}", "Monthly Rent": _lb_money(monthly), "Annual Rent": _lb_money(monthly * 12)})
-        last_monthly = monthly
-    return rows
+RENT_BASE_SHEET = "Base Rent"
+RENT_OPTION_SHEET = "Option Rent"
+RENT_COLUMNS = ["Period", "Monthly Rent", "Annual Rent"]
+
+
+def _lb_blank_rent_rows(periods):
+    return [{"Period": period, "Monthly Rent": "", "Annual Rent": ""} for period in periods]
+
+
+def _lb_default_rent_schedules():
+    """Empty scaffold so the downloaded workbook always has rows to fill in."""
+    return {
+        "base": _lb_blank_rent_rows([f"Year {year}" for year in range(1, 11)]),
+        "options": _lb_blank_rent_rows([f"Option 1 — Year {year}" for year in range(1, 6)]),
+    }
+
+
+def _lb_normalize_rent_rows(rows):
+    clean = []
+    for row in rows or []:
+        period = str(row.get("Period", "")).strip()
+        monthly = _lb_rent_cell(row.get("Monthly Rent", ""))
+        annual = _lb_rent_cell(row.get("Annual Rent", ""))
+        if not period and not monthly and not annual:
+            continue
+        clean.append({"Period": period, "Monthly Rent": monthly, "Annual Rent": annual})
+    return clean
+
+
+def _lb_export_rent_schedule_xlsx(rent_state):
+    """Write the base and option rent tables to a two-sheet workbook for offline editing."""
+    rent_state = rent_state or {}
+    sheets = {
+        RENT_BASE_SHEET: _lb_normalize_rent_rows(rent_state.get("base")),
+        RENT_OPTION_SHEET: _lb_normalize_rent_rows(rent_state.get("options")),
+    }
+    defaults = _lb_default_rent_schedules()
+    if not sheets[RENT_BASE_SHEET]:
+        sheets[RENT_BASE_SHEET] = defaults["base"]
+    if not sheets[RENT_OPTION_SHEET]:
+        sheets[RENT_OPTION_SHEET] = defaults["options"]
+
+    output = BytesIO()
+    with pd.ExcelWriter(output, engine="openpyxl") as writer:
+        for sheet_name, rows in sheets.items():
+            frame = pd.DataFrame(rows, columns=RENT_COLUMNS)
+            # Write rents as real numbers so Excel math and fill-down work naturally.
+            for column in ("Monthly Rent", "Annual Rent"):
+                frame[column] = [
+                    _lb_money_or_none(value) if _lb_money_or_none(value) is not None else value
+                    for value in frame[column]
+                ]
+            frame.to_excel(writer, index=False, sheet_name=sheet_name)
+            worksheet = writer.book[sheet_name]
+            worksheet.freeze_panes = "A2"
+            worksheet.column_dimensions["A"].width = 30
+            worksheet.column_dimensions["B"].width = 18
+            worksheet.column_dimensions["C"].width = 18
+            for excel_row in worksheet.iter_rows(min_row=2, min_col=2, max_col=3):
+                for cell in excel_row:
+                    cell.number_format = '"$"#,##0.00'
+    return output.getvalue()
+
+
+def _lb_import_rent_schedule_xlsx(uploaded_file):
+    """Read an edited rent workbook back into {'base': [...], 'options': [...]}.
+
+    Accepts the two-sheet layout produced by the download, a single sheet with a
+    Schedule column, or a single sheet treated entirely as the base table.
+    """
+    uploaded_file.seek(0)
+    book = pd.read_excel(uploaded_file, sheet_name=None, dtype=object)
+    if not book:
+        raise ValueError("The workbook has no sheets.")
+
+    aliases = {
+        "period": "Period", "year": "Period", "term": "Period",
+        "monthly rent": "Monthly Rent", "monthly": "Monthly Rent", "rent/month": "Monthly Rent",
+        "annual rent": "Annual Rent", "annual": "Annual Rent", "yearly rent": "Annual Rent",
+        "schedule": "Schedule", "table": "Schedule", "type": "Schedule",
+    }
+
+    def read_sheet(frame):
+        frame = frame.astype(object).where(frame.notna(), "")
+        mapping = {}
+        for column in frame.columns:
+            key = aliases.get(str(column).strip().lower())
+            if key and key not in mapping.values():
+                mapping[column] = key
+        frame = frame.rename(columns=mapping)
+        if "Period" not in frame.columns:
+            raise ValueError("Each sheet needs a Period column (plus Monthly Rent and Annual Rent).")
+        for column in RENT_COLUMNS:
+            if column not in frame.columns:
+                frame[column] = ""
+        keep = RENT_COLUMNS + (["Schedule"] if "Schedule" in frame.columns else [])
+        return frame[keep].to_dict("records")
+
+    base_rows, option_rows = [], []
+    matched_named_sheet = False
+    for sheet_name, frame in book.items():
+        rows = read_sheet(frame)
+        label = str(sheet_name).strip().lower()
+        if "option" in label:
+            option_rows.extend(rows)
+            matched_named_sheet = True
+        elif "base" in label:
+            base_rows.extend(rows)
+            matched_named_sheet = True
+        elif len(book) == 1:
+            for row in rows:
+                bucket = str(row.get("Schedule", "")).strip().lower()
+                target = option_rows if "option" in bucket else base_rows
+                target.append(row)
+        else:
+            base_rows.extend(rows)
+    if not matched_named_sheet and not base_rows and not option_rows:
+        raise ValueError("No rent rows found in the workbook.")
+
+    return {
+        "base": _lb_normalize_rent_rows(base_rows),
+        "options": _lb_normalize_rent_rows(option_rows),
+    }
 
 
 def _lb_build_current_word(template_path, draft_name, clean_notes, sections, draft_state):
@@ -4961,17 +5069,13 @@ def render_lease_builder_tab():
                 }
                 for section in sections
             },
-            "rent_schedules": {
-                "base": _lb_make_base_rent(0, 0, 10),
-                "options": [],
-                "settings": {"start_monthly": 0.0, "base_escalation": 0.0, "option_count": 0, "option_years": 5, "option_jump": 0.0, "option_escalation": 0.0},
-            },
+            "rent_schedules": _lb_default_rent_schedules(),
             "kp_version": 0,
             "section_version": 0,
         }
     draft_state = st.session_state[draft_state_key]
     # Backward-compatible migration for configurations saved before group support.
-    draft_state.setdefault("rent_schedules", {"base": _lb_make_base_rent(0, 0, 10), "options": [], "settings": {"start_monthly": 0.0, "base_escalation": 0.0, "option_count": 0, "option_years": 5, "option_jump": 0.0, "option_escalation": 0.0}})
+    draft_state.setdefault("rent_schedules", _lb_default_rent_schedules())
     for provision in draft_state["key_provisions"]:
         bookmark = str(provision.get("Bookmark", ""))
         # Saved drafts may contain old internal field labels (e.g., Tx_BuildingAddress).
@@ -5135,40 +5239,65 @@ def render_lease_builder_tab():
         count_col.caption(f"{selected_count} used · {len(edited_rows) - selected_count} excluded")
         st.caption("Click a row's Current Value cell to choose from that row's nonblank Alt 1–Alt 10 values. The selected text becomes Current Value immediately.")
 
-        with st.expander("💵 Rent Schedule Builder", expanded=False):
-            rent_state = draft_state.setdefault("rent_schedules", {"base": _lb_make_base_rent(0, 0, 10), "options": [], "settings": {}})
-            settings = rent_state.setdefault("settings", {})
+        with st.expander("💵 Rent Schedule Excel Import / Export", expanded=False):
+            rent_state = draft_state.setdefault("rent_schedules", _lb_default_rent_schedules())
+            rent_state.pop("settings", None)  # Retired generator settings from older drafts.
+            st.caption(
+                "Download the workbook, type the monthly and annual rent for each period in Excel, "
+                "then upload it back. Whatever you enter is what prints in the lease — nothing is recalculated."
+            )
+            download_col, upload_col = st.columns([1, 1])
+            download_col.download_button(
+                "⬇️ Download Rent Schedule Excel",
+                data=_lb_export_rent_schedule_xlsx(rent_state),
+                file_name="MSP_Rent_Schedule.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                key="lb_download_rent_schedule_excel",
+                width="stretch",
+            )
+            uploaded_rent = upload_col.file_uploader(
+                "Upload Rent Schedule Excel",
+                type=["xlsx", "xls"],
+                key="lb_upload_rent_schedule_excel",
+            )
+            if uploaded_rent is not None and st.button("Import Uploaded Rent Schedule", key="lb_import_rent_schedule_excel"):
+                try:
+                    draft_state["rent_schedules"] = _lb_import_rent_schedule_xlsx(uploaded_rent)
+                    imported = draft_state["rent_schedules"]
+                    st.success(
+                        f"Rent schedule imported — {len(imported['base'])} base rows, "
+                        f"{len(imported['options'])} option rows."
+                    )
+                    st.rerun()
+                except Exception as exc:
+                    st.error(f"Rent schedule import failed: {exc}")
+
+            st.caption(
+                "Workbook layout: a **Base Rent** sheet and an **Option Rent** sheet, each with "
+                "Period, Monthly Rent, and Annual Rent columns. Add or delete rows freely — "
+                "row count is not fixed. Blank rows are ignored."
+            )
+
             st.markdown("#### Base Rent Table")
-            r1, r2, r3, r4, r5 = st.columns(5)
-            basis = r1.selectbox("Start basis", ["Monthly Rent", "$/SF"], index=0 if settings.get("basis", "Monthly Rent") == "Monthly Rent" else 1, key="rent_basis")
-            sqft = r2.number_input("Premises SF", min_value=0.0, value=float(settings.get("sqft", 0.0)), step=100.0, key="rent_sqft")
-            start_value = r3.number_input("Starting monthly rent" if basis == "Monthly Rent" else "Starting $/SF", min_value=0.0, value=float(settings.get("start_value", 0.0)), step=0.25 if basis == "$/SF" else 100.0, key="rent_start_value")
-            base_years = r4.number_input("Base lease years", min_value=1, max_value=10, value=int(settings.get("base_years", 10)), step=1, key="rent_base_years")
-            manual_years = r5.number_input("Manual years", min_value=1, max_value=int(base_years), value=min(int(settings.get("manual_years", 1)), int(base_years)), step=1, key="rent_manual_years")
-            thereafter = st.number_input("Thereafter annual escalation %", min_value=-100.0, value=float(settings.get("thereafter", 3.0)), step=0.25, key="rent_thereafter")
-            starting_monthly = start_value if basis == "Monthly Rent" else (start_value * sqft / 12 if sqft else 0.0)
-            g1, g2 = st.columns(2)
-            if g1.button("Generate Base Table", key="rent_generate_base"):
-                rent_state["base"] = _lb_make_base_rent(starting_monthly, thereafter, base_years)
-            if g2.button("Apply Thereafter Escalation", key="rent_apply_thereafter"):
-                rent_state["base"] = _lb_fill_thereafter(rent_state.get("base", []), manual_years, thereafter, base_years)
-            settings.update({"basis": basis, "sqft": sqft, "start_value": start_value, "base_years": base_years, "manual_years": manual_years, "thereafter": thereafter})
-            st.caption("Enter Year 1 through the Manual Years directly in the grid, then use Apply Thereafter Escalation to fill later years.")
-            base_df = st.data_editor(pd.DataFrame(rent_state.get("base", [])), hide_index=True, width="stretch", key="rent_base_grid")
+            base_df = st.data_editor(
+                pd.DataFrame(rent_state.get("base", []), columns=RENT_COLUMNS),
+                hide_index=True,
+                num_rows="dynamic",
+                width="stretch",
+                key="rent_base_grid",
+            )
             rent_state["base"] = base_df.to_dict("records")
 
             st.markdown("#### Option Rent Table")
-            o1, o2, o3, o4 = st.columns(4)
-            option_count = o1.number_input("Number of options", min_value=0, max_value=5, value=int(settings.get("option_count", 0)), step=1, key="rent_option_count")
-            option_years = o2.number_input("Years per option", min_value=1, max_value=10, value=int(settings.get("option_years", 5)), step=1, key="rent_option_years")
-            option_jump = o3.number_input("Option start jump %", min_value=-100.0, value=float(settings.get("option_jump", 0.0)), step=0.25, key="rent_option_jump")
-            option_escalation = o4.number_input("Option annual escalation %", min_value=-100.0, value=float(settings.get("option_escalation", thereafter)), step=0.25, key="rent_option_escalation")
-            if st.button("Generate Option Table", key="rent_generate_options"):
-                rent_state["options"] = _lb_make_option_rent(rent_state["base"], option_count, option_years, option_jump, option_escalation)
-            settings.update({"option_count": option_count, "option_years": option_years, "option_jump": option_jump, "option_escalation": option_escalation})
-            option_df = st.data_editor(pd.DataFrame(rent_state.get("options", [])), hide_index=True, width="stretch", key="rent_option_grid")
+            option_df = st.data_editor(
+                pd.DataFrame(rent_state.get("options", []), columns=RENT_COLUMNS),
+                hide_index=True,
+                num_rows="dynamic",
+                width="stretch",
+                key="rent_option_grid",
+            )
             rent_state["options"] = option_df.to_dict("records")
-            st.caption("Both tables are editable year by year and replace the template rent grids in the generated lease.")
+            st.caption("These two tables replace the template rent grids in the generated lease.")
 
         st.markdown("### Lease Sections")
         st.caption("Every numbered section is listed below. Use the table to include/exclude sections, then select one to edit its language.")
