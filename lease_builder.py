@@ -251,7 +251,28 @@ def inspect_template(template_path: str | Path) -> dict[str, Any]:
         ).strip()
         bookmarks.append({"bookmark": name, "field": BOOKMARK_LABELS[name], "value": value})
     bookmarks.sort(key=lambda item: list(BOOKMARK_LABELS).index(item["bookmark"]))
-    return {"sections": scan_sections(document), "bookmarks": bookmarks}
+
+    # Some REF fields point at bookmarks that were never surfaced as key
+    # provisions. They are reported so the caller can create them instead of
+    # letting the cross-reference disappear.
+    known = {item["bookmark"] for item in bookmarks}
+    ref_targets = collect_ref_targets(document)
+    orphan_refs = [
+        {"bookmark": target, "field": BOOKMARK_LABELS.get(target, humanize_bookmark(target))}
+        for target in ref_targets if target not in known
+    ]
+
+    # Clause text is read after the REF fields become KP: tokens, so the editor
+    # shows KP:Landlord where Word would show "Error! Reference source not found."
+    names_by_id = {item["bookmark"]: item["field"] for item in bookmarks}
+    names_by_id.update({item["bookmark"]: item["field"] for item in orphan_refs})
+    convert_ref_fields_to_tokens(document, names_by_id)
+
+    return {
+        "sections": scan_sections(document),
+        "bookmarks": bookmarks,
+        "orphan_refs": orphan_refs,
+    }
 
 
 def _replace_bookmark_text(document: Document, name: str, value: str) -> bool:
@@ -368,6 +389,207 @@ def _apply_key_provision_inclusions(document: Document, included_bookmarks: set[
 # ---------------------------------------------------------------------------
 
 ANCHOR_PREFIX = "_MSP_Sec_"
+
+# ---------------------------------------------------------------------------
+# KP: tokens.
+#
+# The master lease cross-referenced key provisions with Word REF fields aimed at
+# the hand-placed bookmarks. With those gone the fields render as "Error!
+# Reference source not found." Clause text now cites a provision by name instead,
+# as KP:Landlord, and the value is substituted at build time.
+#
+# There is no closing delimiter, so the end of a name is found by matching
+# against the real provision list longest-name-first. That way KP:Lease
+# Execution Date resolves to that provision rather than stopping at "Lease".
+# ---------------------------------------------------------------------------
+
+KP_PREFIX_RE = re.compile(r"\bKPS?:\s*", re.IGNORECASE)
+# Used only to report a token whose name matches no provision.
+KP_LOOSE_RE = re.compile(r"\bKPS?:\s*([A-Za-z][A-Za-z0-9 _/&'\-]*)", re.IGNORECASE)
+
+
+def humanize_bookmark(bookmark: str) -> str:
+    """Tx_LandlordWork -> 'Landlord Work', for provisions that had no label."""
+    stem = re.sub(r"^Tx_", "", str(bookmark))
+    spaced = re.sub(r"(?<=[a-z0-9])(?=[A-Z])", " ", stem)
+    spaced = re.sub(r"[_\-]+", " ", spaced)
+    return re.sub(r"\s+", " ", spaced).strip() or str(bookmark)
+
+
+def _kp_token_pattern(names: Any) -> Any:
+    """Match KP:<name> for known names, longest first so prefixes lose."""
+    ordered = sorted({str(name).strip() for name in names if str(name).strip()},
+                     key=len, reverse=True)
+    if not ordered:
+        return None
+    alternation = "|".join(re.escape(name) for name in ordered)
+    return re.compile(r"\bKPS?:\s*(" + alternation + r")", re.IGNORECASE)
+
+
+def resolve_kp_text(text: str, values: dict[str, str]) -> tuple[str, set[str], set[str]]:
+    """Substitute KP: tokens in a string.
+
+    Returns the resolved text, the provision names it referenced, and any token
+    names that matched no provision.
+    """
+    source = str(text or "")
+    if ":" not in source:
+        return source, set(), set()
+
+    referenced: set[str] = set()
+    lookup = {str(name).strip().lower(): name for name in values}
+    pattern = _kp_token_pattern(values.keys())
+
+    if pattern is not None:
+        def swap(match: Any) -> str:
+            actual = lookup.get(match.group(1).strip().lower())
+            if actual is None:
+                return match.group(0)
+            referenced.add(actual)
+            # An unused provision resolves to nothing; the caller reports it.
+            return str(values.get(actual, "") or "")
+
+        source = pattern.sub(swap, source)
+
+    unresolved = {
+        match.group(1).strip()
+        for match in KP_LOOSE_RE.finditer(source)
+        if match.group(1).strip()
+    }
+    return source, referenced, unresolved
+
+
+def find_kp_references(text: str, names: Any) -> set[str]:
+    """Provision names cited by KP: tokens in a piece of clause text."""
+    pattern = _kp_token_pattern(names)
+    if pattern is None or ":" not in str(text or ""):
+        return set()
+    lookup = {str(name).strip().lower(): name for name in names}
+    found = set()
+    for match in pattern.finditer(str(text)):
+        actual = lookup.get(match.group(1).strip().lower())
+        if actual:
+            found.add(actual)
+    return found
+
+
+def collect_ref_targets(document: Document) -> list[str]:
+    """Bookmark names cited by Word REF fields, in document order."""
+    targets = []
+    for element in document.element.body.iter(qn("w:instrText")):
+        match = re.search(r"\bREF\s+(\S+)", element.text or "", re.IGNORECASE)
+        if match and match.group(1) not in targets:
+            targets.append(match.group(1))
+    return targets
+
+
+def _convert_ref_fields_in_paragraph(paragraph: Paragraph, names_by_id: dict[str, str]) -> int:
+    """Replace each REF field in a paragraph with a KP:<name> text run."""
+    body = paragraph._p
+    children = list(body)
+
+    def field_type(element: Any) -> str | None:
+        if element.tag != qn("w:r"):
+            return None
+        marker = element.find(qn("w:fldChar"))
+        return marker.get(qn("w:fldCharType")) if marker is not None else None
+
+    spans: list[tuple[int, int, str]] = []
+    depth = 0
+    start_index = 0
+    instructions: list[str] = []
+    for index, element in enumerate(children):
+        kind = field_type(element)
+        if kind == "begin":
+            if depth == 0:
+                start_index, instructions = index, []
+            depth += 1
+        elif depth > 0:
+            if element.tag == qn("w:r"):
+                instruction = element.find(qn("w:instrText"))
+                if instruction is not None and instruction.text:
+                    instructions.append(instruction.text)
+            if kind == "end":
+                depth -= 1
+                if depth == 0:
+                    spans.append((start_index, index, "".join(instructions)))
+
+    converted = 0
+    for start_index, end_index, instruction in reversed(spans):
+        match = re.search(r"\bREF\s+(\S+)", instruction, re.IGNORECASE)
+        if not match:
+            continue
+        name = names_by_id.get(match.group(1))
+        if not name:
+            continue
+        group = children[start_index:end_index + 1]
+        # Model the new run on the field's result run so the text keeps its look.
+        prototype = next(
+            (element for element in group
+             if element.tag == qn("w:r") and element.find(qn("w:t")) is not None),
+            None,
+        )
+        run = copy.deepcopy(prototype) if prototype is not None else OxmlElement("w:r")
+        for tag in (qn("w:t"), qn("w:fldChar"), qn("w:instrText")):
+            for stale in list(run.findall(tag)):
+                run.remove(stale)
+        text_element = OxmlElement("w:t")
+        text_element.text = f"KP:{name}"
+        text_element.set(qn("xml:space"), "preserve")
+        run.append(text_element)
+        body.insert(start_index, run)
+        for element in group:
+            if element.getparent() is not None:
+                body.remove(element)
+        converted += 1
+    return converted
+
+
+def _iter_all_paragraphs(document: Document) -> Any:
+    for paragraph in document.paragraphs:
+        yield paragraph
+    for table in document.tables:
+        for row in table.rows:
+            for cell in row.cells:
+                for paragraph in cell.paragraphs:
+                    yield paragraph
+
+
+def convert_ref_fields_to_tokens(document: Document, names_by_id: dict[str, str]) -> int:
+    """Rewrite every resolvable REF field in the document as a KP: token."""
+    return sum(
+        _convert_ref_fields_in_paragraph(paragraph, names_by_id)
+        for paragraph in _iter_all_paragraphs(document)
+    )
+
+
+def _set_paragraph_text_keeping_style(paragraph: Paragraph, text: str) -> None:
+    runs = paragraph.runs
+    if runs:
+        runs[0].text = text
+        for run in runs[1:]:
+            parent = run._element.getparent()
+            if parent is not None:
+                parent.remove(run._element)
+    else:
+        paragraph.add_run(text)
+
+
+def substitute_kp_tokens(document: Document, values: dict[str, str]) -> tuple[set[str], set[str]]:
+    """Replace KP: tokens throughout the document. Returns (referenced, unresolved)."""
+    referenced: set[str] = set()
+    unresolved: set[str] = set()
+    for paragraph in _iter_all_paragraphs(document):
+        original = paragraph.text
+        if ":" not in original:
+            continue
+        resolved, found, missing = resolve_kp_text(original, values)
+        referenced |= found
+        unresolved |= missing
+        if resolved != original:
+            # Only paragraphs that actually contain a token are rewritten.
+            _set_paragraph_text_keeping_style(paragraph, resolved)
+    return referenced, unresolved
 
 
 def _anchor_name(section_number: str) -> str:
@@ -715,6 +937,7 @@ def build_word_document(
     document_title: str = "MSP Lease Draft",
     preserve_template_structure: bool = False,
     key_provision_rows: list[dict[str, Any]] | None = None,
+    token_report: dict[str, Any] | None = None,
 ) -> bytes:
     """Build a redline-ready DOCX and return its bytes.
 
@@ -724,6 +947,19 @@ def build_word_document(
     the published file would silently lose those provisions.
     """
     document = Document(str(template_path))
+
+    # Convert legacy REF fields before anything else so section text, clause
+    # replacements and the summary table all speak the same KP: language.
+    if key_provision_rows is not None:
+        convert_ref_fields_to_tokens(
+            document,
+            {
+                str(row.get("bookmark", "")): str(row.get("field", ""))
+                for row in key_provision_rows
+                if row.get("bookmark") and row.get("field")
+            },
+        )
+
     sections = scan_sections(document)
     original_paragraphs = list(document.paragraphs)
 
@@ -808,6 +1044,25 @@ def build_word_document(
                 continue
             anchor = current_paragraphs[anchor_section["end"] - 1]
             _insert_after(anchor, str(item.get("title", "Additional Provision")), str(item["text"]))
+
+    if app_owned_provisions:
+        # An excluded provision resolves to nothing rather than leaving a broken
+        # reference; the caller is told so the gap can be reviewed.
+        excluded_names = {
+            str(row.get("field", "")) for row in key_provision_rows
+            if not bool(row.get("include", True))
+        }
+        values = {
+            str(row.get("field", "")): (
+                "" if str(row.get("field", "")) in excluded_names else str(row.get("value", ""))
+            )
+            for row in key_provision_rows if str(row.get("field", "")).strip()
+        }
+        referenced, unresolved = substitute_kp_tokens(document, values)
+        if token_report is not None:
+            token_report["referenced"] = sorted(referenced)
+            token_report["unresolved"] = sorted(unresolved)
+            token_report["blank"] = sorted(referenced & excluded_names)
 
     _remove_template_markers(document)
     if not preserve_template_structure and not app_owned_provisions:

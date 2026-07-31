@@ -36,6 +36,8 @@ try:
         BOOKMARK_LABELS,
         build_word_document,
         discover_templates,
+        find_kp_references,
+        humanize_bookmark,
         inspect_template,
         load_clause_library,
         publish_template_docx,
@@ -5134,8 +5136,32 @@ def _lb_is_off_menu(text, approved_texts):
     return all(candidate != squash(approved) for approved in approved_texts)
 
 
+def _lb_token_citations(sections, draft_state, include_only=True):
+    """Map provision name -> section numbers whose clause text cites it via KP:.
+
+    Linking is derived from the drafted language rather than set by hand, so a
+    provision cited in three sections reports all three and nothing has to be
+    kept in sync.
+    """
+    names = [
+        str(row.get("Field", "")).strip()
+        for row in draft_state.get("key_provisions", [])
+        if str(row.get("Field", "")).strip()
+    ]
+    citations = {}
+    for section in sections:
+        number = str(section["number"])
+        config = draft_state["sections"].get(number, {})
+        if include_only and not bool(config.get("include", True)):
+            continue
+        text = str(config.get("text", section.get("text", "")))
+        for name in find_kp_references(text, names):
+            citations.setdefault(name, []).append(number)
+    return citations
+
+
 def _lb_build_current_word(template_path, draft_name, clean_notes, sections, draft_state,
-                           force_include_all=False):
+                           force_include_all=False, token_report=None):
     section_labels = {
         f"Section {section['number']} — {section['title']}": str(section['number'])
         for section in sections
@@ -5186,15 +5212,17 @@ def _lb_build_current_word(template_path, draft_name, clean_notes, sections, dra
         if str(row.get("Bookmark", "")).startswith("Custom_")
     ]
     # The provision list is app-owned: the summary table is rebuilt from these
-    # rows, and Link adds a hyperlink to the section anchor rather than copying
-    # the value into the clause.
+    # rows. Linking is derived from KP: tokens in the clause text, so the row
+    # points at the first section that actually cites the provision.
+    citations = _lb_token_citations(sections, draft_state)
     key_provision_rows = [
         {
+            "bookmark": str(row.get("Bookmark", "")),
             "field": row.get("Field", "Key Provision"),
             "value": row.get("Value", ""),
             "include": is_used(row),
-            "link": bool(row.get("Link")),
-            "section": section_labels.get(str(row.get("Section", "")), str(row.get("Section", ""))),
+            "link": bool(citations.get(str(row.get("Field", "")))),
+            "section": (citations.get(str(row.get("Field", ""))) or [""])[0],
         }
         for row in draft_state["key_provisions"]
     ]
@@ -5210,6 +5238,7 @@ def _lb_build_current_word(template_path, draft_name, clean_notes, sections, dra
         clean_drafting_notes=clean_notes,
         document_title=draft_name,
         key_provision_rows=key_provision_rows,
+        token_report=token_report,
     )
 
 
@@ -5376,6 +5405,20 @@ def render_lease_builder_tab():
                     "Bookmark": item["bookmark"],
                 }
                 for item in template_data["bookmarks"]
+            ] + [
+                # Cross-referenced in the clause text but never surfaced as a key
+                # provision. Without these the citation would silently vanish.
+                {
+                    "Group": "Optional",
+                    "Include": True,
+                    "Field": item["field"],
+                    "Value": "",
+                    "Alternates": [""] * 10,
+                    "Link": False,
+                    "Section": section_labels[section_numbers[0]],
+                    "Bookmark": item["bookmark"],
+                }
+                for item in template_data.get("orphan_refs", [])
             ],
             "sections": {
                 str(section["number"]): {
@@ -5501,6 +5544,9 @@ def render_lease_builder_tab():
                 except Exception as exc:
                     st.error(f"Key Provisions import failed: {exc}")
 
+        # Template mode shows every section, so citations are not filtered there.
+        kp_citations = _lb_token_citations(sections, draft_state, include_only=not template_mode)
+
         # Single editable Key Provisions grid. The drag handle is the only reorder control.
         draft_state["key_provisions"] = sorted(
             draft_state["key_provisions"],
@@ -5516,9 +5562,15 @@ def render_lease_builder_tab():
             row["Current Value"] = row.get("Value", "")
             for index, value in enumerate(slots, start=1):
                 row[f"Alt {index}"] = value
+            cited_in = kp_citations.get(str(row.get("Field", "")), [])
+            row["Linked"] = (
+                "Yes — " + ", ".join(f"§{number}" for number in cited_in) if cited_in else ""
+            )
             row.pop("Value", None)
             row.pop("Alternates", None)
             row.pop("Choice", None)
+            row.pop("Link", None)
+            row.pop("Section", None)
             grid_rows.append(row)
         kp_df = pd.DataFrame(grid_rows)
         kp_df.insert(0, "Drag", "")
@@ -5552,11 +5604,8 @@ def render_lease_builder_tab():
         else:
             grid_builder.configure_column("Current Value", header_name="Current Value", editable=True, width=330,
                                           cellEditor="agSelectCellEditor", cellEditorParams=current_value_choices)
-        grid_builder.configure_column("Link", header_name="Link", editable=template_mode, width=68,
-                                      cellRenderer="agCheckboxCellRenderer", cellEditor="agCheckboxCellEditor")
-        grid_builder.configure_column("Section", header_name="Target Section", editable=template_mode, width=210,
-                                      cellEditor="agSelectCellEditor",
-                                      cellEditorParams={"values": list(section_labels.values())})
+        # Linking is read-only: it reflects the KP: tokens found in clause text.
+        grid_builder.configure_column("Linked", header_name="Linked", editable=False, width=170)
         for index in range(1, 11):
             grid_builder.configure_column(f"Alt {index}", header_name=f"Alt {index}",
                                           editable=template_mode, width=185)
@@ -5582,10 +5631,17 @@ def render_lease_builder_tab():
         if edited_kp is None:
             edited_kp = kp_df
         edited_rows = []
+        previous_by_bookmark = {
+            str(row.get("Bookmark", "")): row for row in draft_state["key_provisions"]
+        }
         for row in edited_kp.drop(columns=["Drag"], errors="ignore").to_dict("records"):
             slots = [str(row.pop(f"Alt {index}", "")).strip() for index in range(1, 11)]
             current_value = str(row.pop("Current Value", ""))
             row.pop("Choice", None)
+            row.pop("Linked", None)  # Derived for display only.
+            previous = previous_by_bookmark.get(str(row.get("Bookmark", "")), {})
+            row["Link"] = bool(previous.get("Link", False))
+            row["Section"] = previous.get("Section", section_labels[section_numbers[0]])
             row["Value"] = current_value
             row["Alternates"] = slots
             edited_rows.append(row)
@@ -5837,6 +5893,21 @@ def render_lease_builder_tab():
         section_text = st.text_area("Section language", value=default_text, height=260, key=text_key)
         section_config.update({"choice": choice, "text": section_text})
 
+        st.caption(
+            "Cite a key provision by typing **KP:** followed by its exact name — for example "
+            "`KP:Lease Execution Date`. The value from the Key Provisions summary is substituted "
+            "when the document is built, and the provision's Linked column updates automatically."
+        )
+        cited_here = sorted(find_kp_references(
+            section_text, [str(r.get("Field", "")) for r in draft_state["key_provisions"]]
+        ))
+        if cited_here:
+            st.caption("Cited in this section: " + ", ".join(f"`KP:{name}`" for name in cited_here))
+        with st.popover("📋 Key provision names", width="stretch"):
+            st.caption("Copy a name into the clause text after KP:")
+            for row in draft_state["key_provisions"]:
+                st.code(f"KP:{row.get('Field', '')}", language=None)
+
         approved_texts = [section_by_number[selected_section]["text"]] + _lb_section_variant_texts(
             selected_label, selected_section, built_in_library, saved_clause_library
         )
@@ -6057,13 +6128,31 @@ def render_lease_builder_tab():
 
         st.caption("Drafting tool only. Final lease language should be reviewed by New Jersey counsel.")
 
+        token_report = {}
         try:
             live_word_bytes = _lb_build_current_word(
                 template["path"], draft_name, clean_notes, sections, draft_state,
-                force_include_all=template_mode,
+                force_include_all=template_mode, token_report=token_report,
             )
         except Exception as exc:
             st.error(f"Current draft could not be generated: {exc}")
+
+        unresolved = token_report.get("unresolved") or []
+        blank_refs = token_report.get("blank") or []
+        if unresolved or blank_refs:
+            with st.expander(
+                f"⚠️ {len(unresolved) + len(blank_refs)} cross-reference issue(s)", expanded=bool(unresolved)
+            ):
+                if unresolved:
+                    st.markdown("**Unrecognised `KP:` names** — these print as-is, so fix the spelling "
+                                "or add the provision:")
+                    for name in unresolved:
+                        st.markdown(f"- `KP:{name}`")
+                if blank_refs:
+                    st.markdown("**Cited but not used in this lease** — these resolve to nothing, "
+                                "leaving a gap in the clause:")
+                    for name in blank_refs:
+                        st.markdown(f"- {name}")
 
         build_label = "📝 Build Full Template Word Document" if template_mode else "📝 Build Word Document"
         if st.button(build_label, type="primary", key="lb_build_word", width="stretch"):
