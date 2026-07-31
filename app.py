@@ -5346,13 +5346,24 @@ def render_lease_builder_tab():
 
     if not LEASE_BUILDER_AVAILABLE:
         st.error(f"Lease Builder could not load — {LEASE_BUILDER_ERROR}")
-        st.markdown(
-            "Run this from the project folder, then restart the app:\n\n"
-            "```\npip install -r requirements.txt\n```\n\n"
-            "The package is named `python-docx` but imports as `docx`. If the message above "
-            "names something other than a missing module, `lease_builder.py` and `app.py` are "
-            "out of step — pull the latest of both."
-        )
+        # The two failure modes need opposite fixes, so tell them apart rather
+        # than always suggesting a reinstall.
+        if "cannot import name" in LEASE_BUILDER_ERROR:
+            st.markdown(
+                "`app.py` is newer than the `lease_builder` module currently loaded.\n\n"
+                "**On Streamlit Cloud:** the old module is still cached in memory — "
+                "*Manage app → ⋮ → Reboot app* forces a fresh import.\n\n"
+                "**Running locally:** stop and restart `streamlit run app.py`; a rerun alone "
+                "does not re-import a changed module.\n\n"
+                "If it persists after a reboot, `lease_builder.py` on the deployed branch is "
+                "genuinely out of date — confirm the push landed."
+            )
+        else:
+            st.markdown(
+                "A required package is missing. Run this from the project folder, then restart:\n\n"
+                "```\npip install -r requirements.txt\n```\n\n"
+                "The package is named `python-docx` but imports as `docx`."
+            )
         return
 
     templates = discover_templates()
