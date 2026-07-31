@@ -21,6 +21,17 @@ try:
 except ImportError:
     HAS_PYMUPDF = False
 
+try:
+    from lease_builder import (
+        build_word_document,
+        discover_templates,
+        inspect_template,
+        load_clause_library,
+    )
+    LEASE_BUILDER_AVAILABLE = True
+except ImportError:
+    LEASE_BUILDER_AVAILABLE = False
+
 from st_aggrid import AgGrid, GridOptionsBuilder, GridUpdateMode, JsCode
 
 # --- CONFIG ---
@@ -4449,6 +4460,194 @@ def render_lead_sheet_tab():
 
 
 # =====================
+# LEASE BUILDER TAB
+# =====================
+
+def render_lease_builder_tab():
+    st.markdown("## 🧱 Lease Builder")
+    st.caption("Choose a lease template, assemble the provisions, and download a Word draft for attorney redline.")
+
+    if not LEASE_BUILDER_AVAILABLE:
+        st.error("Lease Builder dependency is unavailable. Install python-docx from requirements.txt.")
+        return
+
+    templates = discover_templates()
+    if not templates:
+        st.warning("No DOCX lease templates were found in data/Lease Builder.")
+        return
+
+    selected_label = st.selectbox(
+        "Lease template",
+        [template["label"] for template in templates],
+        key="lb_template",
+    )
+    template = next(template for template in templates if template["label"] == selected_label)
+
+    try:
+        template_data = inspect_template(template["path"])
+    except Exception as exc:
+        st.error(f"The selected Word template could not be read: {exc}")
+        return
+
+    sections = template_data["sections"]
+    clause_library = load_clause_library()
+    section_library = clause_library.get("sections", {})
+    additional_library = clause_library.get("additional_provisions", {})
+
+    top1, top2 = st.columns([3, 1])
+    draft_name = top1.text_input("Draft name", value="MSP Lease Draft", key="lb_draft_name")
+    clean_notes = top2.toggle("Remove drafting notes", value=True, key="lb_clean_notes")
+
+    with st.expander("1. Key Provisions Summary", expanded=False):
+        st.caption("Edit the deal-specific values carried in the template's Key Provisions Summary.")
+        detail_rows = template_data["bookmarks"]
+        details_df = pd.DataFrame(detail_rows)
+        edited_details = st.data_editor(
+            details_df,
+            hide_index=True,
+            use_container_width=True,
+            height=min(620, 70 + len(detail_rows) * 35),
+            disabled=["bookmark", "field"],
+            column_config={
+                "bookmark": None,
+                "field": st.column_config.TextColumn("Field", width="medium"),
+                "value": st.column_config.TextColumn("Value", width="large"),
+            },
+            key=f"lb_details_{Path(template['path']).stem}",
+        )
+
+    st.markdown("### 2. Clause Menu")
+    categories = list(dict.fromkeys(section["category"] for section in sections))
+    category = st.selectbox("Clause category", categories, key="lb_category")
+    st.caption("Every clause is included by default. Open a section to exclude it or select alternate language.")
+
+    displayed_sections = [section for section in sections if section["category"] == category]
+    for section in displayed_sections:
+        number = section["number"]
+        configured_variants = section_library.get(number, {}).get("variants", [])
+        variant_names = [variant["name"] for variant in configured_variants]
+        with st.expander(f"Section {number} — {section['title']}", expanded=False):
+            include = st.toggle(
+                "Include this section",
+                value=st.session_state.get(f"lb_include_{number}", True),
+                key=f"lb_include_{number}",
+            )
+            choices = ["Template language"] + variant_names + ["Custom language"]
+            selected_variant = st.selectbox(
+                "Clause version",
+                choices,
+                disabled=not include,
+                key=f"lb_variant_{number}",
+            )
+            if selected_variant == "Custom language":
+                st.text_area(
+                    "Replacement clause text",
+                    height=180,
+                    disabled=not include,
+                    key=f"lb_custom_{number}",
+                )
+            elif selected_variant != "Template language":
+                text = next(
+                    variant["text"] for variant in configured_variants
+                    if variant["name"] == selected_variant
+                )
+                st.text_area("Selected language", value=text, height=160, disabled=True,
+                             key=f"lb_preview_variant_{number}_{selected_variant}")
+            else:
+                st.text_area("Template preview", value=section["text"], height=160, disabled=True,
+                             key=f"lb_preview_template_{number}")
+
+    st.markdown("### 3. Additional Provisions")
+    additional_choices = []
+    for provision_key, provision in additional_library.items():
+        variants = provision.get("variants", [])
+        variant_names = [variant["name"] for variant in variants]
+        with st.expander(provision.get("title", provision_key.title()), expanded=True):
+            include_key = f"lb_add_include_{provision_key}"
+            include = st.toggle(
+                f"Include {provision.get('title', provision_key.title())}",
+                value=st.session_state.get(include_key, provision.get("default_include", False)),
+                key=include_key,
+            )
+            selected = st.selectbox(
+                "Clause version",
+                variant_names + ["Custom language"],
+                disabled=not include,
+                key=f"lb_add_variant_{provision_key}",
+            )
+            if selected == "Custom language":
+                text = st.text_area(
+                    "Clause text", height=150, disabled=not include,
+                    key=f"lb_add_custom_{provision_key}",
+                )
+            else:
+                text = next((variant["text"] for variant in variants if variant["name"] == selected), "")
+                st.text_area("Selected language", value=text, height=140, disabled=True,
+                             key=f"lb_add_preview_{provision_key}_{selected}")
+            additional_choices.append({
+                "include": include,
+                "title": provision.get("title", provision_key.title()),
+                "insert_after": provision.get("insert_after", "11"),
+                "text": text,
+            })
+
+    st.divider()
+    st.caption("Drafting tool only. Final lease language should be reviewed by New Jersey counsel before execution.")
+
+    if st.button("📝 Build Word Document", type="primary", key="lb_build_word"):
+        section_choices = {}
+        for section in sections:
+            number = section["number"]
+            include = st.session_state.get(f"lb_include_{number}", True)
+            selected_variant = st.session_state.get(f"lb_variant_{number}", "Template language")
+            replacement_text = ""
+            if selected_variant == "Custom language":
+                replacement_text = st.session_state.get(f"lb_custom_{number}", "")
+            elif selected_variant != "Template language":
+                configured = section_library.get(number, {}).get("variants", [])
+                replacement_text = next(
+                    (variant["text"] for variant in configured if variant["name"] == selected_variant),
+                    "",
+                )
+            section_choices[number] = {
+                "include": include,
+                "title": section["title"],
+                "replacement_text": replacement_text,
+            }
+
+        bookmark_values = {
+            str(row["bookmark"]): row["value"]
+            for _, row in edited_details.iterrows()
+        }
+        try:
+            word_bytes = build_word_document(
+                template["path"],
+                section_choices=section_choices,
+                bookmark_values=bookmark_values,
+                additional_choices=additional_choices,
+                clean_drafting_notes=clean_notes,
+                document_title=draft_name,
+            )
+            st.session_state["lb_word_bytes"] = word_bytes
+            st.session_state["lb_word_filename"] = (
+                re.sub(r"[^A-Za-z0-9._-]+", "_", draft_name).strip("_") or "MSP_Lease_Draft"
+            ) + ".docx"
+            st.success("Word draft built. Review the clause selections, then download it below.")
+        except Exception as exc:
+            st.error(f"Word generation failed: {exc}")
+
+    if st.session_state.get("lb_word_bytes"):
+        st.download_button(
+            "⬇️ Download Word Draft",
+            data=st.session_state["lb_word_bytes"],
+            file_name=st.session_state.get("lb_word_filename", "MSP_Lease_Draft.docx"),
+            mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            type="primary",
+            key="lb_download_word",
+        )
+
+
+# =====================
 # MAIN APP
 # =====================
 
@@ -4457,12 +4656,15 @@ col_title.markdown("## 🏢 MSP Property Dashboard")
 st.session_state.mobile_view = col_toggle.toggle("📱 Mobile", value=st.session_state.mobile_view)
 st.caption(f"Marion Street Properties · {TODAY.strftime('%B %d, %Y')}")
 
-tab_tenancy, tab_vacancy, tab_leads, tab_covenants, tab_insurance, tab_deposits, tab_reconcile, tab_yardi, tab_sop = st.tabs([
-    "🏠 Current Tenancy", "🏚️ Vacancy", "📋 Lead Sheet", "📜 Lease Covenants", "🛡️ Insurance", "💰 Security Deposits", "🔄 Yardi Reconcile", "📊 Yardi Reports", "📋 SOPs"
+tab_tenancy, tab_vacancy, tab_leads, tab_covenants, tab_lease_builder, tab_insurance, tab_deposits, tab_reconcile, tab_yardi, tab_sop = st.tabs([
+    "🏠 Current Tenancy", "🏚️ Vacancy", "📋 Lead Sheet", "📜 Lease Covenants", "🧱 Lease Builder", "🛡️ Insurance", "💰 Security Deposits", "🔄 Yardi Reconcile", "📊 Yardi Reports", "📋 SOPs"
 ])
 
 with tab_sop:
     render_sop_tab()
+
+with tab_lease_builder:
+    render_lease_builder_tab()
 
 with tab_tenancy:
     render_tenancy_tab()

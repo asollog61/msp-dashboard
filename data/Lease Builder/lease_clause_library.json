@@ -1,0 +1,77 @@
+{
+  "sections": {
+    "15": {
+      "variants": [
+        {
+          "name": "Full-term guaranty",
+          "text": "Tenant's performance and payment obligations under this Lease shall be unconditionally guaranteed for the entire Lease Term, including all renewals, extensions and holdover periods, by the guarantor executing the Guaranty of Lease attached to this Lease."
+        },
+        {
+          "name": "Limited guaranty",
+          "text": "Tenant's performance and payment obligations shall be guaranteed only for the period and on the conditions stated in the Guaranty of Lease attached to this Lease."
+        },
+        {
+          "name": "No personal guaranty",
+          "text": "No personal guaranty is required in connection with this Lease."
+        }
+      ]
+    },
+    "18": {
+      "variants": [
+        {
+          "name": "Strict landlord consent",
+          "text": "Tenant shall not assign this Lease, sublet any portion of the Premises, license occupancy, or transfer a controlling interest in Tenant without Landlord's prior written consent, which may be granted or withheld in Landlord's sole discretion. No approved transfer shall release Tenant or any guarantor unless Landlord expressly agrees in writing."
+        },
+        {
+          "name": "Reasonable consent standard",
+          "text": "Tenant shall not assign this Lease or sublet any portion of the Premises without Landlord's prior written consent, which shall not be unreasonably withheld, conditioned or delayed. Tenant shall remain liable after any approved transfer unless Landlord expressly agrees otherwise in writing."
+        },
+        {
+          "name": "Permitted affiliate transfers",
+          "text": "Tenant may assign this Lease to an affiliate controlling, controlled by, or under common control with Tenant upon prior written notice to Landlord, provided the transferee assumes all Lease obligations in writing and has financial strength reasonably satisfactory to Landlord. All other transfers require Landlord's prior written consent."
+        }
+      ]
+    },
+    "26": {
+      "variants": [
+        {
+          "name": "150% holdover rent",
+          "text": "If Tenant remains in possession after expiration or termination without Landlord's written consent, Tenant shall be a tenant at sufferance and shall pay monthly use and occupancy equal to one hundred fifty percent (150%) of the Base Rent and Additional Rent payable immediately before expiration, together with all resulting damages."
+        },
+        {
+          "name": "200% holdover rent",
+          "text": "If Tenant remains in possession after expiration or termination without Landlord's written consent, Tenant shall be a tenant at sufferance and shall pay monthly use and occupancy equal to two hundred percent (200%) of the Base Rent and Additional Rent payable immediately before expiration, together with all resulting damages."
+        }
+      ]
+    }
+  },
+  "additional_provisions": {
+    "parking": {
+      "title": "Parking",
+      "insert_after": "11",
+      "default_include": true,
+      "variants": [
+        {
+          "name": "Non-exclusive common parking",
+          "text": "Tenant, its employees, customers and invitees may use the Property's common parking areas on a non-exclusive, first-come basis, subject to Landlord's reasonable rules and right to designate spaces or modify traffic patterns."
+        },
+        {
+          "name": "Reserved tenant spaces",
+          "text": "Tenant shall have the exclusive use of the parking spaces designated by Landlord on the attached parking plan. All other parking areas remain common and non-exclusive, and Landlord may adopt reasonable parking rules."
+        },
+        {
+          "name": "Customer parking; employees off-site",
+          "text": "On-site parking is reserved for customers and invitees. Tenant shall require its employees to use off-site parking or public transportation as reasonably directed by Landlord and shall not permit overnight or oversized vehicle parking."
+        },
+        {
+          "name": "Municipal/public parking only",
+          "text": "No parking rights are granted under this Lease. Tenant and its employees, customers and invitees shall use available municipal, street or other public parking at their own risk and expense."
+        },
+        {
+          "name": "No parking rights",
+          "text": "Tenant is granted no right to use any parking area serving the Property, except for temporary loading and unloading at times and locations designated by Landlord."
+        }
+      ]
+    }
+  }
+}
