@@ -28,6 +28,7 @@ except ImportError:
 
 try:
     from lease_builder import (
+        BOOKMARK_LABELS,
         build_word_document,
         discover_templates,
         inspect_template,
@@ -4776,6 +4777,9 @@ def render_lease_builder_tab():
     # Backward-compatible migration for configurations saved before group support.
     for provision in draft_state["key_provisions"]:
         bookmark = str(provision.get("Bookmark", ""))
+        # Saved drafts may contain old internal field labels (e.g., Tx_BuildingAddress).
+        # Always show the human-facing lease label in both drag cards and grids.
+        provision["Field"] = BOOKMARK_LABELS.get(bookmark, str(provision.get("Field", "Key Provision")))
         provision.setdefault("Group", "Mandatory" if bookmark in LEASE_MANDATORY_BOOKMARKS else "Optional")
         provision.setdefault("Include", True)
         provision.setdefault("Link", bookmark in LEASE_DEFAULT_LINKS)
