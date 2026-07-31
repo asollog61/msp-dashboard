@@ -4728,6 +4728,41 @@ def _lb_preview_html(key_provisions, preview_sections, focus_section=""):
     """
 
 
+def _lb_money(value):
+    try:
+        return f"${float(value):,.2f}"
+    except (ValueError, TypeError):
+        return ""
+
+
+def _lb_make_base_rent(start_monthly, escalation_pct, years=10):
+    rows = []
+    monthly = float(start_monthly or 0)
+    for year in range(1, int(years) + 1):
+        if year > 1:
+            monthly *= 1 + float(escalation_pct or 0) / 100
+        rows.append({"Period": f"Year {year}", "Monthly Rent": _lb_money(monthly), "Annual Rent": _lb_money(monthly * 12)})
+    return rows
+
+
+def _lb_make_option_rent(base_rows, option_count, option_years, jump_pct, escalation_pct):
+    last_monthly = 0.0
+    if base_rows:
+        try:
+            last_monthly = float(str(base_rows[-1].get("Monthly Rent", "0")).replace("$", "").replace(",", ""))
+        except ValueError:
+            pass
+    rows = []
+    for option in range(1, int(option_count) + 1):
+        monthly = last_monthly * (1 + float(jump_pct or 0) / 100)
+        for year in range(1, int(option_years) + 1):
+            if year > 1:
+                monthly *= 1 + float(escalation_pct or 0) / 100
+            rows.append({"Period": f"Option {option} — Year {year}", "Monthly Rent": _lb_money(monthly), "Annual Rent": _lb_money(monthly * 12)})
+        last_monthly = monthly
+    return rows
+
+
 def _lb_build_current_word(template_path, draft_name, clean_notes, sections, draft_state):
     section_labels = {
         f"Section {section['number']} — {section['title']}": str(section['number'])
@@ -4781,6 +4816,7 @@ def _lb_build_current_word(template_path, draft_name, clean_notes, sections, dra
         included_bookmarks=included_bookmarks,
         linked_provisions=linked_provisions,
         custom_provisions=custom_provisions,
+        rent_schedules=draft_state.get("rent_schedules"),
         additional_choices=[],
         clean_drafting_notes=clean_notes,
         document_title=draft_name,
@@ -4905,11 +4941,17 @@ def render_lease_builder_tab():
                 }
                 for section in sections
             },
+            "rent_schedules": {
+                "base": _lb_make_base_rent(0, 0, 10),
+                "options": [],
+                "settings": {"start_monthly": 0.0, "base_escalation": 0.0, "option_count": 0, "option_years": 5, "option_jump": 0.0, "option_escalation": 0.0},
+            },
             "kp_version": 0,
             "section_version": 0,
         }
     draft_state = st.session_state[draft_state_key]
     # Backward-compatible migration for configurations saved before group support.
+    draft_state.setdefault("rent_schedules", {"base": _lb_make_base_rent(0, 0, 10), "options": [], "settings": {"start_monthly": 0.0, "base_escalation": 0.0, "option_count": 0, "option_years": 5, "option_jump": 0.0, "option_escalation": 0.0}})
     for provision in draft_state["key_provisions"]:
         bookmark = str(provision.get("Bookmark", ""))
         # Saved drafts may contain old internal field labels (e.g., Tx_BuildingAddress).
@@ -5072,6 +5114,33 @@ def render_lease_builder_tab():
         selected_count = sum(1 for row in edited_rows if bool(row.get("Include")))
         count_col.caption(f"{selected_count} used · {len(edited_rows) - selected_count} excluded")
         st.caption("Click a row's Current Value cell to choose from that row's nonblank Alt 1–Alt 10 values. The selected text becomes Current Value immediately.")
+
+        with st.expander("💵 Rent Schedule Builder", expanded=False):
+            rent_state = draft_state.setdefault("rent_schedules", {"base": _lb_make_base_rent(0, 0, 10), "options": [], "settings": {}})
+            settings = rent_state.setdefault("settings", {})
+            st.markdown("#### Base Rent Table")
+            b1, b2, b3, b4 = st.columns(4)
+            start_monthly = b1.number_input("Starting monthly rent", min_value=0.0, value=float(settings.get("start_monthly", 0.0)), step=100.0, key="rent_start_monthly")
+            base_escalation = b2.number_input("Annual escalation %", min_value=-100.0, value=float(settings.get("base_escalation", 0.0)), step=0.25, key="rent_base_escalation")
+            base_years = b3.number_input("Base lease years", min_value=1, max_value=10, value=int(settings.get("base_years", 10)), step=1, key="rent_base_years")
+            if b4.button("Generate Base Table", key="rent_generate_base"):
+                rent_state["base"] = _lb_make_base_rent(start_monthly, base_escalation, base_years)
+            settings.update({"start_monthly": start_monthly, "base_escalation": base_escalation, "base_years": base_years})
+            base_df = st.data_editor(pd.DataFrame(rent_state.get("base", [])), hide_index=True, width="stretch", key="rent_base_grid")
+            rent_state["base"] = base_df.to_dict("records")
+
+            st.markdown("#### Option Rent Table")
+            o1, o2, o3, o4 = st.columns(4)
+            option_count = o1.number_input("Number of options", min_value=0, max_value=5, value=int(settings.get("option_count", 0)), step=1, key="rent_option_count")
+            option_years = o2.number_input("Years per option", min_value=1, max_value=10, value=int(settings.get("option_years", 5)), step=1, key="rent_option_years")
+            option_jump = o3.number_input("Option start jump %", min_value=-100.0, value=float(settings.get("option_jump", 0.0)), step=0.25, key="rent_option_jump")
+            option_escalation = o4.number_input("Option annual escalation %", min_value=-100.0, value=float(settings.get("option_escalation", 0.0)), step=0.25, key="rent_option_escalation")
+            if st.button("Generate Option Table", key="rent_generate_options"):
+                rent_state["options"] = _lb_make_option_rent(rent_state["base"], option_count, option_years, option_jump, option_escalation)
+            settings.update({"option_count": option_count, "option_years": option_years, "option_jump": option_jump, "option_escalation": option_escalation})
+            option_df = st.data_editor(pd.DataFrame(rent_state.get("options", [])), hide_index=True, width="stretch", key="rent_option_grid")
+            rent_state["options"] = option_df.to_dict("records")
+            st.caption("Both tables are editable year by year and replace the template rent grids in the generated lease.")
 
         st.markdown("### Lease Sections")
         st.caption("Every numbered section is listed below. Use the table to include/exclude sections, then select one to edit its language.")

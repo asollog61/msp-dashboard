@@ -9,6 +9,8 @@ import re
 from typing import Any
 
 from docx import Document
+from docx.enum.table import WD_TABLE_ALIGNMENT
+from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
 from docx.text.paragraph import Paragraph
@@ -288,6 +290,69 @@ def _section_contains_ref(paragraphs: list[Paragraph], bookmark_name: str) -> bo
     return False
 
 
+def _remove_empty_key_provision_rows(document: Document) -> None:
+    """Collapse blank KPS rows so the visible table matches selected provisions."""
+    if not document.tables:
+        return
+    table = document.tables[0]
+    for row in reversed(table.rows):
+        if all(not cell.text.strip() for cell in row.cells):
+            parent = row._tr.getparent()
+            if parent is not None:
+                parent.remove(row._tr)
+
+
+def _clean_legacy_rent_placeholders(document: Document) -> None:
+    """Remove old Base Rent / Option table placeholder text."""
+    for table in document.tables:
+        for row in table.rows:
+            for cell in row.cells:
+                for paragraph in cell.paragraphs:
+                    if "Table End" in paragraph.text or "DELETE TABLE" in paragraph.text:
+                        paragraph.text = paragraph.text.replace("DELETE TABLE", "").replace("Table End", "").strip()
+
+
+def _insert_schedule_table(document: Document, anchor: Paragraph, title: str, rows: list[dict[str, Any]]) -> None:
+    if not rows:
+        return
+    heading = _insert_after(anchor, title, "")
+    heading.alignment = WD_ALIGN_PARAGRAPH.LEFT
+    table = document.add_table(rows=1, cols=3)
+    table.style = "Table Grid"
+    table.alignment = WD_TABLE_ALIGNMENT.CENTER
+    for cell, header in zip(table.rows[0].cells, ["Period", "Monthly Rent", "Annual Rent"]):
+        cell.text = header
+        if cell.paragraphs[0].runs:
+            cell.paragraphs[0].runs[0].bold = True
+    for row_data in rows:
+        cells = table.add_row().cells
+        cells[0].text = str(row_data.get("Period", ""))
+        cells[1].text = str(row_data.get("Monthly Rent", ""))
+        cells[2].text = str(row_data.get("Annual Rent", ""))
+    # The table is initially appended to the document; relocate it beneath the heading.
+    heading._p.addnext(table._tbl)
+
+
+def _insert_rent_schedules(document: Document, rent_schedules: dict[str, Any] | None) -> None:
+    if not rent_schedules:
+        return
+    base_rows = list(rent_schedules.get("base", []))
+    option_rows = list(rent_schedules.get("options", []))
+    if not base_rows and not option_rows:
+        return
+    _replace_bookmark_text(document, "Tx_BaseRent", "")
+    _clean_legacy_rent_placeholders(document)
+    sections = {section["number"]: section for section in scan_sections(document)}
+    paragraphs = list(document.paragraphs)
+    base_section = sections.get("5")
+    option_section = sections.get("5.3") or base_section
+    if base_section and base_rows:
+        _insert_schedule_table(document, paragraphs[base_section["start"]], "Base Rent Table", base_rows)
+    if option_section and option_rows:
+        anchor_index = max(option_section["start"], option_section["end"] - 1)
+        _insert_schedule_table(document, paragraphs[anchor_index], "Option Rent Table", option_rows)
+
+
 def _insert_after(paragraph: Paragraph, title: str, text: str) -> Paragraph:
     new_element = OxmlElement("w:p")
     paragraph._p.addnext(new_element)
@@ -433,6 +498,7 @@ def build_word_document(
     included_bookmarks: set[str] | list[str] | None = None,
     linked_provisions: list[dict[str, Any]] | None = None,
     custom_provisions: list[dict[str, Any]] | None = None,
+    rent_schedules: dict[str, Any] | None = None,
     additional_choices: list[dict[str, Any]] | None = None,
     clean_drafting_notes: bool = True,
     document_title: str = "MSP Lease Draft",
@@ -481,6 +547,8 @@ def build_word_document(
             row.cells[1].text = value
             row.cells[2].text = value
 
+    _insert_rent_schedules(document, rent_schedules)
+
     current_sections = {section["number"]: section for section in scan_sections(document)}
     current_paragraphs = list(document.paragraphs)
 
@@ -513,6 +581,7 @@ def build_word_document(
             _insert_after(anchor, str(item.get("title", "Additional Provision")), str(item["text"]))
 
     _remove_template_markers(document)
+    _remove_empty_key_provision_rows(document)
 
     if clean_drafting_notes:
         _clean_drafting_notes(document)
