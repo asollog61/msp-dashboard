@@ -5,6 +5,7 @@ Shared multi-user dashboard with Google Sheets backend.
 import streamlit as st
 import html as html_lib
 import json
+from io import BytesIO
 import os
 import re
 import shutil
@@ -4524,6 +4525,98 @@ LEASE_DEFAULT_LINKS = {
 }
 
 
+
+def _lb_bool(value, default=False):
+    if isinstance(value, bool):
+        return value
+    text = str(value).strip().lower()
+    if text in {"true", "yes", "y", "1", "use", "include"}:
+        return True
+    if text in {"false", "no", "n", "0", "don't use", "exclude"}:
+        return False
+    return default
+
+
+def _lb_export_key_provisions_xlsx(rows):
+    """Export the editable key-provision table; Bookmark is hidden but retained for re-import."""
+    export_rows = []
+    for row in rows:
+        export_rows.append({
+            "Group": row.get("Group", "Optional"),
+            "Use": bool(row.get("Include", True)),
+            "Key Provision": row.get("Field", ""),
+            "Value": row.get("Value", ""),
+            "Link": bool(row.get("Link", False)),
+            "Target Section": row.get("Section", ""),
+            "Bookmark": row.get("Bookmark", ""),
+        })
+    output = BytesIO()
+    with pd.ExcelWriter(output, engine="openpyxl") as writer:
+        pd.DataFrame(export_rows).to_excel(writer, index=False, sheet_name="Key Provisions")
+        worksheet = writer.book["Key Provisions"]
+        worksheet.freeze_panes = "A2"
+        worksheet.auto_filter.ref = worksheet.dimensions
+        worksheet.column_dimensions["G"].hidden = True
+        widths = {"A": 14, "B": 9, "C": 28, "D": 70, "E": 9, "F": 34}
+        for column, width in widths.items():
+            worksheet.column_dimensions[column].width = width
+    return output.getvalue()
+
+
+def _lb_import_key_provisions_xlsx(uploaded_file, existing_rows, section_labels):
+    """Merge an uploaded key-provision workbook into the current draft by Bookmark or name."""
+    uploaded_file.seek(0)
+    imported = pd.read_excel(uploaded_file, sheet_name=0, dtype=object).fillna("")
+    aliases = {
+        "Group": "Group", "Use": "Include", "Include": "Include",
+        "Key Provision": "Field", "Field": "Field", "Name": "Field",
+        "Value": "Value", "Link": "Link", "Target Section": "Section",
+        "Section": "Section", "Bookmark": "Bookmark",
+    }
+    normalized = {}
+    for column in imported.columns:
+        key = aliases.get(str(column).strip())
+        if key:
+            normalized[key] = column
+    if "Field" not in normalized and "Bookmark" not in normalized:
+        raise ValueError("The workbook needs a Key Provision/Field or Bookmark column.")
+
+    by_bookmark = {str(row.get("Bookmark", "")): row for row in existing_rows}
+    by_field = {str(row.get("Field", "")).strip().lower(): row for row in existing_rows}
+    result = list(existing_rows)
+    for _, source in imported.iterrows():
+        bookmark = str(source.get(normalized.get("Bookmark", "__missing__"), "")).strip()
+        field = str(source.get(normalized.get("Field", "__missing__"), "")).strip()
+        row = by_bookmark.get(bookmark) if bookmark else by_field.get(field.lower())
+        if row is None:
+            row = {
+                "Group": "Optional",
+                "Include": True,
+                "Field": field or "New Key Provision",
+                "Value": "",
+                "Link": False,
+                "Section": next(iter(section_labels.values())),
+                "Bookmark": "Custom_" + uuid4().hex[:12],
+            }
+            result.append(row)
+        if "Group" in normalized:
+            group = str(source[normalized["Group"]]).strip()
+            row["Group"] = group if group in {"Mandatory", "Optional"} else "Optional"
+        if "Include" in normalized:
+            row["Include"] = _lb_bool(source[normalized["Include"]], row.get("Include", True))
+        if "Field" in normalized and field:
+            row["Field"] = field
+        if "Value" in normalized:
+            row["Value"] = str(source[normalized["Value"]])
+        if "Link" in normalized:
+            row["Link"] = _lb_bool(source[normalized["Link"]], row.get("Link", False))
+        if "Section" in normalized:
+            target = str(source[normalized["Section"]]).strip()
+            target = section_labels.get(target, target) if isinstance(section_labels, dict) else target
+            row["Section"] = target if target in section_labels.values() else next(iter(section_labels.values()))
+    return result
+
+
 def _lb_section_body(section_number, text):
     text = str(text or "").strip()
     pattern = re.compile(
@@ -4836,6 +4929,32 @@ def render_lease_builder_tab():
             draft_state["kp_version"] += 1
             st.session_state[master_applied_key] = master_value
             st.rerun()
+
+        with st.expander("📊 Key Provisions Excel Import / Export", expanded=False):
+            excel_col, upload_col = st.columns([1, 1])
+            excel_col.download_button(
+                "⬇️ Download Key Provisions Excel",
+                data=_lb_export_key_provisions_xlsx(draft_state["key_provisions"]),
+                file_name="MSP_Key_Provisions.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                key="lb_download_key_provisions_excel",
+                width="stretch",
+            )
+            uploaded_kp = upload_col.file_uploader(
+                "Upload Key Provisions Excel",
+                type=["xlsx", "xls"],
+                key="lb_upload_key_provisions_excel",
+            )
+            if uploaded_kp is not None and st.button("Import Uploaded Table", key="lb_import_key_provisions_excel"):
+                try:
+                    draft_state["key_provisions"] = _lb_import_key_provisions_xlsx(
+                        uploaded_kp, draft_state["key_provisions"], section_labels
+                    )
+                    draft_state["kp_version"] += 1
+                    st.success("Key Provisions table imported.")
+                    st.rerun()
+                except Exception as exc:
+                    st.error(f"Key Provisions import failed: {exc}")
 
         # The provision grid is the only drag surface. The first column is a handle;
         # clicking/editing elsewhere does not reorder anything.
