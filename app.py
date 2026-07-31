@@ -4651,8 +4651,10 @@ def _lb_section_body(section_number, text):
     return pattern.sub("", text, count=1).strip()
 
 
-def _lb_preview_html(key_provisions, preview_sections, focus_section=""):
-    selected_provisions = [item for item in key_provisions if bool(item.get("Include"))]
+def _lb_preview_html(key_provisions, preview_sections, focus_section="", show_all=False):
+    selected_provisions = [
+        item for item in key_provisions if show_all or bool(item.get("Include"))
+    ]
     section_name_to_number = {
         f"Section {section['number']} — {section['title']}": str(section['number'])
         for section in preview_sections
@@ -4671,7 +4673,7 @@ def _lb_preview_html(key_provisions, preview_sections, focus_section=""):
 
     section_blocks = []
     for section in preview_sections:
-        if not bool(section.get("include", True)):
+        if not show_all and not bool(section.get("include", True)):
             continue
         number = str(section["number"])
         section_id = "section-" + re.sub(r"[^A-Za-z0-9_-]", "-", number)
@@ -4891,7 +4893,130 @@ def _lb_import_rent_schedule_xlsx(uploaded_file):
     }
 
 
-def _lb_build_current_word(template_path, draft_name, clean_notes, sections, draft_state):
+# ---------------------------------------------------------------------------
+# Two-mode model.
+#
+# TEMPLATE mode authors the menu: every provision and every clause choice is
+# visible and editable, and "Use" means "checked on by default" for new leases.
+# LEASE mode consumes the menu: pick which provisions and sections are used and
+# which choice applies, and the preview shows only what is used.
+#
+# Templates live in the "Lease Builder Templates" sheet, leases in "Saved
+# Leases". A lease stores only its selections (bookmark, on/off, chosen value)
+# and re-hydrates the alternates from its parent template, which keeps saved
+# leases small and lets a template edit propagate to future leases.
+# ---------------------------------------------------------------------------
+
+LB_MODE_TEMPLATE = "🧩 Edit Lease Template"
+LB_MODE_LEASE = "📄 Create Lease"
+LEASE_TEMPLATE_SHEET = "Lease Builder Templates"
+SAVED_LEASE_SHEET = "Saved Leases"
+LB_BASE_ONLY = "Base template only (no saved template)"
+LB_NEW_TEMPLATE = "➕ New template from base"
+LB_NEW_LEASE = "➕ New lease"
+
+
+def _lb_compact_sections(sections, section_state):
+    """Store a section's choice, and its text only when it departs from template language."""
+    compact = {}
+    for section in sections:
+        number = str(section["number"])
+        config = section_state.get(number, {})
+        entry = {
+            "include": bool(config.get("include", True)),
+            "choice": config.get("choice", "Template language"),
+        }
+        # Unchanged template text is what previously blew past the cell limit.
+        if entry["choice"] != "Template language":
+            entry["text"] = config.get("text", "")
+        compact[number] = entry
+    return compact
+
+
+def _lb_compact_lease_provisions(rows):
+    """A lease keeps only its selections; alternates come back from the template."""
+    return [
+        {
+            "Bookmark": str(row.get("Bookmark", "")),
+            "Include": bool(row.get("Include", True)),
+            "Value": str(row.get("Value", "")),
+        }
+        for row in rows
+    ]
+
+
+def _lb_hydrate_lease_provisions(template_rows, lease_rows):
+    """Overlay a lease's saved on/off + chosen value onto the template's full provision rows."""
+    by_bookmark = {str(row.get("Bookmark", "")): row for row in lease_rows or []}
+    hydrated = []
+    for source in template_rows:
+        row = dict(source)
+        row["Alternates"] = list(source.get("Alternates", []))
+        saved = by_bookmark.pop(str(row.get("Bookmark", "")), None)
+        if saved is not None:
+            row["Include"] = bool(saved.get("Include", row.get("Include", True)))
+            row["Value"] = str(saved.get("Value", row.get("Value", "")))
+        hydrated.append(row)
+    # A provision added on the lease itself has no template parent; keep it.
+    for leftover in by_bookmark.values():
+        hydrated.append({
+            "Group": "Optional",
+            "Include": bool(leftover.get("Include", True)),
+            "Field": str(leftover.get("Field", "Custom Provision")),
+            "Value": str(leftover.get("Value", "")),
+            "Alternates": [""] * 10,
+            "Link": False,
+            "Section": "",
+            "Bookmark": str(leftover.get("Bookmark", "")),
+        })
+    return hydrated
+
+
+def _lb_apply_template_defaults(draft_state, saved_template, sections, for_mode):
+    """Load a saved template into draft state.
+
+    In lease mode the template's Include flags are the starting defaults; in
+    template mode they are the values being edited. Either way the rows and
+    clause choices come from the template.
+    """
+    provisions = saved_template.get("key_provisions") or []
+    if provisions:
+        draft_state["key_provisions"] = [
+            {**row, "Alternates": list(row.get("Alternates", []) or [])}
+            for row in provisions
+        ]
+    for number, config in (saved_template.get("sections") or {}).items():
+        if number in draft_state["sections"]:
+            draft_state["sections"][number].update(config)
+    if for_mode == LB_MODE_LEASE:
+        draft_state["rent_schedules"] = _lb_default_rent_schedules()
+    return draft_state
+
+
+def _lb_section_variant_texts(selected_label, section_number, built_in_library, saved_clause_library):
+    """Every approved text for one section: template language plus all saved variants."""
+    texts = []
+    for variant in built_in_library.get(section_number, {}).get("variants", []):
+        texts.append(str(variant.get("text", "")))
+    if isinstance(saved_clause_library, dict):
+        for variant in saved_clause_library.get(selected_label, {}).get(section_number, []):
+            texts.append(str(variant.get("text", "")))
+    return texts
+
+
+def _lb_is_off_menu(text, approved_texts):
+    """True when the drafted language matches nothing the template offers."""
+    def squash(value):
+        return re.sub(r"\s+", " ", str(value or "")).strip().lower()
+
+    candidate = squash(text)
+    if not candidate:
+        return False
+    return all(candidate != squash(approved) for approved in approved_texts)
+
+
+def _lb_build_current_word(template_path, draft_name, clean_notes, sections, draft_state,
+                           force_include_all=False):
     section_labels = {
         f"Section {section['number']} — {section['title']}": str(section['number'])
         for section in sections
@@ -4904,10 +5029,14 @@ def _lb_build_current_word(template_path, draft_name, clean_notes, sections, dra
         base_text = str(section["text"])
         replacement_text = "" if configured_text.strip() == base_text.strip() else _lb_section_body(number, configured_text)
         section_choices[number] = {
-            "include": bool(config.get("include", True)),
+            # Template mode proofreads the whole menu, so nothing is filtered out.
+            "include": True if force_include_all else bool(config.get("include", True)),
             "title": section["title"],
             "replacement_text": replacement_text,
         }
+
+    def is_used(row):
+        return True if force_include_all else bool(row.get("Include"))
 
     bookmark_values = {
         str(row["Bookmark"]): row.get("Value", "")
@@ -4915,14 +5044,14 @@ def _lb_build_current_word(template_path, draft_name, clean_notes, sections, dra
     }
     included_bookmarks = {
         str(row["Bookmark"])
-        for row in draft_state["key_provisions"] if bool(row.get("Include"))
+        for row in draft_state["key_provisions"] if is_used(row)
     }
     linked_provisions = [
         {
             "bookmark": str(row["Bookmark"]),
             "field": row.get("Field", "Key Provision"),
             "value": row.get("Value", ""),
-            "include": bool(row.get("Include")),
+            "include": is_used(row),
             "section": section_labels.get(str(row.get("Section", "")), str(row.get("Section", ""))),
         }
         for row in draft_state["key_provisions"] if bool(row.get("Link"))
@@ -4931,7 +5060,7 @@ def _lb_build_current_word(template_path, draft_name, clean_notes, sections, dra
         {
             "field": row.get("Field", "Key Provision"),
             "value": row.get("Value", ""),
-            "include": bool(row.get("Include")),
+            "include": is_used(row),
             "section": section_labels.get(str(row.get("Section", "")), str(row.get("Section", ""))),
         }
         for row in draft_state["key_provisions"]
@@ -4996,6 +5125,7 @@ def _lb_reset_editor_widget_state():
     prefixes = (
         "lb_kp_editor_", "lb_section_editor_", "lb_section_choice_",
         "lb_section_text_", "lb_new_choice_name_",
+        "rent_base_grid", "rent_option_grid", "lb_offmenu_",
     )
     for key in list(st.session_state.keys()):
         if key.startswith(prefixes):
@@ -5004,7 +5134,6 @@ def _lb_reset_editor_widget_state():
 
 def render_lease_builder_tab():
     st.markdown("## 🧱 Lease Builder")
-    st.caption("Build the actual lease content, save reusable templates, and maintain clause choices by section.")
 
     if not LEASE_BUILDER_AVAILABLE:
         st.error("Lease Builder dependency is unavailable. Install python-docx from requirements.txt.")
@@ -5015,21 +5144,72 @@ def render_lease_builder_tab():
         st.warning("No DOCX lease templates were found in data/Lease Builder.")
         return
 
-    saved_templates = _read_gsheet_config("Lease Builder Templates") or {}
+    saved_templates = _read_gsheet_config(LEASE_TEMPLATE_SHEET) or {}
+    saved_leases = _read_gsheet_config(SAVED_LEASE_SHEET) or {}
     saved_clause_library = _read_gsheet_config("Lease Clause Library") or {}
-    saved_value_choices = _read_gsheet_config("Lease Provision Values") or {}
     built_in_library = load_clause_library().get("sections", {})
 
-    header1, header2, header3, header4 = st.columns([3, 2, 2, 1])
-    selected_label = header1.selectbox(
-        "Base lease template", [template["label"] for template in templates], key="lb_template"
+    mode = st.radio(
+        "Mode",
+        [LB_MODE_TEMPLATE, LB_MODE_LEASE],
+        horizontal=True,
+        key="lb_mode",
+        label_visibility="collapsed",
     )
-    saved_choice = header2.selectbox(
-        "Saved configuration", ["Current Draft"] + sorted(saved_templates.keys()), key="lb_saved_choice"
-    )
-    draft_name = header3.text_input("Draft name", value="MSP Lease Draft", key="lb_draft_name")
-    clean_notes = header4.toggle("Clean draft", value=True, key="lb_clean_notes")
-    template = next(template for template in templates if template["label"] == selected_label)
+    template_mode = mode == LB_MODE_TEMPLATE
+    if template_mode:
+        st.caption(
+            "**Template mode** — every provision and every clause choice is shown and editable. "
+            "This is where you build the menu. The preview shows the whole template, including "
+            "provisions that are off by default."
+        )
+    else:
+        st.caption(
+            "**Lease mode** — pick which provisions and sections this deal uses and which choice "
+            "applies. The preview and the Word draft show only what is used."
+        )
+
+    # ---- Header selectors ------------------------------------------------
+    if template_mode:
+        head1, head2, head3 = st.columns([3, 3, 1.4])
+        selected_label = head1.selectbox(
+            "Base lease template (.docx)", [item["label"] for item in templates], key="lb_template"
+        )
+        template_names = sorted(
+            name for name, config in saved_templates.items()
+            if config.get("base_template") == selected_label
+        )
+        working_template = head2.selectbox(
+            "Template being edited", [LB_NEW_TEMPLATE] + template_names, key="lb_template_edit_choice"
+        )
+        clean_notes = head3.toggle("Clean draft", value=True, key="lb_clean_notes")
+        lease_choice = LB_NEW_LEASE
+        draft_name = working_template if working_template != LB_NEW_TEMPLATE else "MSP Lease Template"
+    else:
+        head1, head2, head3 = st.columns([2.4, 2.4, 2.4])
+        selected_label = head1.selectbox(
+            "Base lease template (.docx)", [item["label"] for item in templates], key="lb_template"
+        )
+        template_names = sorted(
+            name for name, config in saved_templates.items()
+            if config.get("base_template") == selected_label
+        )
+        working_template = head2.selectbox(
+            "Lease template to use", [LB_BASE_ONLY] + template_names, key="lb_lease_template_choice"
+        )
+        lease_names = sorted(
+            name for name, config in saved_leases.items()
+            if config.get("base_template") == selected_label
+        )
+        lease_choice = head3.selectbox(
+            "Load a saved lease", [LB_NEW_LEASE] + lease_names, key="lb_saved_lease_choice"
+        )
+        name1, name2 = st.columns([4, 1.4])
+        default_draft_name = lease_choice if lease_choice != LB_NEW_LEASE else "MSP Lease Draft"
+        draft_name = name1.text_input("Draft name", value=default_draft_name, key="lb_draft_name")
+        clean_notes = name2.toggle("Clean draft", value=True, key="lb_clean_notes")
+
+    template = next(item for item in templates if item["label"] == selected_label)
 
     try:
         template_data = inspect_template(template["path"])
@@ -5045,9 +5225,9 @@ def render_lease_builder_tab():
     }
     section_by_number = {str(section["number"]): section for section in sections}
 
-    draft_state_key = f"lb_draft_state_{Path(template['path']).stem}"
-    if draft_state_key not in st.session_state:
-        st.session_state[draft_state_key] = {
+    # ---- Draft state, rebuilt whenever the mode or a selector changes ----
+    def fresh_draft_state():
+        return {
             "key_provisions": [
                 {
                     "Group": "Mandatory" if item["bookmark"] in LEASE_MANDATORY_BOOKMARKS else "Optional",
@@ -5056,7 +5236,10 @@ def render_lease_builder_tab():
                     "Value": item["value"],
                     "Alternates": [""] * 10,
                     "Link": item["bookmark"] in LEASE_DEFAULT_LINKS,
-                    "Section": section_labels.get(str(LEASE_DEFAULT_LINKS.get(item["bookmark"], section_numbers[0])), section_labels[section_numbers[0]]),
+                    "Section": section_labels.get(
+                        str(LEASE_DEFAULT_LINKS.get(item["bookmark"], section_numbers[0])),
+                        section_labels[section_numbers[0]],
+                    ),
                     "Bookmark": item["bookmark"],
                 }
                 for item in template_data["bookmarks"]
@@ -5073,8 +5256,33 @@ def render_lease_builder_tab():
             "kp_version": 0,
             "section_version": 0,
         }
+
+    draft_state_key = f"lb_draft_state_{Path(template['path']).stem}"
+    load_marker = "|".join([mode, selected_label, working_template, lease_choice])
+    if draft_state_key not in st.session_state or st.session_state.get("lb_load_marker") != load_marker:
+        new_state = fresh_draft_state()
+        parent_template_name = working_template if working_template not in (LB_NEW_TEMPLATE, LB_BASE_ONLY) else ""
+        if parent_template_name:
+            _lb_apply_template_defaults(new_state, saved_templates.get(parent_template_name, {}), sections, mode)
+        if not template_mode and lease_choice != LB_NEW_LEASE:
+            lease = saved_leases.get(lease_choice, {})
+            lease_parent = lease.get("template_name", "")
+            if lease_parent and lease_parent in saved_templates and not parent_template_name:
+                # A saved lease remembers its template so alternates re-hydrate correctly.
+                _lb_apply_template_defaults(new_state, saved_templates[lease_parent], sections, mode)
+            new_state["key_provisions"] = _lb_hydrate_lease_provisions(
+                new_state["key_provisions"], lease.get("key_provisions", [])
+            )
+            for number, config in (lease.get("sections") or {}).items():
+                if number in new_state["sections"]:
+                    new_state["sections"][number].update(config)
+            new_state["rent_schedules"] = lease.get("rent_schedules") or _lb_default_rent_schedules()
+        st.session_state[draft_state_key] = new_state
+        st.session_state["lb_load_marker"] = load_marker
+        _lb_reset_editor_widget_state()
+        st.rerun()
+
     draft_state = st.session_state[draft_state_key]
-    # Backward-compatible migration for configurations saved before group support.
     draft_state.setdefault("rent_schedules", _lb_default_rent_schedules())
     for provision in draft_state["key_provisions"]:
         bookmark = str(provision.get("Bookmark", ""))
@@ -5088,36 +5296,41 @@ def render_lease_builder_tab():
         provision["Alternates"] = slots + [""] * (10 - len(slots))
         provision.setdefault("Link", bookmark in LEASE_DEFAULT_LINKS)
         raw_section = provision.get("Section", LEASE_DEFAULT_LINKS.get(bookmark, section_numbers[0]))
-        provision["Section"] = section_labels.get(str(raw_section), str(raw_section) if str(raw_section) in section_labels.values() else section_labels[section_numbers[0]])
+        provision["Section"] = section_labels.get(
+            str(raw_section),
+            str(raw_section) if str(raw_section) in section_labels.values() else section_labels[section_numbers[0]],
+        )
 
-    load_marker = f"{selected_label}|{saved_choice}"
-    if saved_choice != "Current Draft" and st.session_state.get("lb_loaded_saved_marker") != load_marker:
-        saved = saved_templates.get(saved_choice, {})
-        if saved.get("base_template") == selected_label:
-            draft_state["key_provisions"] = saved.get("key_provisions", draft_state["key_provisions"])
-            loaded_sections = saved.get("sections", {})
-            for number, config in loaded_sections.items():
-                if number in draft_state["sections"]:
-                    draft_state["sections"][number].update(config)
-            draft_state["kp_version"] += 1
-            draft_state["section_version"] += 1
-            _lb_reset_editor_widget_state()
-            st.session_state["lb_loaded_saved_marker"] = load_marker
-            st.rerun()
-        else:
-            st.warning("That saved configuration belongs to a different base template.")
+    if not template_mode and working_template == LB_BASE_ONLY and template_names:
+        st.info(
+            "No lease template selected — you are drafting straight from the base Word file, so no "
+            "clause alternates are available. Pick a template above to draft from the approved menu."
+        )
 
     left, right = st.columns([1.12, 0.88], gap="large")
     live_word_bytes = None
+    use_label = "Default On" if template_mode else "Use"
 
     with left:
         st.markdown("### Key Provisions")
+        if template_mode:
+            st.caption(
+                "Every provision in the base template is listed. Fill in **Alt 1–Alt 10** to define the "
+                "values a lease can choose from. **Default On** decides whether a new lease starts with "
+                "that provision checked."
+            )
+        else:
+            st.caption(
+                "Tick **Use** for the provisions this lease needs, then click a row's **Current Value** "
+                "to pick from that row's alternates."
+            )
+
         command_col, count_col = st.columns([2, 3])
         master_key = f"lb_kp_master_{Path(template['path']).stem}"
         master_applied_key = master_key + "_applied"
         st.session_state.setdefault(master_key, True)
         st.session_state.setdefault(master_applied_key, True)
-        master_value = command_col.checkbox("Include all / clear all", key=master_key)
+        master_value = command_col.checkbox(f"{use_label}: all / none", key=master_key)
         if master_value != st.session_state[master_applied_key]:
             for row in draft_state["key_provisions"]:
                 row["Include"] = master_value
@@ -5126,6 +5339,10 @@ def render_lease_builder_tab():
             st.rerun()
 
         with st.expander("📊 Key Provisions Excel Import / Export", expanded=False):
+            if template_mode:
+                st.caption("Bulk-edit the Alt 1–Alt 10 choice lists in Excel, then upload the workbook back.")
+            else:
+                st.caption("Export this lease's provision selections, or upload a filled-in workbook.")
             excel_col, upload_col = st.columns([1, 1])
             excel_col.download_button(
                 "⬇️ Download Key Provisions Excel",
@@ -5151,9 +5368,7 @@ def render_lease_builder_tab():
                 except Exception as exc:
                     st.error(f"Key Provisions import failed: {exc}")
 
-        st.info("To switch values: click the row’s **Current Value** cell and select one of that row’s alternate values. The selected text becomes Current Value immediately. Scroll horizontally to see Alt 1–Alt 10; edit alternates through Excel upload/download.")
-
-        # This is the single editable Key Provisions grid. The drag handle is the only reorder control.
+        # Single editable Key Provisions grid. The drag handle is the only reorder control.
         draft_state["key_provisions"] = sorted(
             draft_state["key_provisions"],
             key=lambda row: 0 if bool(row.get("Include")) else 1,
@@ -5177,12 +5392,14 @@ def render_lease_builder_tab():
         grid_builder = GridOptionsBuilder.from_dataframe(kp_df)
         grid_builder.configure_default_column(resizable=True, sortable=False, filter=False, editable=False)
         grid_builder.configure_column("Drag", header_name="", rowDrag=True, editable=False, width=42, suppressMenu=True)
-        grid_builder.configure_column("Group", header_name="Group", editable=True, width=105,
+        # Group, Link and Target Section describe the template's structure, so a
+        # lease can read them but only template mode can change them.
+        grid_builder.configure_column("Group", header_name="Group", editable=template_mode, width=105,
                                       cellEditor="agSelectCellEditor",
                                       cellEditorParams={"values": ["Mandatory", "Optional"]})
-        grid_builder.configure_column("Include", header_name="Use", editable=True, width=68,
+        grid_builder.configure_column("Include", header_name=use_label, editable=True, width=88,
                                       cellRenderer="agCheckboxCellRenderer", cellEditor="agCheckboxCellEditor")
-        grid_builder.configure_column("Field", header_name="Key Provision", editable=False, width=165)
+        grid_builder.configure_column("Field", header_name="Key Provision", editable=template_mode, width=165)
         current_value_choices = JsCode("""
             function(params) {
                 var values = [];
@@ -5196,15 +5413,20 @@ def render_lease_builder_tab():
                 return { values: values };
             }
         """)
-        grid_builder.configure_column("Current Value", header_name="Current Value", editable=True, width=330,
-                                      cellEditor="agSelectCellEditor", cellEditorParams=current_value_choices)
-        grid_builder.configure_column("Link", header_name="Link", editable=True, width=68,
+        if template_mode:
+            # Free text: template mode is where the default value itself is authored.
+            grid_builder.configure_column("Current Value", header_name="Default Value", editable=True, width=330)
+        else:
+            grid_builder.configure_column("Current Value", header_name="Current Value", editable=True, width=330,
+                                          cellEditor="agSelectCellEditor", cellEditorParams=current_value_choices)
+        grid_builder.configure_column("Link", header_name="Link", editable=template_mode, width=68,
                                       cellRenderer="agCheckboxCellRenderer", cellEditor="agCheckboxCellEditor")
-        grid_builder.configure_column("Section", header_name="Target Section", editable=True, width=210,
+        grid_builder.configure_column("Section", header_name="Target Section", editable=template_mode, width=210,
                                       cellEditor="agSelectCellEditor",
                                       cellEditorParams={"values": list(section_labels.values())})
         for index in range(1, 11):
-            grid_builder.configure_column(f"Alt {index}", header_name=f"Alt {index}", editable=False, width=185)
+            grid_builder.configure_column(f"Alt {index}", header_name=f"Alt {index}",
+                                          editable=template_mode, width=185)
         grid_builder.configure_column("Bookmark", hide=True)
         grid_builder.configure_grid_options(
             rowDragManaged=True,
@@ -5221,7 +5443,7 @@ def render_lease_builder_tab():
             data_return_mode=DataReturnMode.AS_INPUT,
             fit_columns_on_grid_load=False,
             allow_unsafe_jscode=True,
-            key=f"lb_kp_grid_v7_{Path(template['path']).stem}",
+            key=f"lb_kp_grid_v8_{'tpl' if template_mode else 'lease'}_{Path(template['path']).stem}",
         )
         edited_kp = grid_result.data if hasattr(grid_result, "data") else grid_result["data"]
         if edited_kp is None:
@@ -5236,71 +5458,134 @@ def render_lease_builder_tab():
             edited_rows.append(row)
         draft_state["key_provisions"] = edited_rows
         selected_count = sum(1 for row in edited_rows if bool(row.get("Include")))
-        count_col.caption(f"{selected_count} used · {len(edited_rows) - selected_count} excluded")
-        st.caption("Click a row's Current Value cell to choose from that row's nonblank Alt 1–Alt 10 values. The selected text becomes Current Value immediately.")
+        if template_mode:
+            count_col.caption(f"{len(edited_rows)} provisions · {selected_count} on by default")
+        else:
+            count_col.caption(f"{selected_count} used · {len(edited_rows) - selected_count} excluded")
 
-        with st.expander("💵 Rent Schedule Excel Import / Export", expanded=False):
-            rent_state = draft_state.setdefault("rent_schedules", _lb_default_rent_schedules())
-            rent_state.pop("settings", None)  # Retired generator settings from older drafts.
-            st.caption(
-                "Download the workbook, type the monthly and annual rent for each period in Excel, "
-                "then upload it back. Whatever you enter is what prints in the lease — nothing is recalculated."
-            )
-            download_col, upload_col = st.columns([1, 1])
-            download_col.download_button(
-                "⬇️ Download Rent Schedule Excel",
-                data=_lb_export_rent_schedule_xlsx(rent_state),
-                file_name="MSP_Rent_Schedule.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                key="lb_download_rent_schedule_excel",
-                width="stretch",
-            )
-            uploaded_rent = upload_col.file_uploader(
-                "Upload Rent Schedule Excel",
-                type=["xlsx", "xls"],
-                key="lb_upload_rent_schedule_excel",
-            )
-            if uploaded_rent is not None and st.button("Import Uploaded Rent Schedule", key="lb_import_rent_schedule_excel"):
-                try:
-                    draft_state["rent_schedules"] = _lb_import_rent_schedule_xlsx(uploaded_rent)
-                    imported = draft_state["rent_schedules"]
-                    st.success(
-                        f"Rent schedule imported — {len(imported['base'])} base rows, "
-                        f"{len(imported['options'])} option rows."
+        # ---- Off-menu value check (lease mode only) ----------------------
+        if not template_mode and template_names:
+            off_menu_rows = [
+                row for row in edited_rows
+                if bool(row.get("Include"))
+                and str(row.get("Value", "")).strip()
+                and _lb_is_off_menu(row.get("Value", ""), [
+                    value for value in row.get("Alternates", []) if str(value).strip()
+                ])
+            ]
+            if off_menu_rows:
+                with st.expander(f"⚠️ {len(off_menu_rows)} value(s) not in the template", expanded=False):
+                    st.caption(
+                        "These values were typed for this deal and are not among the template's "
+                        "alternates. Add any that should become a standing choice."
                     )
-                    st.rerun()
-                except Exception as exc:
-                    st.error(f"Rent schedule import failed: {exc}")
+                    add_target = st.selectbox(
+                        "Add to which template?", template_names, key="lb_offmenu_value_target"
+                    )
+                    for row in off_menu_rows:
+                        bookmark = str(row.get("Bookmark", ""))
+                        value_col, button_col = st.columns([4, 1.3])
+                        value_col.markdown(f"**{row.get('Field', '')}** — {row.get('Value', '')}")
+                        if button_col.button("Add as Alt", key=f"lb_offmenu_add_{bookmark}"):
+                            target = dict(saved_templates.get(add_target, {}))
+                            target_rows = [dict(item) for item in target.get("key_provisions", [])]
+                            match = next(
+                                (item for item in target_rows if str(item.get("Bookmark", "")) == bookmark), None
+                            )
+                            if match is None:
+                                st.error("That provision does not exist in the selected template.")
+                            else:
+                                slots = [str(value) for value in match.get("Alternates", [])[:10]]
+                                slots += [""] * (10 - len(slots))
+                                if str(row.get("Value", "")) in slots:
+                                    st.info("That value is already a choice in the template.")
+                                elif "" not in slots:
+                                    st.error("All ten Alt slots are full in that template.")
+                                else:
+                                    slots[slots.index("")] = str(row.get("Value", ""))
+                                    match["Alternates"] = slots
+                                    target["key_provisions"] = target_rows
+                                    target["saved_at"] = datetime.now().isoformat(timespec="seconds")
+                                    updated = dict(saved_templates)
+                                    updated[add_target] = target
+                                    if _write_gsheet_config(LEASE_TEMPLATE_SHEET, updated):
+                                        st.success(f"Added to {add_target}.")
+                                        st.rerun()
+                                    else:
+                                        st.error("Could not write to Google Sheets.")
 
-            st.caption(
-                "Workbook layout: a **Base Rent** sheet and an **Option Rent** sheet, each with "
-                "Period, Monthly Rent, and Annual Rent columns. Add or delete rows freely — "
-                "row count is not fixed. Blank rows are ignored."
-            )
+        # ---- Rent schedule (lease mode only) ------------------------------
+        if not template_mode:
+            with st.expander("💵 Rent Schedule Excel Import / Export", expanded=False):
+                rent_state = draft_state.setdefault("rent_schedules", _lb_default_rent_schedules())
+                rent_state.pop("settings", None)  # Retired generator settings from older drafts.
+                st.caption(
+                    "Download the workbook, type the monthly and annual rent for each period in Excel, "
+                    "then upload it back. Whatever you enter is what prints in the lease — nothing is recalculated."
+                )
+                download_col, upload_col = st.columns([1, 1])
+                download_col.download_button(
+                    "⬇️ Download Rent Schedule Excel",
+                    data=_lb_export_rent_schedule_xlsx(rent_state),
+                    file_name="MSP_Rent_Schedule.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    key="lb_download_rent_schedule_excel",
+                    width="stretch",
+                )
+                uploaded_rent = upload_col.file_uploader(
+                    "Upload Rent Schedule Excel",
+                    type=["xlsx", "xls"],
+                    key="lb_upload_rent_schedule_excel",
+                )
+                if uploaded_rent is not None and st.button("Import Uploaded Rent Schedule", key="lb_import_rent_schedule_excel"):
+                    try:
+                        draft_state["rent_schedules"] = _lb_import_rent_schedule_xlsx(uploaded_rent)
+                        imported = draft_state["rent_schedules"]
+                        st.success(
+                            f"Rent schedule imported — {len(imported['base'])} base rows, "
+                            f"{len(imported['options'])} option rows."
+                        )
+                        st.rerun()
+                    except Exception as exc:
+                        st.error(f"Rent schedule import failed: {exc}")
 
-            st.markdown("#### Base Rent Table")
-            base_df = st.data_editor(
-                pd.DataFrame(rent_state.get("base", []), columns=RENT_COLUMNS),
-                hide_index=True,
-                num_rows="dynamic",
-                width="stretch",
-                key="rent_base_grid",
-            )
-            rent_state["base"] = base_df.to_dict("records")
+                st.caption(
+                    "Workbook layout: a **Base Rent** sheet and an **Option Rent** sheet, each with "
+                    "Period, Monthly Rent, and Annual Rent columns. Add or delete rows freely — "
+                    "row count is not fixed. Blank rows are ignored."
+                )
 
-            st.markdown("#### Option Rent Table")
-            option_df = st.data_editor(
-                pd.DataFrame(rent_state.get("options", []), columns=RENT_COLUMNS),
-                hide_index=True,
-                num_rows="dynamic",
-                width="stretch",
-                key="rent_option_grid",
-            )
-            rent_state["options"] = option_df.to_dict("records")
-            st.caption("These two tables replace the template rent grids in the generated lease.")
+                st.markdown("#### Base Rent Table")
+                base_df = st.data_editor(
+                    pd.DataFrame(rent_state.get("base", []), columns=RENT_COLUMNS),
+                    hide_index=True,
+                    num_rows="dynamic",
+                    width="stretch",
+                    key="rent_base_grid",
+                )
+                rent_state["base"] = base_df.to_dict("records")
 
+                st.markdown("#### Option Rent Table")
+                option_df = st.data_editor(
+                    pd.DataFrame(rent_state.get("options", []), columns=RENT_COLUMNS),
+                    hide_index=True,
+                    num_rows="dynamic",
+                    width="stretch",
+                    key="rent_option_grid",
+                )
+                rent_state["options"] = option_df.to_dict("records")
+                st.caption("These two tables replace the template rent grids in the generated lease.")
+
+        # ---- Lease sections ------------------------------------------------
         st.markdown("### Lease Sections")
-        st.caption("Every numbered section is listed below. Use the table to include/exclude sections, then select one to edit its language.")
+        if template_mode:
+            st.caption(
+                "Every numbered section is listed. **Default On** decides whether a new lease starts "
+                "with the section included. Select a section below to author its language and save "
+                "additional clause choices."
+            )
+        else:
+            st.caption("Tick the sections this lease uses, then select one to choose its clause language.")
         section_rows = [
             {
                 "Include": bool(draft_state["sections"][str(section["number"])].get("include", True)),
@@ -5317,7 +5602,7 @@ def render_lease_builder_tab():
             height=520,
             disabled=["Number", "Section"],
             column_config={
-                "Include": st.column_config.CheckboxColumn("Use", width="small"),
+                "Include": st.column_config.CheckboxColumn(use_label, width="small"),
                 "Number": st.column_config.TextColumn("#", width="small"),
                 "Section": st.column_config.TextColumn("Section", width="large"),
             },
@@ -5356,6 +5641,8 @@ def render_lease_builder_tab():
         current_choice = section_config.get("choice", "Template language")
         if current_choice not in choice_options:
             current_choice = "Custom language"
+        if template_mode:
+            st.caption(f"{len(variant_map)} saved clause choice(s) for this section.")
         choice = st.selectbox(
             "Clause choice",
             choice_options,
@@ -5372,71 +5659,175 @@ def render_lease_builder_tab():
         section_text = st.text_area("Section language", value=default_text, height=260, key=text_key)
         section_config.update({"choice": choice, "text": section_text})
 
-        save_choice_col, choice_name_col = st.columns([2, 3])
-        new_choice_name = choice_name_col.text_input(
-            "New clause-choice name",
-            key=f"lb_new_choice_name_{selected_section}",
-            placeholder="e.g., Customer parking only",
+        approved_texts = [section_by_number[selected_section]["text"]] + _lb_section_variant_texts(
+            selected_label, selected_section, built_in_library, saved_clause_library
         )
-        if save_choice_col.button("Save as clause choice", key=f"lb_save_choice_{selected_section}"):
-            if not new_choice_name.strip():
-                st.warning("Enter a name for the clause choice.")
-            else:
-                updated_library = dict(saved_clause_library) if isinstance(saved_clause_library, dict) else {}
-                template_library = updated_library.setdefault(selected_label, {})
-                section_library = template_library.setdefault(selected_section, [])
-                section_library = [item for item in section_library if item.get("name") != new_choice_name.strip()]
-                section_library.append({"name": new_choice_name.strip(), "text": section_text})
-                template_library[selected_section] = section_library
-                if _write_gsheet_config("Lease Clause Library", updated_library):
-                    st.success(f"Saved clause choice: {new_choice_name.strip()}")
-                    st.rerun()
-                else:
-                    st.error("Could not save the clause choice to Google Sheets.")
+        off_menu_text = _lb_is_off_menu(section_text, approved_texts)
 
-        st.markdown("### Save This Configuration as a Template")
-        save_name_col, save_button_col = st.columns([3, 2])
-        save_name = save_name_col.text_input("Template name", key="lb_save_template_name", placeholder="e.g., MSP NNN Retail — Restaurant")
-        if save_button_col.button("💾 Save New Template", type="primary", key="lb_save_template"):
-            if not save_name.strip():
-                st.warning("Enter a template name first.")
-            else:
-                compact_sections = {}
-                for section in sections:
-                    number = str(section["number"])
-                    config = draft_state["sections"][number]
-                    compact_entry = {
-                        "include": bool(config.get("include", True)),
-                        "choice": config.get("choice", "Template language"),
-                    }
-                    # Do not store unchanged template text; it is what exceeded the cell limit.
-                    if compact_entry["choice"] != "Template language":
-                        compact_entry["text"] = config.get("text", "")
-                    compact_sections[number] = compact_entry
-                template_config = {
+        if template_mode:
+            save_choice_col, choice_name_col = st.columns([2, 3])
+            new_choice_name = choice_name_col.text_input(
+                "New clause-choice name",
+                key=f"lb_new_choice_name_{selected_section}",
+                placeholder="e.g., Customer parking only",
+            )
+            if save_choice_col.button("Save as clause choice", key=f"lb_save_choice_{selected_section}"):
+                if not new_choice_name.strip():
+                    st.warning("Enter a name for the clause choice.")
+                else:
+                    updated_library = dict(saved_clause_library) if isinstance(saved_clause_library, dict) else {}
+                    template_library = updated_library.setdefault(selected_label, {})
+                    section_library = template_library.setdefault(selected_section, [])
+                    section_library = [item for item in section_library if item.get("name") != new_choice_name.strip()]
+                    section_library.append({"name": new_choice_name.strip(), "text": section_text})
+                    template_library[selected_section] = section_library
+                    if _write_gsheet_config("Lease Clause Library", updated_library):
+                        st.success(f"Saved clause choice: {new_choice_name.strip()}")
+                        st.rerun()
+                    else:
+                        st.error("Could not save the clause choice to Google Sheets.")
+        elif off_menu_text:
+            st.warning(
+                "This language is not in the template. It will still print in this lease — "
+                "should it also become a standing clause choice?"
+            )
+            off1, off2, off3 = st.columns([2, 2, 1.4])
+            off_target = off1.selectbox(
+                "Add to template",
+                template_names or [LB_BASE_ONLY],
+                key=f"lb_offmenu_section_target_{selected_section}",
+                disabled=not template_names,
+            )
+            off_name = off2.text_input(
+                "Clause-choice name",
+                key=f"lb_offmenu_section_name_{selected_section}",
+                placeholder="e.g., Restaurant venting carve-out",
+            )
+            if off3.button("Add choice", key=f"lb_offmenu_section_add_{selected_section}", disabled=not template_names):
+                if not off_name.strip():
+                    st.warning("Name the clause choice first.")
+                else:
+                    # Clause choices are keyed by base .docx label, so the whole
+                    # library for this base template picks the new choice up.
+                    updated_library = dict(saved_clause_library) if isinstance(saved_clause_library, dict) else {}
+                    template_library = updated_library.setdefault(selected_label, {})
+                    section_library = template_library.setdefault(selected_section, [])
+                    section_library = [item for item in section_library if item.get("name") != off_name.strip()]
+                    section_library.append({"name": off_name.strip(), "text": section_text})
+                    template_library[selected_section] = section_library
+                    if _write_gsheet_config("Lease Clause Library", updated_library):
+                        st.success(f"Added '{off_name.strip()}' as a clause choice for {off_target}.")
+                        st.rerun()
+                    else:
+                        st.error("Could not save the clause choice to Google Sheets.")
+
+        # ---- Save controls -------------------------------------------------
+        if template_mode:
+            st.markdown("### Save Lease Template")
+            existing = working_template != LB_NEW_TEMPLATE
+
+            def template_payload():
+                return {
                     "base_template": selected_label,
                     "key_provisions": draft_state["key_provisions"],
-                    "sections": compact_sections,
+                    "sections": _lb_compact_sections(sections, draft_state["sections"]),
                     "saved_at": datetime.now().isoformat(timespec="seconds"),
                 }
-                updated_templates = dict(saved_templates)
-                updated_templates[save_name.strip()] = template_config
-                if _write_gsheet_config("Lease Builder Templates", updated_templates):
-                    st.success(f"Saved template: {save_name.strip()}")
+
+            save_col, saveas_name_col, saveas_col = st.columns([1.5, 2.5, 1.5])
+            if save_col.button(
+                "💾 Save Lease Template",
+                type="primary",
+                key="lb_save_template",
+                disabled=not existing,
+                width="stretch",
+            ):
+                updated = dict(saved_templates)
+                updated[working_template] = template_payload()
+                if _write_gsheet_config(LEASE_TEMPLATE_SHEET, updated):
+                    st.success(f"Saved template: {working_template}")
                     st.rerun()
                 else:
                     st.error("Could not save the template to Google Sheets.")
+            if not existing:
+                save_col.caption("Pick an existing template to enable overwrite.")
+            save_as_name = saveas_name_col.text_input(
+                "Save as new name", key="lb_save_template_as_name", placeholder="e.g., MSP NNN Retail — Restaurant"
+            )
+            if saveas_col.button("💾 Save Template As…", key="lb_save_template_as", width="stretch"):
+                if not save_as_name.strip():
+                    st.warning("Enter a template name first.")
+                elif save_as_name.strip() in saved_templates:
+                    st.warning("A template with that name already exists. Choose a different name.")
+                else:
+                    updated = dict(saved_templates)
+                    updated[save_as_name.strip()] = template_payload()
+                    if _write_gsheet_config(LEASE_TEMPLATE_SHEET, updated):
+                        st.success(f"Saved template: {save_as_name.strip()}")
+                        st.rerun()
+                    else:
+                        st.error("Could not save the template to Google Sheets.")
+        else:
+            st.markdown("### Save Lease")
+            existing_lease = lease_choice != LB_NEW_LEASE
+
+            def lease_payload():
+                return {
+                    "base_template": selected_label,
+                    "template_name": working_template if working_template != LB_BASE_ONLY else "",
+                    "draft_name": draft_name,
+                    "key_provisions": _lb_compact_lease_provisions(draft_state["key_provisions"]),
+                    "sections": _lb_compact_sections(sections, draft_state["sections"]),
+                    "rent_schedules": draft_state.get("rent_schedules", _lb_default_rent_schedules()),
+                    "saved_at": datetime.now().isoformat(timespec="seconds"),
+                }
+
+            save_col, saveas_name_col, saveas_col = st.columns([1.5, 2.5, 1.5])
+            if save_col.button(
+                "💾 Save Lease",
+                type="primary",
+                key="lb_save_lease",
+                disabled=not existing_lease,
+                width="stretch",
+            ):
+                updated = dict(saved_leases)
+                updated[lease_choice] = lease_payload()
+                if _write_gsheet_config(SAVED_LEASE_SHEET, updated):
+                    st.success(f"Saved lease: {lease_choice}")
+                    st.rerun()
+                else:
+                    st.error("Could not save the lease to Google Sheets.")
+            if not existing_lease:
+                save_col.caption("New leases use Save Lease As.")
+            lease_as_name = saveas_name_col.text_input(
+                "Save as new name", key="lb_save_lease_as_name", placeholder="e.g., 114 Central — Suite 2 — Reves Smoothie"
+            )
+            if saveas_col.button("💾 Save Lease As…", key="lb_save_lease_as", width="stretch"):
+                if not lease_as_name.strip():
+                    st.warning("Enter a lease name first.")
+                elif lease_as_name.strip() in saved_leases:
+                    st.warning("A lease with that name already exists. Choose a different name.")
+                else:
+                    updated = dict(saved_leases)
+                    updated[lease_as_name.strip()] = lease_payload()
+                    if _write_gsheet_config(SAVED_LEASE_SHEET, updated):
+                        st.success(f"Saved lease: {lease_as_name.strip()}")
+                        st.rerun()
+                    else:
+                        st.error("Could not save the lease to Google Sheets.")
 
         st.caption("Drafting tool only. Final lease language should be reviewed by New Jersey counsel.")
 
         try:
             live_word_bytes = _lb_build_current_word(
-                template["path"], draft_name, clean_notes, sections, draft_state
+                template["path"], draft_name, clean_notes, sections, draft_state,
+                force_include_all=template_mode,
             )
         except Exception as exc:
             st.error(f"Current draft could not be generated: {exc}")
 
-        if st.button("📝 Build Word Document", type="primary", key="lb_build_word", width="stretch"):
+        build_label = "📝 Build Full Template Word Document" if template_mode else "📝 Build Word Document"
+        if st.button(build_label, type="primary", key="lb_build_word", width="stretch"):
             if live_word_bytes:
                 st.session_state["lb_word_bytes"] = live_word_bytes
                 st.session_state["lb_word_filename"] = (
@@ -5464,13 +5855,16 @@ def render_lease_builder_tab():
         preview_sections.append({
             "number": number,
             "title": section["title"],
-            "include": bool(config.get("include", True)),
+            "include": True if template_mode else bool(config.get("include", True)),
             "text": config.get("text", section["text"]),
         })
 
     with right:
-        st.markdown("### Draft Preview")
-        st.caption("Independent preview pane — scroll these pages without moving the editor.")
+        st.markdown("### Template Preview" if template_mode else "### Draft Preview")
+        if template_mode:
+            st.caption("Shows the entire template, including provisions and sections that are off by default.")
+        else:
+            st.caption("Shows only the provisions and sections this lease uses.")
         if live_word_bytes:
             with st.spinner("Rendering the actual Word draft…"):
                 rendered_pages = _lb_render_word_pages(live_word_bytes)
@@ -5490,6 +5884,7 @@ def render_lease_builder_tab():
                     draft_state["key_provisions"],
                     preview_sections,
                     st.session_state.get("lb_preview_focus_section", ""),
+                    show_all=template_mode,
                 )
                 st.components.v1.html(preview_html, height=1120, scrolling=True)
 
