@@ -39,6 +39,9 @@ try:
         find_kp_references,
         humanize_bookmark,
         inspect_template,
+        KP_LINK_COLOR,
+        KP_TOKEN_RE,
+        normalize_kp_tokens,
         load_clause_library,
         publish_template_docx,
         PUBLISHED_PREFIX,
@@ -5140,6 +5143,31 @@ def _lb_is_off_menu(text, approved_texts):
     return all(candidate != squash(approved) for approved in approved_texts)
 
 
+def _lb_token_preview_html(text, names):
+    """Clause text with [KP:...] tokens coloured: green when they resolve, red when not."""
+    known = {str(name).strip().lower() for name in names if str(name).strip()}
+    pieces = []
+    position = 0
+    source = str(text or "")
+    for match in KP_TOKEN_RE.finditer(source):
+        pieces.append(html_lib.escape(source[position:match.start()]))
+        resolves = match.group(1).strip().lower() in known
+        colour = f"#{KP_LINK_COLOR}" if resolves else "#d13438"
+        title = "Resolves to this provision's value" if resolves else "No provision with this name"
+        pieces.append(
+            f'<span style="color:{colour};font-weight:600;text-decoration:underline;" '
+            f'title="{title}">{html_lib.escape(match.group(0))}</span>'
+        )
+        position = match.end()
+    pieces.append(html_lib.escape(source[position:]))
+    body = "".join(pieces).replace("\n", "<br>")
+    return (
+        '<div style="border:1px solid rgba(128,128,128,.35);border-radius:.5rem;'
+        'padding:.75rem;font-size:.85rem;line-height:1.5;max-height:260px;overflow-y:auto;'
+        f'white-space:pre-wrap;">{body}</div>'
+    )
+
+
 def _lb_token_citations(sections, draft_state, include_only=True):
     """Map provision name -> section numbers whose clause text cites it via KP:.
 
@@ -5487,6 +5515,19 @@ def render_lease_builder_tab():
             str(raw_section),
             str(raw_section) if str(raw_section) in section_labels.values() else section_labels[section_numbers[0]],
         )
+
+    # Clause text saved before tokens were bracketed is repaired in place, so an
+    # older template does not keep showing bare KP:Name citations.
+    provision_names = [
+        str(row.get("Field", "")).strip()
+        for row in draft_state["key_provisions"]
+        if str(row.get("Field", "")).strip()
+    ]
+    for config in draft_state["sections"].values():
+        current = str(config.get("text", ""))
+        upgraded = normalize_kp_tokens(current, provision_names)
+        if upgraded != current:
+            config["text"] = upgraded
 
     if not template_mode and working_template == LB_BASE_ONLY and template_names:
         st.info(
@@ -5925,14 +5966,19 @@ def render_lease_builder_tab():
         section_text = st.text_area("Section language", value=default_text, height=260, key=text_key)
         section_config.update({"choice": choice, "text": section_text})
 
+        all_provision_names = [str(r.get("Field", "")) for r in draft_state["key_provisions"]]
+        if KP_TOKEN_RE.search(section_text or ""):
+            st.caption("Cross-references — green resolves, red matches no provision:")
+            st.markdown(
+                _lb_token_preview_html(section_text, all_provision_names),
+                unsafe_allow_html=True,
+            )
         st.caption(
             "Cite a key provision with **[KP:Name]** — for example `[KP:Lease Execution Date]`. "
             "The value from the Key Provisions summary is substituted when the document is built, "
             "printed in green as a link back up to that row, and the Linked column updates itself."
         )
-        cited_here = sorted(find_kp_references(
-            section_text, [str(r.get("Field", "")) for r in draft_state["key_provisions"]]
-        ))
+        cited_here = sorted(find_kp_references(section_text, all_provision_names))
         if cited_here:
             st.caption("Cited in this section: " + ", ".join(f"`[KP:{name}]`" for name in cited_here))
         with st.popover("📋 Key provision tokens", width="stretch"):

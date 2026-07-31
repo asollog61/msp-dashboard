@@ -427,6 +427,31 @@ def humanize_bookmark(bookmark: str) -> str:
     return re.sub(r"\s+", " ", spaced).strip() or str(bookmark)
 
 
+def normalize_kp_tokens(text: str, names: Any) -> str:
+    """Upgrade bare KP:Name citations to the bracketed [KP:Name] form.
+
+    Clause text drafted before brackets existed, or typed without them, is
+    repaired by matching the known provision names longest-first so that
+    KP:Tenant Share of Property does not stop at KP:Tenant.
+    """
+    source = str(text or "")
+    if ":" not in source:
+        return source
+    ordered = sorted(
+        {str(name).strip() for name in names if str(name).strip()}, key=len, reverse=True
+    )
+    if not ordered:
+        return source
+    alternation = "|".join(re.escape(name) for name in ordered)
+    # (?<!\[) leaves already-bracketed tokens untouched.
+    pattern = re.compile(r"(?<!\[)\bKPS?:\s*(" + alternation + r")", re.IGNORECASE)
+    lookup = {name.lower(): name for name in ordered}
+    return pattern.sub(
+        lambda match: kp_token(lookup.get(match.group(1).strip().lower(), match.group(1).strip())),
+        source,
+    )
+
+
 def _kp_segments(text: str, values: dict[str, str], lookup: dict[str, str]) -> tuple[list, set, set]:
     """Split text into plain and cross-reference pieces.
 
