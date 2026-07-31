@@ -4555,7 +4555,6 @@ def _lb_export_key_provisions_xlsx(rows):
             "Use": bool(row.get("Include", True)),
             "Key Provision": row.get("Field", ""),
             "Current Value": row.get("Value", ""),
-            "Use Choice": row.get("Choice", "Current Value"),
             "Link": bool(row.get("Link", False)),
             "Target Section": row.get("Section", ""),
             "Bookmark": row.get("Bookmark", ""),
@@ -4583,7 +4582,7 @@ def _lb_import_key_provisions_xlsx(uploaded_file, existing_rows, section_labels)
     aliases = {
         "Group": "Group", "Use": "Include", "Include": "Include",
         "Key Provision": "Field", "Field": "Field", "Name": "Field",
-        "Current Value": "Value", "Value": "Value", "Use Choice": "Choice", "Link": "Link", "Target Section": "Section",
+        "Current Value": "Value", "Value": "Value", "Link": "Link", "Target Section": "Section",
         "Section": "Section", "Bookmark": "Bookmark",
     }
     normalized = {}
@@ -4623,19 +4622,17 @@ def _lb_import_key_provisions_xlsx(uploaded_file, existing_rows, section_labels)
             row["Field"] = field
         if "Value" in normalized:
             row["Value"] = str(source[normalized["Value"]])
-        if "Choice" in normalized:
-            row["Choice"] = str(source[normalized["Choice"]]).strip() or "Current Value"
-        alternate_values = []
+        # Keep literal Alt 1–Alt 10 positions. Empty earlier cells must not
+        # shift Alt 3 into Alt 1.
+        alternate_slots = []
         for index in range(1, 11):
-            column = next((column_name for column_name in imported.columns if str(column_name).strip().lower() == f"alt {index}".lower()), None)
-            if column is not None:
-                value = str(source[column]).strip()
-                if value:
-                    alternate_values.append(value)
-        if alternate_values:
-            row["Alternates"] = list(dict.fromkeys(alternate_values))[:10]
-        else:
-            row.setdefault("Alternates", [])
+            column = next(
+                (column_name for column_name in imported.columns
+                 if str(column_name).strip().lower() == f"alt {index}".lower()),
+                None,
+            )
+            alternate_slots.append(str(source[column]).strip() if column is not None else "")
+        row["Alternates"] = alternate_slots
         if "Link" in normalized:
             row["Link"] = _lb_bool(source[normalized["Link"]], row.get("Link", False))
         if "Section" in normalized:
@@ -4893,8 +4890,7 @@ def render_lease_builder_tab():
                     "Include": True,
                     "Field": item["field"],
                     "Value": item["value"],
-                    "Alternates": [],
-                    "Choice": "Current Value",
+                    "Alternates": [""] * 10,
                     "Link": item["bookmark"] in LEASE_DEFAULT_LINKS,
                     "Section": section_labels.get(str(LEASE_DEFAULT_LINKS.get(item["bookmark"], section_numbers[0])), section_labels[section_numbers[0]]),
                     "Bookmark": item["bookmark"],
@@ -4922,8 +4918,8 @@ def render_lease_builder_tab():
         provision.setdefault("Group", "Mandatory" if bookmark in LEASE_MANDATORY_BOOKMARKS else "Optional")
         provision.setdefault("Include", True)
         provision.setdefault("Alternates", [])
-        provision["Alternates"] = list(dict.fromkeys(str(value) for value in provision.get("Alternates", []) if str(value).strip()))[:10]
-        provision.setdefault("Choice", "Current Value")
+        slots = [str(value) for value in provision.get("Alternates", [])[:10]]
+        provision["Alternates"] = slots + [""] * (10 - len(slots))
         provision.setdefault("Link", bookmark in LEASE_DEFAULT_LINKS)
         raw_section = provision.get("Section", LEASE_DEFAULT_LINKS.get(bookmark, section_numbers[0]))
         provision["Section"] = section_labels.get(str(raw_section), str(raw_section) if str(raw_section) in section_labels.values() else section_labels[section_numbers[0]])
@@ -4989,21 +4985,26 @@ def render_lease_builder_tab():
                 except Exception as exc:
                     st.error(f"Key Provisions import failed: {exc}")
 
+        st.info("To switch values: click the row’s **Current Value** cell and select one of that row’s alternate values. The selected text becomes Current Value immediately. Scroll horizontally to see Alt 1–Alt 10; edit alternates through Excel upload/download.")
+
         # This is the single editable Key Provisions grid. The drag handle is the only reorder control.
         draft_state["key_provisions"] = sorted(
             draft_state["key_provisions"],
             key=lambda row: 0 if bool(row.get("Include")) else 1,
         )
+        # Current Value is the chooser. There is no separate Choice column: click
+        # Current Value and select any nonblank alternate in that same row.
         grid_rows = []
         for source_row in draft_state["key_provisions"]:
             row = dict(source_row)
-            alternates = list(row.get("Alternates", []))[:10]
+            slots = [str(value) for value in row.get("Alternates", [])[:10]]
+            slots += [""] * (10 - len(slots))
             row["Current Value"] = row.get("Value", "")
-            row["Use Choice"] = row.get("Choice", "Current Value")
-            for index in range(10):
-                row[f"Alt {index + 1}"] = alternates[index] if index < len(alternates) else ""
+            for index, value in enumerate(slots, start=1):
+                row[f"Alt {index}"] = value
             row.pop("Value", None)
             row.pop("Alternates", None)
+            row.pop("Choice", None)
             grid_rows.append(row)
         kp_df = pd.DataFrame(grid_rows)
         kp_df.insert(0, "Drag", "")
@@ -5016,10 +5017,21 @@ def render_lease_builder_tab():
         grid_builder.configure_column("Include", header_name="Use", editable=True, width=68,
                                       cellRenderer="agCheckboxCellRenderer", cellEditor="agCheckboxCellEditor")
         grid_builder.configure_column("Field", header_name="Key Provision", editable=False, width=165)
-        grid_builder.configure_column("Current Value", header_name="Current Value", editable=True, width=330)
-        grid_builder.configure_column("Use Choice", header_name="Use Choice", editable=True, width=110,
-                                      cellEditor="agSelectCellEditor",
-                                      cellEditorParams={"values": ["Current Value"] + [f"Alt {i}" for i in range(1, 11)]})
+        current_value_choices = JsCode("""
+            function(params) {
+                var values = [];
+                function add(value) {
+                    if (value !== null && value !== undefined && String(value).trim() !== '' && values.indexOf(String(value)) === -1) {
+                        values.push(String(value));
+                    }
+                }
+                add(params.value);
+                for (var i = 1; i <= 10; i++) { add(params.data['Alt ' + i]); }
+                return { values: values };
+            }
+        """)
+        grid_builder.configure_column("Current Value", header_name="Current Value", editable=True, width=330,
+                                      cellEditor="agSelectCellEditor", cellEditorParams=current_value_choices)
         grid_builder.configure_column("Link", header_name="Link", editable=True, width=68,
                                       cellRenderer="agCheckboxCellRenderer", cellEditor="agCheckboxCellEditor")
         grid_builder.configure_column("Section", header_name="Target Section", editable=True, width=210,
@@ -5043,32 +5055,23 @@ def render_lease_builder_tab():
             data_return_mode=DataReturnMode.AS_INPUT,
             fit_columns_on_grid_load=False,
             allow_unsafe_jscode=True,
-            key=f"lb_kp_grid_v6_{Path(template['path']).stem}",
+            key=f"lb_kp_grid_v7_{Path(template['path']).stem}",
         )
         edited_kp = grid_result.data if hasattr(grid_result, "data") else grid_result["data"]
         if edited_kp is None:
             edited_kp = kp_df
         edited_rows = []
         for row in edited_kp.drop(columns=["Drag"], errors="ignore").to_dict("records"):
-            alternates = [str(row.pop(f"Alt {index}", "")).strip() for index in range(1, 11)]
-            alternates = [value for value in alternates if value]
-            choice = str(row.pop("Use Choice", "Current Value"))
+            slots = [str(row.pop(f"Alt {index}", "")).strip() for index in range(1, 11)]
             current_value = str(row.pop("Current Value", ""))
-            if choice.startswith("Alt "):
-                try:
-                    alt_index = int(choice.split(" ", 1)[1]) - 1
-                    if 0 <= alt_index < len(alternates):
-                        current_value = alternates[alt_index]
-                except ValueError:
-                    choice = "Current Value"
+            row.pop("Choice", None)
             row["Value"] = current_value
-            row["Alternates"] = alternates[:10]
-            row["Choice"] = choice
+            row["Alternates"] = slots
             edited_rows.append(row)
         draft_state["key_provisions"] = edited_rows
         selected_count = sum(1 for row in edited_rows if bool(row.get("Include")))
         count_col.caption(f"{selected_count} used · {len(edited_rows) - selected_count} excluded")
-        st.caption("Drag only from the ↕ handle. Choose Alt 1–Alt 10 from Use Choice to make it the Current Value.")
+        st.caption("Click a row's Current Value cell to choose from that row's nonblank Alt 1–Alt 10 values. The selected text becomes Current Value immediately.")
 
         st.markdown("### Lease Sections")
         st.caption("Every numbered section is listed below. Use the table to include/exclude sections, then select one to edit its language.")
