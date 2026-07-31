@@ -6,6 +6,7 @@ import streamlit as st
 import json
 import os
 import re
+import time
 from datetime import datetime, date, timedelta
 from pathlib import Path
 
@@ -494,10 +495,36 @@ def get_gspread_client():
 
 @st.cache_resource(ttl=300)
 def get_gsheet():
-    gc = get_gspread_client()
+    """Open the dashboard spreadsheet without allowing a Google outage to crash the app."""
+    try:
+        gc = get_gspread_client()
+    except Exception as exc:
+        print(f"Google Sheets authorization unavailable: {type(exc).__name__}: {exc}")
+        return None
     if gc is None:
         return None
-    return gc.open_by_key(SHEET_ID)
+
+    last_error = None
+    for attempt in range(3):
+        try:
+            return gc.open_by_key(SHEET_ID)
+        except gspread.exceptions.APIError as exc:
+            last_error = exc
+            response = getattr(exc, "response", None)
+            status_code = getattr(response, "status_code", None)
+            # Retry only transient quota/server failures. Permission errors should fail fast.
+            if status_code not in (429, 500, 502, 503, 504) or attempt == 2:
+                break
+            time.sleep(1.5 * (2 ** attempt))
+        except Exception as exc:
+            last_error = exc
+            break
+
+    if last_error is not None:
+        response = getattr(last_error, "response", None)
+        status_code = getattr(response, "status_code", "unknown")
+        print(f"Google Sheets unavailable (HTTP {status_code}): {type(last_error).__name__}")
+    return None
 
 
 @st.cache_data(ttl=120)
@@ -4655,6 +4682,8 @@ col_title, col_toggle = st.columns([8, 2])
 col_title.markdown("## 🏢 MSP Property Dashboard")
 st.session_state.mobile_view = col_toggle.toggle("📱 Mobile", value=st.session_state.mobile_view)
 st.caption(f"Marion Street Properties · {TODAY.strftime('%B %d, %Y')}")
+if get_gsheet() is None:
+    st.warning("Google Sheets is temporarily unavailable. Local portfolio data remains visible, but Sheets-backed edits and activity may be unavailable until the connection recovers.")
 
 tab_tenancy, tab_vacancy, tab_leads, tab_covenants, tab_lease_builder, tab_insurance, tab_deposits, tab_reconcile, tab_yardi, tab_sop = st.tabs([
     "🏠 Current Tenancy", "🏚️ Vacancy", "📋 Lead Sheet", "📜 Lease Covenants", "🧱 Lease Builder", "🛡️ Insurance", "💰 Security Deposits", "🔄 Yardi Reconcile", "📊 Yardi Reports", "📋 SOPs"
