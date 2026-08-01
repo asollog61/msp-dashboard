@@ -6,3 +6,4 @@ openpyxl>=3.1.0
 PyMuPDF>=1.23.0
 reportlab>=4.0.0
 python-docx>=1.1.0
+# cold-start marker: Sat 08/01/2026  6:16:51

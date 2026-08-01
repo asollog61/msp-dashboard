@@ -53,6 +53,27 @@ try:
     import lease_content as lc
     import lease_markup as lm
     import lease_render as lr
+
+    # Streamlit re-runs this script without re-importing a module it already
+    # holds, so a deploy can leave a new app.py talking to an old lease_*.py.
+    # The symptom is a redacted AttributeError deep inside a tab. Checking the
+    # names up front turns that into an actionable message instead.
+    for _module, _names in (
+        (lf, ("normalize_profiles", "profile_settings", "resolve_profile_name",
+              "migrate_template_formatting", "describe_settings", "normalize_settings",
+              "settings_diff", "default_settings", "validate_settings",
+              "DEFAULT_PROFILE_NAME", "DEFAULTS")),
+        (lc, ("load_content", "extract_from_docx", "write_content")),
+        (lm, ("parse_blocks", "to_html", "to_markup")),
+        (lr, ("render_lease", "bookmark_names", "dangling_anchors")),
+    ):
+        _missing = [_name for _name in _names if not hasattr(_module, _name)]
+        if _missing:
+            raise ImportError(
+                f"cannot import name {_missing[0]!r} from {_module.__name__!r} "
+                f"(module is stale — {len(_missing)} name(s) missing)"
+            )
+
     LEASE_BUILDER_AVAILABLE = True
     LEASE_BUILDER_ERROR = ""
 except ImportError as exc:
@@ -5766,13 +5787,15 @@ def render_lease_builder_tab():
         # The two failure modes need opposite fixes, so tell them apart rather
         # than always suggesting a reinstall.
         if "cannot import name" in LEASE_BUILDER_ERROR:
+            stale = re.search(r"from '([\w.]+)'", LEASE_BUILDER_ERROR)
+            module_name = stale.group(1) if stale else "lease_builder"
             st.markdown(
-                "`app.py` is newer than the `lease_builder` module currently loaded.\n\n"
+                f"`app.py` is newer than the `{module_name}` module currently loaded.\n\n"
                 "**On Streamlit Cloud:** the old module is still cached in memory — "
-                "*Manage app → ⋮ → Reboot app* forces a fresh import.\n\n"
+                "*Manage app → ⋮ → Reboot app* forces a fresh import. A rerun will not do it.\n\n"
                 "**Running locally:** stop and restart `streamlit run app.py`; a rerun alone "
                 "does not re-import a changed module.\n\n"
-                "If it persists after a reboot, `lease_builder.py` on the deployed branch is "
+                f"If it persists after a reboot, `{module_name}.py` on the deployed branch is "
                 "genuinely out of date — confirm the push landed."
             )
         else:
