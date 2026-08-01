@@ -141,12 +141,28 @@ st.markdown("""
     .badge-long { background: #1f6feb26; color: #58a6ff; padding: 2px 8px; border-radius: 10px; font-size: 12px; font-weight: 600; }
     .sop-card { background: #161b22; border: 1px solid #2d333b; border-radius: 8px; padding: 20px; margin-bottom: 12px; cursor: pointer; transition: all 0.2s; }
     .sop-card:hover { border-color: #58a6ff; }
-    div[data-testid="stDataFrame"] table { font-size: 13px !important; }
-    .ag-theme-streamlit .ag-header-cell-label { font-size: 12px !important; }
+    /* Body text is 11pt everywhere. */
+    [data-testid="stAppViewContainer"], [data-testid="stSidebar"] { font-size: 11pt; }
+    [data-testid="stAppViewContainer"] p,
+    [data-testid="stAppViewContainer"] li,
+    [data-testid="stAppViewContainer"] label,
+    [data-testid="stAppViewContainer"] input,
+    [data-testid="stAppViewContainer"] textarea,
+    [data-testid="stAppViewContainer"] button,
+    [data-testid="stAppViewContainer"] div[data-testid="stMarkdownContainer"] p,
+    [data-testid="stSidebar"] p, [data-testid="stSidebar"] label { font-size: 11pt !important; }
+    /* Grids are 10pt. Declared after the 11pt rules so they win. */
     .ag-right-aligned-header .ag-header-cell-label { justify-content: flex-end !important; }
-    .ag-theme-streamlit .ag-cell { font-size: 12px !important; padding: 2px 6px !important; }
-    .ag-theme-streamlit .ag-row { height: 28px !important; }
-    .ag-theme-streamlit .ag-header-row { height: 32px !important; }
+    .ag-theme-streamlit, .ag-theme-streamlit .ag-cell,
+    .ag-theme-streamlit .ag-header-cell-label,
+    .ag-theme-streamlit input, .ag-theme-streamlit .ag-select,
+    div[data-testid="stDataFrame"] table,
+    div[data-testid="stDataFrame"] td, div[data-testid="stDataFrame"] th,
+    div[data-testid="stDataEditor"] table,
+    div[data-testid="stDataEditor"] td, div[data-testid="stDataEditor"] th { font-size: 10pt !important; }
+    .ag-theme-streamlit .ag-cell { padding: 2px 6px !important; }
+    .ag-theme-streamlit .ag-row { height: 30px !important; }
+    .ag-theme-streamlit .ag-header-row { height: 34px !important; }
     .sop-section { border: 1px solid rgba(255,255,255,0.1); border-radius: 6px; padding: 8px 12px; background: rgba(255,255,255,0.02); margin-bottom: 10px; }
     .sop-heading { font-weight: 600; margin-top: 8px; text-transform: uppercase; letter-spacing: 0.5px; font-size: 0.85rem; color: #c8d4ff; }
     .sop-text { margin: 2px 0 4px; line-height: 1.2; }
