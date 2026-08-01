@@ -5373,10 +5373,14 @@ def _lb_build_rules_word(draft_state, sections, settings):
 
 @st.cache_data(show_spinner=False, max_entries=3)
 def _lb_render_word_pages(word_bytes):
-    """Render the actual generated DOCX to page images for a faithful live preview."""
+    """Render the generated DOCX to page images for a faithful live preview.
+
+    Returns (page_images, {section_number: page_index}) so a preview can jump to
+    a section in the real rendering instead of an HTML approximation of it.
+    """
     office = shutil.which("libreoffice") or shutil.which("soffice")
     if not office or not HAS_PYMUPDF:
-        return []
+        return [], {}
     with tempfile.TemporaryDirectory(prefix="msp-lease-preview-") as temp_dir:
         temp_path = Path(temp_dir)
         docx_path = temp_path / "lease-preview.docx"
@@ -5401,15 +5405,22 @@ def _lb_render_word_pages(word_bytes):
         pdf_path = temp_path / "lease-preview.pdf"
         if result.returncode != 0 or not pdf_path.exists():
             print("Lease preview conversion failed:", result.stderr.decode("utf-8", errors="ignore")[-500:])
-            return []
+            return [], {}
         document = fitz.open(pdf_path)
         pages = []
+        section_pages = {}
         matrix = fitz.Matrix(1.05, 1.05)
-        for page in document:
+        heading_re = re.compile(r"^\s*Section\s+(\d+(?:\.\d+)?)\s*\.", re.IGNORECASE | re.MULTILINE)
+        for index, page in enumerate(document):
             pixmap = page.get_pixmap(matrix=matrix, alpha=False)
             pages.append(pixmap.tobytes("png"))
+            # Record where each section starts so a preview can jump to it.
+            # First occurrence wins: a later cross-reference to "Section 5."
+            # must not drag the jump away from the section itself.
+            for match in heading_re.finditer(page.get_text()):
+                section_pages.setdefault(match.group(1), index)
         document.close()
-        return pages
+        return pages, section_pages
 
 
 def _lb_reset_editor_widget_state():
@@ -5671,10 +5682,10 @@ def _lb_render_document_preview(word_bytes, template_mode, draft_state=None,
             value=900, key="lb_preview_height",
         )
 
-        rendered_pages = []
+        rendered_pages, _section_pages = [], {}
         if word_bytes:
             with st.spinner("Rendering the Word document…"):
-                rendered_pages = _lb_render_word_pages(word_bytes)
+                rendered_pages, _section_pages = _lb_render_word_pages(word_bytes)
 
         if rendered_pages:
             note_col.caption(
@@ -5708,26 +5719,52 @@ def _lb_render_document_preview(word_bytes, template_mode, draft_state=None,
                 )
 
 
-def _lb_render_section_preview(draft_state, preview_sections, template_mode, focus_section):
-    """Preview pinned beside the section editor, scrolled to the section in hand.
+def _lb_render_section_preview(draft_state, preview_sections, template_mode,
+                              focus_section, word_bytes=None):
+    """Preview beside the section editor, opened at the section in hand.
 
-    Deliberately the HTML preview rather than the page images: it can jump to an
-    anchor, which is the entire point of this pane.
+    Uses the same rendered pages as the full preview above — an HTML mock-up
+    beside the real thing invites the question of which one is true, and the
+    answer must always be "they are the same document".
     """
-    if focus_section:
-        st.caption(f"Jumped to **Section {focus_section}**. Pick another section to move.")
+    pages, section_pages = ([], {})
+    if word_bytes:
+        pages, section_pages = _lb_render_word_pages(word_bytes)
+
+    if not pages:
+        # Only when LibreOffice is unavailable: an approximation, labelled as one.
+        st.caption(
+            "⚠️ Word rendering unavailable on this server — showing the "
+            "approximate HTML preview, which does not reflect the format profile."
+        )
+        st.components.v1.html(
+            _lb_preview_html(draft_state["key_provisions"], preview_sections,
+                             focus_section, show_all=template_mode),
+            height=860, scrolling=True,
+        )
+        return
+
+    start = section_pages.get(str(focus_section))
+    if start is None:
+        start = 0
+        st.caption(
+            f"Section {focus_section} has no heading in the rendered document yet — "
+            "showing from page 1."
+            if focus_section else "Select a section on the left to jump to it."
+        )
     else:
-        st.caption("Select a section on the left and this jumps to it.")
-    st.components.v1.html(
-        _lb_preview_html(
-            draft_state["key_provisions"],
-            preview_sections,
-            focus_section,
-            show_all=template_mode,
-        ),
-        height=900,
-        scrolling=True,
-    )
+        st.caption(
+            f"Section {focus_section} begins on page {start + 1} of {len(pages)}."
+        )
+
+    zoom = st.slider("Zoom", min_value=50, max_value=250, value=100, step=10,
+                     format="%d%%", key="lb_section_preview_zoom")
+    pane = st.container(height=860, border=True)
+    with pane:
+        # From the section's page to the end, so reading on past it still works.
+        for offset, page_image in enumerate(pages[start:], start=start + 1):
+            st.image(page_image, caption=f"Page {offset}",
+                     width=int(560 * zoom / 100))
 
 
 def _lb_render_template_header(working_template, saved_templates, profiles, profile_name,
@@ -5791,9 +5828,12 @@ def _lb_render_template_header(working_template, saved_templates, profiles, prof
                     updated[candidate] = payload_builder(profile_name)
                     if _write_gsheet_config(LEASE_TEMPLATE_SHEET, updated):
                         st.session_state["lb_save_as_open"] = False
-                        # Switch the editor to the copy, which is what you
-                        # almost always want after saving one.
-                        st.session_state["lb_template_edit_choice"] = candidate
+                        # Switch the editor to the copy, which is what you almost
+                        # always want after saving one. It has to go through a
+                        # plain key: Streamlit forbids assigning to a widget's own
+                        # key once that widget has been created this run, and the
+                        # picker was built at the top of the tab.
+                        st.session_state["lb_pending_template_choice"] = candidate
                         st.success(f"Saved template: {candidate}")
                         st.rerun()
                     else:
@@ -5946,6 +5986,11 @@ def render_lease_builder_tab():
     if template_mode:
         head2, head3 = st.columns([4, 1.4])
         template_names_all = sorted(saved_templates)
+        # A "Save As" from the previous run parks its new name here. Applying it
+        # before the picker exists is the only legal moment to set a widget key.
+        pending_choice = st.session_state.pop("lb_pending_template_choice", None)
+        if pending_choice in template_names_all:
+            st.session_state["lb_template_edit_choice"] = pending_choice
         # Saved templates come first so opening the tab lands you on a real one
         # rather than on an unnamed draft with Save greyed out.
         working_template = head2.selectbox(
@@ -6881,6 +6926,7 @@ def render_lease_builder_tab():
             _lb_render_section_preview(
                 draft_state, preview_sections, template_mode,
                 st.session_state.get("lb_preview_focus_section", ""),
+                word_bytes=live_word_bytes,
             )
 
         # Filled last because the Word bytes only exist once the editors above
