@@ -5670,37 +5670,64 @@ def _lb_render_template_header(working_template, saved_templates, profiles, prof
     existing = working_template != LB_NEW_TEMPLATE
 
     # ---- 1. Template ----------------------------------------------------
-    st.markdown(f"#### 📄 {working_template if existing else 'New template'}")
     if editable:
-        save_col, name_col, saveas_col = st.columns([1.4, 2.6, 1.4])
+        name_col, save_col, saveas_col = st.columns([4, 1.2, 1.2])
+        name_col.markdown(f"#### 📄 {working_template if existing else 'New template'}")
         if save_col.button("💾 Save", type="primary", key="lb_save_template",
                            disabled=not existing, width="stretch"):
             updated = dict(saved_templates)
             updated[working_template] = payload_builder(profile_name)
             if _write_gsheet_config(LEASE_TEMPLATE_SHEET, updated):
+                st.session_state["lb_save_as_open"] = False
                 st.success(f"Saved template: {working_template}")
                 st.rerun()
             else:
                 st.error("Could not save the template to Google Sheets.")
-        save_as_name = name_col.text_input(
-            "Save as new name", key="lb_save_template_as_name",
-            placeholder="e.g., MSP NNN Retail — Restaurant", label_visibility="collapsed",
-        )
         if saveas_col.button("💾 Save As…", key="lb_save_template_as", width="stretch"):
-            if not save_as_name.strip():
-                st.warning("Enter a template name first.")
-            elif save_as_name.strip() in saved_templates:
-                st.warning("A template with that name already exists.")
-            else:
-                updated = dict(saved_templates)
-                updated[save_as_name.strip()] = payload_builder(profile_name)
-                if _write_gsheet_config(LEASE_TEMPLATE_SHEET, updated):
-                    st.success(f"Saved template: {save_as_name.strip()}")
-                    st.rerun()
+            # Opens the rename field rather than saving immediately — Save As
+            # without a chance to type a name is just a duplicate.
+            st.session_state["lb_save_as_open"] = True
+            st.session_state["lb_save_template_as_name"] = (
+                working_template if existing else ""
+            )
+            st.rerun()
+
+        if st.session_state.get("lb_save_as_open"):
+            rename_col, confirm_col, cancel_col = st.columns([4, 1.2, 1.2])
+            save_as_name = rename_col.text_input(
+                "New template name", key="lb_save_template_as_name",
+                placeholder="e.g., MSP NNN Retail — Restaurant",
+                label_visibility="collapsed",
+            )
+            if confirm_col.button("✔ Save copy", type="primary",
+                                  key="lb_save_as_confirm", width="stretch"):
+                candidate = save_as_name.strip()
+                if not candidate:
+                    st.warning("Enter a template name first.")
+                elif candidate == working_template:
+                    st.warning("That is the current name — use Save to overwrite it.")
+                elif candidate in saved_templates:
+                    st.warning("A template with that name already exists.")
                 else:
-                    st.error("Could not save the template to Google Sheets.")
+                    updated = dict(saved_templates)
+                    updated[candidate] = payload_builder(profile_name)
+                    if _write_gsheet_config(LEASE_TEMPLATE_SHEET, updated):
+                        st.session_state["lb_save_as_open"] = False
+                        # Switch the editor to the copy, which is what you
+                        # almost always want after saving one.
+                        st.session_state["lb_template_edit_choice"] = candidate
+                        st.success(f"Saved template: {candidate}")
+                        st.rerun()
+                    else:
+                        st.error("Could not save the template to Google Sheets.")
+            if cancel_col.button("✕ Cancel", key="lb_save_as_cancel", width="stretch"):
+                st.session_state["lb_save_as_open"] = False
+                st.rerun()
+
         if not existing:
-            st.caption("Pick an existing template to enable overwrite, or use Save As.")
+            st.caption("This is a new template — use Save As to name and create it.")
+    else:
+        st.markdown(f"#### 📄 {working_template if existing else 'New template'}")
 
     # ---- 2. Content -----------------------------------------------------
     sections = library.get("sections", [])
