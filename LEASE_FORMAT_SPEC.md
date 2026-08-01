@@ -34,7 +34,11 @@ This is the target output for generating a lease **without a base Word template*
 
 ## Key Provisions table
 
-- Bordered, 2 columns: label ≈ 1.9 in, value ≈ 5.1 in.
+- Bordered, 2 columns: label **1.71 in**, value **4.79 in** (total 6.5 in — the
+  full printable width). An earlier draft of this spec said ≈1.9 / ≈5.1; that
+  sums to 7.0 in and overruns the margins. These are the widths measured off
+  `2026_07_30 MSP Master_Lease.v8 NNN Retail.docx` (1.706 / 2.346 / 2.442).
+- Split rows use **2.35 in | 2.44 in**, which together equal the value column.
 - **Exception:** the *Notice Addresses* row splits the value into two columns
   (Landlord | Tenant). This is why the source table is 3 columns with most rows
   merged across cols 2–3. Any provision may opt into the split.
@@ -104,8 +108,17 @@ Two levels only:
 
 ## Build order (proposed)
 
-1. Formatting-settings model + form; persist with the template.
-2. Markdown-subset parser → paragraph/run model (pure, unit-testable).
+1. ~~Formatting-settings model + form; persist with the template.~~ **Done** —
+   `lease_format.py` (53 settings, defaults + normalization + validation),
+   the 📐 Document Formatting panel in template mode, saved as a diff against
+   the defaults on the template payload. Tests in `test_lease_format.py`.
+2. ~~Markdown-subset parser → paragraph/run model (pure, unit-testable).~~
+   **Done** — `lease_markup.py`: `Block`/`Run` model, `parse_blocks`,
+   `assign_numbers`, and `to_markup` / `to_plain_text` / `to_html`.
+   `[KP:Name]` comes out as an unresolved ref run, so the parser needs no lease
+   data. Structural markers `[RentTable:…]`, `[PageBreak]`, `[Exhibit:A|Title]`
+   (plus the legacy `Base Rent Table:` / `Table End` pair) each parse to their
+   own block. Tests in `test_lease_markup.py`.
 3. Renderer: page setup, styles, footer.
 4. Key Provisions table incl. the Notice-Addresses split.
 5. Sections with auto-numbering and run-in headings.

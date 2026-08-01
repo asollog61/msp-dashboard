@@ -49,6 +49,7 @@ try:
         publish_template_docx,
         PUBLISHED_PREFIX,
     )
+    import lease_format as lf
     LEASE_BUILDER_AVAILABLE = True
     LEASE_BUILDER_ERROR = ""
 except ImportError as exc:
@@ -5147,6 +5148,9 @@ def _lb_apply_template_defaults(draft_state, saved_template, sections, for_mode)
     for number, config in (saved_template.get("sections") or {}).items():
         if number in draft_state["sections"]:
             draft_state["sections"][number].update(config)
+    # Formatting travels with the template in both modes: a lease is typeset the
+    # way its parent template says, and only overrides what it explicitly changes.
+    draft_state["formatting"] = lf.normalize_settings(saved_template.get("formatting"))
     if for_mode == LB_MODE_LEASE:
         draft_state["rent_schedules"] = _lb_default_rent_schedules()
     return draft_state
@@ -5350,11 +5354,239 @@ def _lb_reset_editor_widget_state():
     prefixes = (
         "lb_kp_editor_", "lb_section_editor_", "lb_section_choice_",
         "lb_section_text_", "lb_new_choice_name_",
-        "rent_base_grid", "rent_option_grid", "lb_offmenu_",
+        "rent_base_grid", "rent_option_grid", "lb_offmenu_", "lb_fmt_",
     )
     for key in list(st.session_state.keys()):
         if key.startswith(prefixes):
             del st.session_state[key]
+
+
+def _lb_render_formatting_form(draft_state, editable=True):
+    """Document Formatting panel — the page-setup and typography rules the
+    template-free renderer will follow.
+
+    Writes straight into draft_state["formatting"] so the values are saved by the
+    ordinary template save. In lease mode the panel is read-only: typography
+    belongs to the template, not to an individual deal.
+    """
+    settings = lf.normalize_settings(draft_state.get("formatting"))
+
+    with st.expander("📐 Document Formatting", expanded=False):
+        if not editable:
+            st.caption(
+                "Formatting is inherited from the parent template. Switch to "
+                "Edit Lease Template to change it."
+            )
+        st.caption(
+            "Defaults match the executed Chez Alice lease. These rules drive "
+            "generation directly — there is no base Word file behind them."
+        )
+
+        def number(label, key, step=0.1, fmt="%.2f", help_text=None):
+            low, high = lf._NUMERIC_BOUNDS.get(key, (0.0, 100.0))
+            return st.number_input(
+                label,
+                min_value=float(low),
+                max_value=float(high),
+                value=float(settings[key]),
+                step=step,
+                format=fmt,
+                key=f"lb_fmt_{key}",
+                help=help_text,
+                disabled=not editable,
+            )
+
+        def choice(label, key, options, help_text=None):
+            current = settings[key]
+            return st.selectbox(
+                label,
+                options,
+                index=options.index(current) if current in options else 0,
+                key=f"lb_fmt_{key}",
+                help=help_text,
+                disabled=not editable,
+            )
+
+        def flag(label, key, help_text=None):
+            return st.checkbox(
+                label,
+                value=bool(settings[key]),
+                key=f"lb_fmt_{key}",
+                help=help_text,
+                disabled=not editable,
+            )
+
+        def text(label, key, placeholder="", help_text=None):
+            return st.text_input(
+                label,
+                value=str(settings[key]),
+                key=f"lb_fmt_{key}",
+                placeholder=placeholder,
+                help=help_text,
+                disabled=not editable,
+            )
+
+        updated = dict(settings)
+        page_tab, body_tab, kp_tab, section_tab, rent_tab, back_tab = st.tabs(
+            ["Page", "Body Text", "Key Provisions", "Sections", "Rent Table", "Signatures & Exhibits"]
+        )
+
+        with page_tab:
+            col1, col2 = st.columns(2)
+            with col1:
+                updated["page_size"] = choice("Page size", "page_size", list(lf.PAGE_SIZES))
+                updated["margin_top_in"] = number("Top margin (in)", "margin_top_in")
+                updated["margin_bottom_in"] = number("Bottom margin (in)", "margin_bottom_in")
+            with col2:
+                updated["margin_left_in"] = number("Left margin (in)", "margin_left_in")
+                updated["margin_right_in"] = number("Right margin (in)", "margin_right_in")
+            st.markdown("**Footer**")
+            foot1, foot2, foot3 = st.columns([2, 1, 1])
+            with foot1:
+                updated["footer_doc_id"] = text(
+                    "Counsel document ID", "footer_doc_id",
+                    placeholder="4928-4211-2690, v. 2",
+                    help_text="Prints at the footer left. Per-template, not per-lease.",
+                )
+            with foot2:
+                updated["footer_font_size_pt"] = number("Footer size (pt)", "footer_font_size_pt", step=0.5, fmt="%.1f")
+            with foot3:
+                updated["page_number_position"] = choice(
+                    "Page number", "page_number_position", lf.PAGE_NUMBER_POSITIONS
+                )
+            st.markdown("**Title block**")
+            title1, title2 = st.columns(2)
+            with title1:
+                updated["title_text"] = text("Document title", "title_text")
+                updated["key_provisions_title"] = text("Summary title", "key_provisions_title")
+            with title2:
+                updated["title_size_pt"] = number("Title size (pt)", "title_size_pt", step=0.5, fmt="%.1f")
+                updated["title_bold"] = flag("Title bold", "title_bold")
+                updated["title_underline"] = flag("Title underlined", "title_underline")
+
+        with body_tab:
+            col1, col2 = st.columns(2)
+            with col1:
+                updated["body_font"] = choice("Body font", "body_font", lf.BODY_FONTS)
+                updated["body_size_pt"] = number("Body size (pt)", "body_size_pt", step=0.5, fmt="%.1f")
+                updated["body_alignment"] = choice("Alignment", "body_alignment", lf.ALIGNMENTS)
+            with col2:
+                updated["body_line_spacing"] = number("Line spacing", "body_line_spacing", step=0.05)
+                updated["space_after_pt"] = number("Space after paragraph (pt)", "space_after_pt", step=1.0, fmt="%.1f")
+                updated["first_line_indent_in"] = number("First-line indent (in)", "first_line_indent_in")
+
+        with kp_tab:
+            col1, col2 = st.columns(2)
+            with col1:
+                updated["kp_label_width_in"] = number("Label column (in)", "kp_label_width_in")
+                updated["kp_value_width_in"] = number("Value column (in)", "kp_value_width_in")
+                updated["kp_cell_padding_pt"] = number("Cell padding (pt)", "kp_cell_padding_pt", step=0.5, fmt="%.1f")
+                updated["kp_split_left_width_in"] = number(
+                    "Split — Landlord half (in)", "kp_split_left_width_in",
+                    help_text="Together the two halves should equal the value column.",
+                )
+                updated["kp_split_right_width_in"] = number("Split — Tenant half (in)", "kp_split_right_width_in")
+            with col2:
+                updated["kp_borders"] = flag("Bordered table", "kp_borders")
+                updated["kp_label_bold"] = flag("Bold labels", "kp_label_bold")
+                updated["kp_link_underline"] = flag("Underline cross-references", "kp_link_underline")
+                updated["kp_link_color"] = st.color_picker(
+                    "Cross-reference color",
+                    value=f"#{settings['kp_link_color']}",
+                    key="lb_fmt_kp_link_color",
+                    disabled=not editable,
+                )
+            updated["kp_split_fields"] = st.text_input(
+                "Provisions that split Landlord | Tenant",
+                value=", ".join(settings["kp_split_fields"]),
+                key="lb_fmt_kp_split_fields",
+                help="Comma-separated. These rows divide the value into two columns.",
+                disabled=not editable,
+            )
+
+        with section_tab:
+            col1, col2 = st.columns(2)
+            with col1:
+                updated["section_word"] = text("Heading word", "section_word", help_text='Prints as "Section 5." before the title.')
+                updated["section_tab_stop_in"] = number("Tab after number (in)", "section_tab_stop_in")
+                updated["section_space_before_pt"] = number("Space before section (pt)", "section_space_before_pt", step=1.0, fmt="%.1f")
+                updated["section_heading_bold"] = flag("Bold run-in heading", "section_heading_bold")
+            with col2:
+                updated["subclause_level1_style"] = choice(
+                    "Sub-clause level 1", "subclause_level1_style", lf.SUBCLAUSE_LEVEL1_STYLES
+                )
+                updated["subclause_level1_indent_in"] = number("Level 1 indent (in)", "subclause_level1_indent_in")
+                updated["subclause_level1_hanging_in"] = number("Level 1 hanging (in)", "subclause_level1_hanging_in")
+                updated["subclause_level2_style"] = choice(
+                    "Sub-clause level 2", "subclause_level2_style", lf.SUBCLAUSE_LEVEL2_STYLES,
+                    help_text="Runs inline in the paragraph, not as its own list.",
+                )
+                updated["subclause_lead_in_bold"] = flag("Bold lead-in phrase", "subclause_lead_in_bold")
+
+        with rent_tab:
+            col1, col2 = st.columns(2)
+            with col1:
+                updated["rent_table_label"] = text("Table label", "rent_table_label")
+                updated["rent_col_term_width_in"] = number("Term column (in)", "rent_col_term_width_in")
+            with col2:
+                updated["rent_col_monthly_width_in"] = number("Monthly column (in)", "rent_col_monthly_width_in")
+                updated["rent_col_annual_width_in"] = number("Annual column (in)", "rent_col_annual_width_in")
+            updated["rent_header_bold"] = flag("Bold header row", "rent_header_bold")
+            updated["rent_borders"] = flag("Bordered table", "rent_borders")
+            updated["rent_amount_alignment"] = choice(
+                "Amount alignment", "rent_amount_alignment", ["right", "left", "center"]
+            )
+
+        with back_tab:
+            col1, col2 = st.columns(2)
+            with col1:
+                st.markdown("**Signatures**")
+                updated["signature_title"] = text("Block title", "signature_title")
+                updated["signature_landlord_label"] = text("Landlord label", "signature_landlord_label")
+                updated["signature_tenant_label"] = text("Tenant label", "signature_tenant_label")
+                updated["signature_keep_together"] = flag("Keep block on one page", "signature_keep_together")
+            with col2:
+                st.markdown("**Exhibits**")
+                updated["exhibit_label_format"] = text(
+                    "Label format", "exhibit_label_format",
+                    help_text="{letter} is replaced by A, B, C …",
+                )
+                updated["exhibit_title_size_pt"] = number("Exhibit title size (pt)", "exhibit_title_size_pt", step=0.5, fmt="%.1f")
+                updated["exhibit_image_max_width_in"] = number("Max image width (in)", "exhibit_image_max_width_in")
+                updated["exhibit_page_break"] = flag("Page break before each exhibit", "exhibit_page_break")
+
+        normalized = lf.normalize_settings(updated)
+        if editable:
+            draft_state["formatting"] = normalized
+
+        for warning in lf.validate_settings(normalized):
+            st.warning(warning)
+
+        changed = lf.settings_diff(normalized)
+        summary_col, reset_col = st.columns([4, 1])
+        summary_col.caption(
+            f"{len(changed)} setting{'' if len(changed) == 1 else 's'} differ from the spec defaults."
+            if changed else "Matching the spec defaults exactly."
+        )
+        if editable and reset_col.button("↩︎ Reset", key="lb_fmt_reset", width="stretch"):
+            draft_state["formatting"] = lf.default_settings()
+            for key in [k for k in st.session_state if k.startswith("lb_fmt_")]:
+                del st.session_state[key]
+            st.rerun()
+        if changed:
+            with st.popover("Show changes"):
+                st.dataframe(
+                    pd.DataFrame(
+                        [
+                            {"Setting": key, "Default": lf.DEFAULTS[key], "This template": value}
+                            for key, value in sorted(changed.items())
+                        ]
+                    ),
+                    hide_index=True,
+                    width="stretch",
+                )
+
+    return draft_state["formatting"]
 
 
 def render_lease_builder_tab():
@@ -5510,6 +5742,7 @@ def render_lease_builder_tab():
                 for section in sections
             },
             "rent_schedules": _lb_default_rent_schedules(),
+            "formatting": lf.default_settings(),
             "kp_version": 0,
             "section_version": 0,
         }
@@ -5541,6 +5774,7 @@ def render_lease_builder_tab():
 
     draft_state = st.session_state[draft_state_key]
     draft_state.setdefault("rent_schedules", _lb_default_rent_schedules())
+    draft_state["formatting"] = lf.normalize_settings(draft_state.get("formatting"))
     for provision in draft_state["key_provisions"]:
         bookmark = str(provision.get("Bookmark", ""))
         # Saved drafts may contain old internal field labels (e.g., Tx_BuildingAddress).
@@ -6101,6 +6335,9 @@ def render_lease_builder_tab():
                     else:
                         st.error("Could not save the clause choice to Google Sheets.")
 
+        # ---- Document formatting --------------------------------------------
+        _lb_render_formatting_form(draft_state, editable=template_mode)
+
         # ---- Save controls -------------------------------------------------
         if template_mode:
             st.markdown("### Save Lease Template")
@@ -6111,6 +6348,9 @@ def render_lease_builder_tab():
                     "base_template": selected_label,
                     "key_provisions": draft_state["key_provisions"],
                     "sections": _lb_compact_sections(sections, draft_state["sections"]),
+                    # Only the departures from spec defaults are stored, so the
+                    # payload stays small and a later default change still lands.
+                    "formatting": lf.settings_diff(draft_state.get("formatting")),
                     "saved_at": datetime.now().isoformat(timespec="seconds"),
                 }
 
