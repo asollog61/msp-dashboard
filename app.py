@@ -5097,7 +5097,7 @@ LEASE_TEMPLATE_SHEET = "Lease Builder Templates"
 LEASE_FORMAT_SHEET = "Lease Format Profiles"
 SAVED_LEASE_SHEET = "Saved Leases"
 LB_BASE_ONLY = "Base template only (no saved template)"
-LB_NEW_TEMPLATE = "➕ New template from base"
+LB_NEW_TEMPLATE = "➕ New template"
 LB_NEW_LEASE = "➕ New lease"
 
 
@@ -5864,21 +5864,17 @@ def render_lease_builder_tab():
             "applies. The preview and the Word draft show only what is used."
         )
 
-    # The identity of what is being edited belongs at the top, but the save
-    # buttons cannot be built until draft_state exists further down. Reserving
-    # the space here and filling it late gives the right layout either way.
-    header_slot = st.container()
-
     # ---- Header selectors ------------------------------------------------
     if template_mode:
-        with header_slot:
-            head2, head3 = st.columns([4, 1.4])
-            template_names_all = sorted(saved_templates)
-            working_template = head2.selectbox(
-                "Template being edited", [LB_NEW_TEMPLATE] + template_names_all,
-                key="lb_template_edit_choice",
-            )
-            clean_notes = head3.toggle("Clean draft", value=True, key="lb_clean_notes")
+        head2, head3 = st.columns([4, 1.4])
+        template_names_all = sorted(saved_templates)
+        # Saved templates come first so opening the tab lands you on a real one
+        # rather than on an unnamed draft with Save greyed out.
+        working_template = head2.selectbox(
+            "Template being edited", template_names_all + [LB_NEW_TEMPLATE],
+            key="lb_template_edit_choice",
+        )
+        clean_notes = head3.toggle("Clean draft", value=True, key="lb_clean_notes")
         with st.expander("⚙️ Advanced — base Word template", expanded=False):
             st.caption(
                 "Legacy path. Clause text now comes from `lease_content.json`; this "
@@ -6045,6 +6041,29 @@ def render_lease_builder_tab():
             "No lease template selected — you are drafting straight from the base Word file, so no "
             "clause alternates are available. Pick a template above to draft from the approved menu."
         )
+
+    # ---- Template header -------------------------------------------------
+    # Rendered here, in document order, now that sections and draft_state exist:
+    # the save buttons need both to build a payload. Everything that identifies
+    # what you are editing stays above the two-column body.
+    if template_mode:
+        def template_payload(profile_name):
+            return {
+                "base_template": selected_label,
+                "key_provisions": draft_state["key_provisions"],
+                "sections": _lb_compact_sections(sections, draft_state["sections"]),
+                # Formatting lives in a named profile now; the template only
+                # records which one it uses.
+                "format_profile": profile_name,
+                "saved_at": datetime.now().isoformat(timespec="seconds"),
+            }
+
+        active_profile, active_settings = _lb_render_template_header(
+            working_template, saved_templates, saved_profiles,
+            draft_state.get("format_profile"), template_payload, editable=True,
+        )
+        draft_state["format_profile"] = active_profile
+        draft_state["formatting"] = active_settings
 
     left, right = st.columns([1.12, 0.88], gap="large")
     live_word_bytes = None
@@ -6570,28 +6589,8 @@ def render_lease_builder_tab():
                     else:
                         st.error("Could not save the clause choice to Google Sheets.")
 
-        # ---- Save controls -------------------------------------------------
+        # ---- Publish --------------------------------------------------------
         if template_mode:
-            def template_payload(profile_name):
-                return {
-                    "base_template": selected_label,
-                    "key_provisions": draft_state["key_provisions"],
-                    "sections": _lb_compact_sections(sections, draft_state["sections"]),
-                    # Formatting lives in a named profile now; the template only
-                    # records which one it uses.
-                    "format_profile": profile_name,
-                    "saved_at": datetime.now().isoformat(timespec="seconds"),
-                }
-
-            with header_slot:
-                active_profile, active_settings = _lb_render_template_header(
-                    working_template, saved_templates, saved_profiles,
-                    draft_state.get("format_profile"), template_payload, editable=True,
-                )
-            draft_state["format_profile"] = active_profile
-            draft_state["formatting"] = active_settings
-
-
             with st.expander("📦 Publish as a Word Template", expanded=False):
                 st.caption(
                     "Writes a real .docx into data/Lease Builder/Published with every choice applied. "
