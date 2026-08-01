@@ -50,6 +50,9 @@ try:
         PUBLISHED_PREFIX,
     )
     import lease_format as lf
+    import lease_content as lc
+    import lease_markup as lm
+    import lease_render as lr
     LEASE_BUILDER_AVAILABLE = True
     LEASE_BUILDER_ERROR = ""
 except ImportError as exc:
@@ -5070,6 +5073,7 @@ def _lb_import_rent_schedule_xlsx(uploaded_file):
 LB_MODE_TEMPLATE = "🧩 Edit Lease Template"
 LB_MODE_LEASE = "📄 Create Lease"
 LEASE_TEMPLATE_SHEET = "Lease Builder Templates"
+LEASE_FORMAT_SHEET = "Lease Format Profiles"
 SAVED_LEASE_SHEET = "Saved Leases"
 LB_BASE_ONLY = "Base template only (no saved template)"
 LB_NEW_TEMPLATE = "➕ New template from base"
@@ -5132,7 +5136,7 @@ def _lb_hydrate_lease_provisions(template_rows, lease_rows):
     return hydrated
 
 
-def _lb_apply_template_defaults(draft_state, saved_template, sections, for_mode):
+def _lb_apply_template_defaults(draft_state, saved_template, sections, for_mode, profiles=None):
     """Load a saved template into draft state.
 
     In lease mode the template's Include flags are the starting defaults; in
@@ -5149,8 +5153,12 @@ def _lb_apply_template_defaults(draft_state, saved_template, sections, for_mode)
         if number in draft_state["sections"]:
             draft_state["sections"][number].update(config)
     # Formatting travels with the template in both modes: a lease is typeset the
-    # way its parent template says, and only overrides what it explicitly changes.
-    draft_state["formatting"] = lf.normalize_settings(saved_template.get("formatting"))
+    # way its parent template says. Templates saved before profiles existed carry
+    # their own inline settings, which migrate onto a named profile here rather
+    # than being dropped.
+    profiles, profile_name = lf.migrate_template_formatting(saved_template, profiles)
+    draft_state["format_profile"] = profile_name
+    draft_state["formatting"] = lf.profile_settings(profiles, profile_name)
     if for_mode == LB_MODE_LEASE:
         draft_state["rent_schedules"] = _lb_default_rent_schedules()
     return draft_state
@@ -5309,6 +5317,39 @@ def _lb_build_current_word(template_path, draft_name, clean_notes, sections, dra
     )
 
 
+def _lb_build_rules_word(draft_state, sections, settings):
+    """Generate the lease with the rules-based renderer — no base .docx.
+
+    Clause text comes from the draft's own section state, so edits made in the
+    tab are reflected; only the document's construction differs from the legacy
+    path. Steps 4 and 6-8 of the spec (Key Provisions table, rent tables,
+    signatures, exhibits) are not built yet, so those appear as markers.
+    """
+    from io import BytesIO
+
+    values = {
+        str(row.get("Field", "")): str(row.get("Value", "") or "")
+        for row in draft_state["key_provisions"]
+        if bool(row.get("Include", True))
+    }
+    payload = []
+    for section in sections:
+        number = str(section["number"])
+        config = draft_state["sections"].get(number, {})
+        if not config.get("include", True):
+            continue
+        payload.append({
+            "number": number,
+            "title": section.get("title", ""),
+            "body": str(config.get("text", section.get("text", ""))),
+        })
+
+    document, renderer = lr.render_lease(payload, settings, values)
+    buffer = BytesIO()
+    document.save(buffer)
+    return buffer.getvalue(), renderer
+
+
 @st.cache_data(show_spinner=False, max_entries=3)
 def _lb_render_word_pages(word_bytes):
     """Render the actual generated DOCX to page images for a faithful live preview."""
@@ -5361,24 +5402,24 @@ def _lb_reset_editor_widget_state():
             del st.session_state[key]
 
 
-def _lb_render_formatting_form(draft_state, editable=True):
+def _lb_render_formatting_form(current_settings, editable=True, expanded=False):
     """Document Formatting panel — the page-setup and typography rules the
-    template-free renderer will follow.
+    template-free renderer follows.
 
-    Writes straight into draft_state["formatting"] so the values are saved by the
-    ordinary template save. In lease mode the panel is read-only: typography
-    belongs to the template, not to an individual deal.
+    Pure in, pure out: takes a settings dict and returns the edited one. The
+    caller decides where it lives, which is what lets the same panel edit a
+    named format profile rather than one template's private copy.
     """
-    settings = lf.normalize_settings(draft_state.get("formatting"))
+    settings = lf.normalize_settings(current_settings)
 
-    with st.expander("📐 Document Formatting", expanded=False):
+    with st.expander("📐 Document Formatting", expanded=expanded):
         if not editable:
             st.caption(
-                "Formatting is inherited from the parent template. Switch to "
+                "Formatting comes from the template's format profile. Switch to "
                 "Edit Lease Template to change it."
             )
         st.caption(
-            "Defaults match the executed Chez Alice lease. These rules drive "
+            "Defaults measured from the master lease. These rules drive "
             "generation directly — there is no base Word file behind them."
         )
 
@@ -5508,6 +5549,9 @@ def _lb_render_formatting_form(draft_state, editable=True):
             col1, col2 = st.columns(2)
             with col1:
                 updated["section_word"] = text("Heading word", "section_word", help_text='Prints as "Section 5." before the title.')
+                updated["section_first_line_indent_in"] = number(
+                    "Heading first-line indent (in)", "section_first_line_indent_in"
+                )
                 updated["section_tab_stop_in"] = number("Tab after number (in)", "section_tab_stop_in")
                 updated["section_space_before_pt"] = number("Space before section (pt)", "section_space_before_pt", step=1.0, fmt="%.1f")
                 updated["section_heading_bold"] = flag("Bold run-in heading", "section_heading_bold")
@@ -5555,9 +5599,7 @@ def _lb_render_formatting_form(draft_state, editable=True):
                 updated["exhibit_image_max_width_in"] = number("Max image width (in)", "exhibit_image_max_width_in")
                 updated["exhibit_page_break"] = flag("Page break before each exhibit", "exhibit_page_break")
 
-        normalized = lf.normalize_settings(updated)
-        if editable:
-            draft_state["formatting"] = normalized
+        normalized = lf.normalize_settings(updated) if editable else settings
 
         for warning in lf.validate_settings(normalized):
             st.warning(warning)
@@ -5565,20 +5607,20 @@ def _lb_render_formatting_form(draft_state, editable=True):
         changed = lf.settings_diff(normalized)
         summary_col, reset_col = st.columns([4, 1])
         summary_col.caption(
-            f"{len(changed)} setting{'' if len(changed) == 1 else 's'} differ from the spec defaults."
-            if changed else "Matching the spec defaults exactly."
+            f"{len(changed)} setting{'' if len(changed) == 1 else 's'} differ from the measured defaults."
+            if changed else "Matching the measured defaults exactly."
         )
         if editable and reset_col.button("↩︎ Reset", key="lb_fmt_reset", width="stretch"):
-            draft_state["formatting"] = lf.default_settings()
             for key in [k for k in st.session_state if k.startswith("lb_fmt_")]:
                 del st.session_state[key]
+            normalized = lf.default_settings()
             st.rerun()
         if changed:
             with st.popover("Show changes"):
                 st.dataframe(
                     pd.DataFrame(
                         [
-                            {"Setting": key, "Default": lf.DEFAULTS[key], "This template": value}
+                            {"Setting": key, "Default": lf.DEFAULTS[key], "This profile": value}
                             for key, value in sorted(changed.items())
                         ]
                     ),
@@ -5586,7 +5628,134 @@ def _lb_render_formatting_form(draft_state, editable=True):
                     width="stretch",
                 )
 
-    return draft_state["formatting"]
+    return normalized
+
+
+def _lb_render_template_header(working_template, saved_templates, profiles, profile_name,
+                               payload_builder, editable=True):
+    """The three things that identify what you are editing, at the top.
+
+    1. which template, and how to save it
+    2. where its words come from (the extracted JSON, not a Word file)
+    3. which format profile styles it
+
+    Rendered into a container reserved at the top of the tab but called late,
+    once draft_state exists — otherwise the save buttons could not build a
+    payload.
+    """
+    library = lc.load_content()
+    profiles = lf.normalize_profiles(profiles)
+    profile_name = lf.resolve_profile_name(profiles, profile_name)
+    existing = working_template != LB_NEW_TEMPLATE
+
+    # ---- 1. Template ----------------------------------------------------
+    st.markdown(f"#### 📄 {working_template if existing else 'New template'}")
+    if editable:
+        save_col, name_col, saveas_col = st.columns([1.4, 2.6, 1.4])
+        if save_col.button("💾 Save", type="primary", key="lb_save_template",
+                           disabled=not existing, width="stretch"):
+            updated = dict(saved_templates)
+            updated[working_template] = payload_builder(profile_name)
+            if _write_gsheet_config(LEASE_TEMPLATE_SHEET, updated):
+                st.success(f"Saved template: {working_template}")
+                st.rerun()
+            else:
+                st.error("Could not save the template to Google Sheets.")
+        save_as_name = name_col.text_input(
+            "Save as new name", key="lb_save_template_as_name",
+            placeholder="e.g., MSP NNN Retail — Restaurant", label_visibility="collapsed",
+        )
+        if saveas_col.button("💾 Save As…", key="lb_save_template_as", width="stretch"):
+            if not save_as_name.strip():
+                st.warning("Enter a template name first.")
+            elif save_as_name.strip() in saved_templates:
+                st.warning("A template with that name already exists.")
+            else:
+                updated = dict(saved_templates)
+                updated[save_as_name.strip()] = payload_builder(profile_name)
+                if _write_gsheet_config(LEASE_TEMPLATE_SHEET, updated):
+                    st.success(f"Saved template: {save_as_name.strip()}")
+                    st.rerun()
+                else:
+                    st.error("Could not save the template to Google Sheets.")
+        if not existing:
+            st.caption("Pick an existing template to enable overwrite, or use Save As.")
+
+    # ---- 2. Content -----------------------------------------------------
+    sections = library.get("sections", [])
+    provisions = library.get("key_provisions", [])
+    extracted = str(library.get("extracted_at", ""))[:10]
+    content_col, extract_col = st.columns([4, 1.4])
+    if sections:
+        revisions = library.get("tracked_changes_resolved") or {}
+        note = (
+            f" · {revisions.get('insertions', 0)} tracked edits resolved"
+            if revisions.get("insertions") else ""
+        )
+        content_col.caption(
+            f"**Content** · `lease_content.json` · {len(sections)} sections · "
+            f"{len(provisions)} key provisions · extracted {extracted}{note}"
+        )
+    else:
+        content_col.warning(
+            "No extracted content found. Run `python lease_content.py --extract` "
+            "to read the master lease into JSON."
+        )
+    if editable and extract_col.button("🔄 Re-extract", key="lb_reextract", width="stretch"):
+        try:
+            written = lc.write_content(lc.extract_from_docx())
+            st.success(f"Re-extracted into {Path(written).name}.")
+            st.rerun()
+        except Exception as exc:
+            st.error(f"Could not re-extract: {type(exc).__name__}: {exc}")
+
+    # ---- 3. Formatting --------------------------------------------------
+    settings = lf.profile_settings(profiles, profile_name)
+    profile_col, summary_col = st.columns([2, 4])
+    chosen = profile_col.selectbox(
+        "Format profile", sorted(profiles),
+        index=sorted(profiles).index(profile_name),
+        key="lb_format_profile", label_visibility="collapsed", disabled=not editable,
+    )
+    if chosen != profile_name:
+        profile_name = chosen
+        settings = lf.profile_settings(profiles, profile_name)
+        for key in [k for k in st.session_state if k.startswith("lb_fmt_")]:
+            del st.session_state[key]
+    summary_col.caption(f"**Formatting** · {lf.describe_settings(settings)}")
+
+    edited = _lb_render_formatting_form(settings, editable=editable)
+    if editable and edited != settings:
+        fmt_save, fmt_name, fmt_saveas = st.columns([1.4, 2.6, 1.4])
+        if fmt_save.button("💾 Save profile", key="lb_fmt_save", width="stretch"):
+            updated = dict(profiles)
+            updated[profile_name] = lf.settings_diff(edited)
+            if _write_gsheet_config(LEASE_FORMAT_SHEET, updated):
+                st.success(f"Saved format profile: {profile_name}")
+                st.rerun()
+            else:
+                st.error("Could not save the format profile to Google Sheets.")
+        new_profile = fmt_name.text_input(
+            "New profile name", key="lb_fmt_profile_name",
+            placeholder="e.g., MSP House Style — Compact", label_visibility="collapsed",
+        )
+        if fmt_saveas.button("💾 Save as new", key="lb_fmt_save_as", width="stretch"):
+            if not new_profile.strip():
+                st.warning("Name the new profile first.")
+            elif new_profile.strip() in profiles:
+                st.warning("A profile with that name already exists.")
+            else:
+                updated = dict(profiles)
+                updated[new_profile.strip()] = lf.settings_diff(edited)
+                if _write_gsheet_config(LEASE_FORMAT_SHEET, updated):
+                    st.success(f"Saved format profile: {new_profile.strip()}")
+                    st.rerun()
+                else:
+                    st.error("Could not save the format profile to Google Sheets.")
+        st.caption("Unsaved formatting changes — they apply to the preview now, but save to keep them.")
+
+    st.divider()
+    return profile_name, edited
 
 
 def render_lease_builder_tab():
@@ -5621,6 +5790,7 @@ def render_lease_builder_tab():
 
     saved_templates = _read_gsheet_config(LEASE_TEMPLATE_SHEET) or {}
     saved_leases = _read_gsheet_config(SAVED_LEASE_SHEET) or {}
+    saved_profiles = lf.normalize_profiles(_read_gsheet_config(LEASE_FORMAT_SHEET))
     saved_clause_library = _read_gsheet_config("Lease Clause Library") or {}
     built_in_library = load_clause_library().get("sections", {})
 
@@ -5644,20 +5814,30 @@ def render_lease_builder_tab():
             "applies. The preview and the Word draft show only what is used."
         )
 
+    # The identity of what is being edited belongs at the top, but the save
+    # buttons cannot be built until draft_state exists further down. Reserving
+    # the space here and filling it late gives the right layout either way.
+    header_slot = st.container()
+
     # ---- Header selectors ------------------------------------------------
     if template_mode:
-        head1, head2, head3 = st.columns([3, 3, 1.4])
-        selected_label = head1.selectbox(
-            "Base lease template (.docx)", [item["label"] for item in templates], key="lb_template"
-        )
-        template_names = sorted(
-            name for name, config in saved_templates.items()
-            if config.get("base_template") == selected_label
-        )
-        working_template = head2.selectbox(
-            "Template being edited", [LB_NEW_TEMPLATE] + template_names, key="lb_template_edit_choice"
-        )
-        clean_notes = head3.toggle("Clean draft", value=True, key="lb_clean_notes")
+        with header_slot:
+            head2, head3 = st.columns([4, 1.4])
+            template_names_all = sorted(saved_templates)
+            working_template = head2.selectbox(
+                "Template being edited", [LB_NEW_TEMPLATE] + template_names_all,
+                key="lb_template_edit_choice",
+            )
+            clean_notes = head3.toggle("Clean draft", value=True, key="lb_clean_notes")
+        with st.expander("⚙️ Advanced — base Word template", expanded=False):
+            st.caption(
+                "Legacy path. Clause text now comes from `lease_content.json`; this "
+                "file is only still used by the old Word-template generator."
+            )
+            selected_label = st.selectbox(
+                "Base lease template (.docx)", [item["label"] for item in templates],
+                key="lb_template",
+            )
         lease_choice = LB_NEW_LEASE
         draft_name = working_template if working_template != LB_NEW_TEMPLATE else "MSP Lease Template"
     else:
@@ -5742,6 +5922,7 @@ def render_lease_builder_tab():
                 for section in sections
             },
             "rent_schedules": _lb_default_rent_schedules(),
+            "format_profile": lf.DEFAULT_PROFILE_NAME,
             "formatting": lf.default_settings(),
             "kp_version": 0,
             "section_version": 0,
@@ -5753,13 +5934,15 @@ def render_lease_builder_tab():
         new_state = fresh_draft_state()
         parent_template_name = working_template if working_template not in (LB_NEW_TEMPLATE, LB_BASE_ONLY) else ""
         if parent_template_name:
-            _lb_apply_template_defaults(new_state, saved_templates.get(parent_template_name, {}), sections, mode)
+            _lb_apply_template_defaults(new_state, saved_templates.get(parent_template_name, {}),
+                                        sections, mode, saved_profiles)
         if not template_mode and lease_choice != LB_NEW_LEASE:
             lease = saved_leases.get(lease_choice, {})
             lease_parent = lease.get("template_name", "")
             if lease_parent and lease_parent in saved_templates and not parent_template_name:
                 # A saved lease remembers its template so alternates re-hydrate correctly.
-                _lb_apply_template_defaults(new_state, saved_templates[lease_parent], sections, mode)
+                _lb_apply_template_defaults(new_state, saved_templates[lease_parent],
+                                            sections, mode, saved_profiles)
             new_state["key_provisions"] = _lb_hydrate_lease_provisions(
                 new_state["key_provisions"], lease.get("key_provisions", [])
             )
@@ -5774,6 +5957,8 @@ def render_lease_builder_tab():
 
     draft_state = st.session_state[draft_state_key]
     draft_state.setdefault("rent_schedules", _lb_default_rent_schedules())
+    draft_state["format_profile"] = lf.resolve_profile_name(
+        saved_profiles, draft_state.get("format_profile"))
     draft_state["formatting"] = lf.normalize_settings(draft_state.get("formatting"))
     for provision in draft_state["key_provisions"]:
         bookmark = str(provision.get("Bookmark", ""))
@@ -6335,58 +6520,27 @@ def render_lease_builder_tab():
                     else:
                         st.error("Could not save the clause choice to Google Sheets.")
 
-        # ---- Document formatting --------------------------------------------
-        _lb_render_formatting_form(draft_state, editable=template_mode)
-
         # ---- Save controls -------------------------------------------------
         if template_mode:
-            st.markdown("### Save Lease Template")
-            existing = working_template != LB_NEW_TEMPLATE
-
-            def template_payload():
+            def template_payload(profile_name):
                 return {
                     "base_template": selected_label,
                     "key_provisions": draft_state["key_provisions"],
                     "sections": _lb_compact_sections(sections, draft_state["sections"]),
-                    # Only the departures from spec defaults are stored, so the
-                    # payload stays small and a later default change still lands.
-                    "formatting": lf.settings_diff(draft_state.get("formatting")),
+                    # Formatting lives in a named profile now; the template only
+                    # records which one it uses.
+                    "format_profile": profile_name,
                     "saved_at": datetime.now().isoformat(timespec="seconds"),
                 }
 
-            save_col, saveas_name_col, saveas_col = st.columns([1.5, 2.5, 1.5])
-            if save_col.button(
-                "💾 Save Lease Template",
-                type="primary",
-                key="lb_save_template",
-                disabled=not existing,
-                width="stretch",
-            ):
-                updated = dict(saved_templates)
-                updated[working_template] = template_payload()
-                if _write_gsheet_config(LEASE_TEMPLATE_SHEET, updated):
-                    st.success(f"Saved template: {working_template}")
-                    st.rerun()
-                else:
-                    st.error("Could not save the template to Google Sheets.")
-            if not existing:
-                save_col.caption("Pick an existing template to enable overwrite.")
-            save_as_name = saveas_name_col.text_input(
-                "Save as new name", key="lb_save_template_as_name", placeholder="e.g., MSP NNN Retail — Restaurant"
-            )
-            if saveas_col.button("💾 Save Template As…", key="lb_save_template_as", width="stretch"):
-                if not save_as_name.strip():
-                    st.warning("Enter a template name first.")
-                elif save_as_name.strip() in saved_templates:
-                    st.warning("A template with that name already exists. Choose a different name.")
-                else:
-                    updated = dict(saved_templates)
-                    updated[save_as_name.strip()] = template_payload()
-                    if _write_gsheet_config(LEASE_TEMPLATE_SHEET, updated):
-                        st.success(f"Saved template: {save_as_name.strip()}")
-                        st.rerun()
-                    else:
-                        st.error("Could not save the template to Google Sheets.")
+            with header_slot:
+                active_profile, active_settings = _lb_render_template_header(
+                    working_template, saved_templates, saved_profiles,
+                    draft_state.get("format_profile"), template_payload, editable=True,
+                )
+            draft_state["format_profile"] = active_profile
+            draft_state["formatting"] = active_settings
+
 
             with st.expander("📦 Publish as a Word Template", expanded=False):
                 st.caption(
@@ -6499,14 +6653,42 @@ def render_lease_builder_tab():
 
         st.caption("Drafting tool only. Final lease language should be reviewed by New Jersey counsel.")
 
+        # Two generators run side by side while the rules-based one is finished:
+        # the legacy path edits a copy of the base .docx, the new one builds from
+        # lease_format + lease_markup and actually obeys the format profile.
+        engine = st.radio(
+            "Generator",
+            ["Word template (current)", "Rules-based (new)"],
+            horizontal=True,
+            key="lb_engine",
+            help=(
+                "The rules-based renderer needs no base .docx and applies the format "
+                "profile above. Key Provisions table, rent tables, signatures and "
+                "exhibits are still being built, so they appear as markers for now."
+            ),
+        )
+        use_rules_engine = engine.startswith("Rules")
+
         token_report = {}
+        rules_renderer = None
         try:
-            live_word_bytes = _lb_build_current_word(
-                template["path"], draft_name, clean_notes, sections, draft_state,
-                force_include_all=template_mode, token_report=token_report,
-            )
+            if use_rules_engine:
+                live_word_bytes, rules_renderer = _lb_build_rules_word(
+                    draft_state, sections, draft_state.get("formatting")
+                )
+                token_report = {"unresolved": sorted(rules_renderer.unresolved), "blank": []}
+            else:
+                live_word_bytes = _lb_build_current_word(
+                    template["path"], draft_name, clean_notes, sections, draft_state,
+                    force_include_all=template_mode, token_report=token_report,
+                )
         except Exception as exc:
-            st.error(f"Current draft could not be generated: {exc}")
+            st.error(f"Current draft could not be generated: {type(exc).__name__}: {exc}")
+
+        if use_rules_engine:
+            st.caption(
+                f"Rules-based · {lf.describe_settings(draft_state.get('formatting'))}"
+            )
 
         unresolved = token_report.get("unresolved") or []
         blank_refs = token_report.get("blank") or []

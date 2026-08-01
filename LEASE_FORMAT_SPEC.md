@@ -20,6 +20,12 @@ This is the target output for generating a lease **without a base Word template*
 
 - US Letter 8.5 × 11 in, margins 1 in all sides.
 - Serif body (Times New Roman), 11 pt, **justified**.
+  (Confirmed against the master: 318 of 319 body runs are 11 pt, and 94
+  paragraphs carry `jc=both`. Note the Normal *style* says 12 pt — the runs
+  override it, so reading the style alone is misleading.)
+- **No vertical space between paragraphs** (`before=0 after=0`); paragraphs are
+  separated by a **0.5 in first-line indent**. Sub-clauses use a −0.25 in
+  hanging indent.
 - Footer: counsel document ID left (e.g. `4928-4211-2690, v. 2`), page number right.
   Doc ID is a per-template setting; page number is a `PAGE` field.
 
@@ -119,7 +125,13 @@ Two levels only:
    data. Structural markers `[RentTable:…]`, `[PageBreak]`, `[Exhibit:A|Title]`
    (plus the legacy `Base Rent Table:` / `Table End` pair) each parse to their
    own block. Tests in `test_lease_markup.py`.
-3. Renderer: page setup, styles, footer.
+3. ~~Renderer: page setup, styles, footer.~~ **Done** — `lease_render.py`:
+   page setup, styles, footer (doc ID + `PAGE` field), title block, run-in
+   section headings, and block/run rendering with cross-references as green
+   underlined internal hyperlinks. Verified: 60 sections render, unique
+   bookmarks, LibreOffice converts to PDF, geometry measures 1.00→7.50 in.
+   Provision anchors dangle until step 4 builds the table — `dangling_anchors()`
+   reports them.
 4. Key Provisions table incl. the Notice-Addresses split.
 5. Sections with auto-numbering and run-in headings.
 6. Rent tables.
@@ -134,3 +146,6 @@ Every step must be run, not just written. Minimum bar before shipping:
 - No duplicate bookmark IDs (Word reports these as a damaged file).
 - LibreOffice converts it to PDF without error.
 - Page-by-page visual diff against `1_Executed_Chez Alice_MSP Lease_6.16.26.pdf`.
+  **Note:** that PDF is a scan — 25 image-only pages with no text layer — so the
+  diff has to be visual or OCR-based. Measurable formatting facts must come from
+  `2026_07_30 MSP Master_Lease.v8 NNN Retail.docx` instead.

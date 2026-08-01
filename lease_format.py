@@ -56,8 +56,11 @@ DEFAULTS: dict[str, Any] = {
     "body_size_pt": 11.0,
     "body_alignment": "justify",
     "body_line_spacing": 1.0,
-    "space_after_pt": 6.0,
-    "first_line_indent_in": 0.0,
+    # Measured off the master template: Normal carries spacing before=0 after=0,
+    # and body paragraphs indent their first line 0.5 in. Paragraphs are
+    # separated by the indent, not by vertical space.
+    "space_after_pt": 0.0,
+    "first_line_indent_in": 0.5,
 
     # ---- Footer ----------------------------------------------------------
     # Spec: counsel document ID left, page number right. Doc ID is per-template.
@@ -97,6 +100,7 @@ DEFAULTS: dict[str, Any] = {
     # number. Decimal sections are peers, not children.
     "section_word": "Section",
     "section_heading_bold": True,
+    "section_first_line_indent_in": 0.5,
     "section_tab_stop_in": 0.5,
     "section_space_before_pt": 10.0,
 
@@ -154,6 +158,7 @@ _NUMERIC_BOUNDS: dict[str, tuple[float, float]] = {
     "kp_split_left_width_in": (0.75, 6.0),
     "kp_split_right_width_in": (0.75, 6.0),
     "kp_cell_padding_pt": (0.0, 12.0),
+    "section_first_line_indent_in": (0.0, 2.0),
     "section_tab_stop_in": (0.0, 2.0),
     "section_space_before_pt": (0.0, 36.0),
     "subclause_level1_indent_in": (0.0, 2.0),
@@ -335,6 +340,106 @@ def validate_settings(settings: dict[str, Any]) -> list[str]:
         warnings.append("No counsel document ID set — the footer will show only the page number.")
 
     return warnings
+
+
+# ---------------------------------------------------------------------------
+# Named profiles
+# ---------------------------------------------------------------------------
+#
+# Formatting is a house style, not a property of one template: the same look
+# applies to every lease MSP writes. So it is stored once under a name and each
+# template points at it. Change the profile and every template that uses it
+# follows, which is the whole reason for the indirection.
+
+DEFAULT_PROFILE_NAME = "MSP House Style"
+
+
+def default_profiles() -> dict[str, Any]:
+    """The starting set — one profile holding the spec defaults."""
+    return {DEFAULT_PROFILE_NAME: {}}
+
+
+def normalize_profiles(raw: Any) -> dict[str, dict[str, Any]]:
+    """Coerce a stored profile map into {name: diff}. Always has one profile.
+
+    Values are kept as diffs against DEFAULTS rather than full dicts, so a
+    later change to a default reaches every profile that never overrode it.
+    """
+    source = raw if isinstance(raw, dict) else {}
+    profiles: dict[str, dict[str, Any]] = {}
+    for name, value in source.items():
+        label = str(name).strip()
+        if not label:
+            continue
+        profiles[label] = settings_diff(value)
+    return profiles or default_profiles()
+
+
+def profile_settings(profiles: Any, name: str) -> dict[str, Any]:
+    """The full, normalized settings for one profile name.
+
+    An unknown name falls back to the defaults rather than raising: a template
+    pointing at a deleted profile should still open.
+    """
+    resolved = normalize_profiles(profiles)
+    return normalize_settings(resolved.get(str(name).strip(), {}))
+
+
+def resolve_profile_name(profiles: Any, name: Any) -> str:
+    """The profile a template should actually use."""
+    resolved = normalize_profiles(profiles)
+    candidate = str(name or "").strip()
+    if candidate in resolved:
+        return candidate
+    if DEFAULT_PROFILE_NAME in resolved:
+        return DEFAULT_PROFILE_NAME
+    return next(iter(resolved))
+
+
+def migrate_template_formatting(template: Any, profiles: Any) -> tuple[dict[str, dict[str, Any]], str]:
+    """Move a template's inline formatting onto a named profile.
+
+    Templates saved before profiles existed carry a "formatting" diff of their
+    own. Rather than drop it, it becomes a profile — reusing an existing one
+    when the settings already match so the list does not fill with duplicates.
+    """
+    resolved = normalize_profiles(profiles)
+    payload = template if isinstance(template, dict) else {}
+
+    named = str(payload.get("format_profile") or "").strip()
+    if named:
+        return resolved, resolve_profile_name(resolved, named)
+
+    inline = settings_diff(payload.get("formatting"))
+    if not inline:
+        return resolved, resolve_profile_name(resolved, DEFAULT_PROFILE_NAME)
+
+    for name, diff in resolved.items():
+        if diff == inline:
+            return resolved, name
+
+    label = f"Imported from {payload.get('base_template') or 'template'}".strip()
+    candidate, suffix = label, 2
+    while candidate in resolved:
+        candidate = f"{label} ({suffix})"
+        suffix += 1
+    resolved[candidate] = inline
+    return resolved, candidate
+
+
+def describe_settings(settings: dict[str, Any]) -> str:
+    """One-line summary for the template header."""
+    resolved = normalize_settings(settings)
+    parts = [
+        str(resolved["page_size"]),
+        f"{resolved['body_font']} {resolved['body_size_pt']:g}pt",
+        str(resolved["body_alignment"]),
+    ]
+    doc_id = str(resolved.get("footer_doc_id", "")).strip()
+    parts.append(f"doc ID {doc_id}" if doc_id else "no doc ID")
+    changed = len(settings_diff(resolved))
+    parts.append(f"{changed} changed" if changed else "stock defaults")
+    return " · ".join(parts)
 
 
 def settings_diff(settings: dict[str, Any]) -> dict[str, Any]:

@@ -18,6 +18,9 @@ class TestDefaults(unittest.TestCase):
         self.assertEqual(settings["body_font"], "Times New Roman")
         self.assertEqual(settings["body_size_pt"], 11.0)
         self.assertEqual(settings["body_alignment"], "justify")
+        # Measured off the master: no space between paragraphs, 0.5 in first line.
+        self.assertEqual(settings["space_after_pt"], 0.0)
+        self.assertEqual(settings["first_line_indent_in"], 0.5)
         # Measured off the master template, not the spec's approximations.
         self.assertEqual(settings["kp_label_width_in"], 1.71)
         self.assertEqual(settings["kp_value_width_in"], 4.79)
@@ -200,6 +203,98 @@ class TestDiffAndPersistence(unittest.TestCase):
     def test_diff_payload_stays_small(self):
         diff = lf.settings_diff(lf.normalize_settings({"body_size_pt": 12}))
         self.assertLess(len(json.dumps(diff)), 100)
+
+
+class TestProfiles(unittest.TestCase):
+    def test_empty_input_yields_one_default_profile(self):
+        for junk in (None, {}, "", []):
+            self.assertEqual(lf.normalize_profiles(junk), {lf.DEFAULT_PROFILE_NAME: {}})
+
+    def test_profiles_are_stored_as_diffs(self):
+        profiles = lf.normalize_profiles({"House": lf.normalize_settings({"body_size_pt": 12})})
+        self.assertEqual(profiles["House"], {"body_size_pt": 12.0})
+
+    def test_blank_names_are_dropped(self):
+        self.assertNotIn("  ", lf.normalize_profiles({"A": {}, "  ": {}}))
+
+    def test_profile_settings_are_full_and_clamped(self):
+        profiles = {"Big": {"body_size_pt": 999}}
+        settings = lf.profile_settings(profiles, "Big")
+        self.assertEqual(settings["body_size_pt"], 24.0)
+        self.assertEqual(settings["body_font"], "Times New Roman")
+
+    def test_unknown_profile_falls_back_rather_than_raising(self):
+        profiles = {"House": {"body_size_pt": 12}}
+        self.assertEqual(lf.resolve_profile_name(profiles, "deleted"), "House")
+        self.assertEqual(lf.profile_settings(profiles, "deleted"), lf.default_settings())
+
+    def test_default_profile_preferred_when_name_missing(self):
+        profiles = {"Other": {}, lf.DEFAULT_PROFILE_NAME: {}}
+        self.assertEqual(lf.resolve_profile_name(profiles, ""), lf.DEFAULT_PROFILE_NAME)
+
+    def test_profile_round_trips_through_json(self):
+        profiles = lf.normalize_profiles({"House": {"body_font": "Georgia", "margin_left_in": 1.25}})
+        reloaded = lf.normalize_profiles(json.loads(json.dumps(profiles)))
+        self.assertEqual(reloaded, profiles)
+
+
+class TestMigration(unittest.TestCase):
+    def test_template_with_a_named_profile_is_left_alone(self):
+        profiles, name = lf.migrate_template_formatting(
+            {"format_profile": "House"}, {"House": {"body_size_pt": 12}}
+        )
+        self.assertEqual(name, "House")
+        self.assertEqual(profiles, {"House": {"body_size_pt": 12.0}})
+
+    def test_inline_formatting_becomes_a_profile(self):
+        profiles, name = lf.migrate_template_formatting(
+            {"formatting": {"body_size_pt": 13}, "base_template": "NNN Retail"}, {}
+        )
+        self.assertEqual(name, "Imported from NNN Retail")
+        self.assertEqual(profiles[name], {"body_size_pt": 13.0})
+
+    def test_matching_inline_formatting_reuses_an_existing_profile(self):
+        """Otherwise every legacy template would spawn its own duplicate."""
+        profiles, name = lf.migrate_template_formatting(
+            {"formatting": {"body_size_pt": 12}}, {"House": {"body_size_pt": 12}}
+        )
+        self.assertEqual(name, "House")
+        self.assertEqual(len(profiles), 1)
+
+    def test_template_with_no_formatting_gets_the_default(self):
+        _profiles, name = lf.migrate_template_formatting({}, None)
+        self.assertEqual(name, lf.DEFAULT_PROFILE_NAME)
+
+    def test_repeated_migration_does_not_multiply_profiles(self):
+        template = {"formatting": {"body_size_pt": 13}, "base_template": "X"}
+        profiles, first_name = lf.migrate_template_formatting(template, {})
+        settled = len(profiles)  # the default profile plus the imported one
+        for _ in range(5):
+            profiles, name = lf.migrate_template_formatting(template, profiles)
+            self.assertEqual(name, first_name)
+        self.assertEqual(len(profiles), settled)
+
+    def test_name_collision_gets_a_suffix(self):
+        profiles, name = lf.migrate_template_formatting(
+            {"formatting": {"body_size_pt": 13}, "base_template": "X"},
+            {"Imported from X": {"body_size_pt": 14}},
+        )
+        self.assertEqual(name, "Imported from X (2)")
+        self.assertEqual(len(profiles), 2)
+
+
+class TestDescribe(unittest.TestCase):
+    def test_describe_defaults(self):
+        text = lf.describe_settings(lf.default_settings())
+        self.assertIn("Letter", text)
+        self.assertIn("Times New Roman 11pt", text)
+        self.assertIn("no doc ID", text)
+        self.assertIn("stock defaults", text)
+
+    def test_describe_reports_the_doc_id_and_change_count(self):
+        text = lf.describe_settings({"footer_doc_id": "4928-4211-2690, v. 2", "body_size_pt": 12})
+        self.assertIn("doc ID 4928-4211-2690", text)
+        self.assertIn("2 changed", text)
 
 
 if __name__ == "__main__":
