@@ -5592,26 +5592,31 @@ def render_lease_builder_tab():
             st.session_state[master_applied_key] = master_value
             st.rerun()
 
-        with st.expander("📊 Key Provisions Excel Import / Export", expanded=False):
+        # Always-visible Excel controls sit directly above the grid. The uploader
+        # lives in a popover so it reads as a button rather than a drop zone.
+        excel_col, upload_col = st.columns([1, 1])
+        excel_col.download_button(
+            "⬇️ Download Excel",
+            data=_lb_export_key_provisions_xlsx(draft_state["key_provisions"]),
+            file_name="MSP_Key_Provisions.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            key="lb_download_key_provisions_excel",
+            width="stretch",
+        )
+        with upload_col.popover("⬆️ Upload Excel", width="stretch"):
             if template_mode:
                 st.caption("Bulk-edit the Alt 1–Alt 10 choice lists in Excel, then upload the workbook back.")
             else:
-                st.caption("Export this lease's provision selections, or upload a filled-in workbook.")
-            excel_col, upload_col = st.columns([1, 1])
-            excel_col.download_button(
-                "⬇️ Download Key Provisions Excel",
-                data=_lb_export_key_provisions_xlsx(draft_state["key_provisions"]),
-                file_name="MSP_Key_Provisions.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                key="lb_download_key_provisions_excel",
-                width="stretch",
-            )
-            uploaded_kp = upload_col.file_uploader(
-                "Upload Key Provisions Excel",
+                st.caption("Upload a filled-in Key Provisions workbook.")
+            uploaded_kp = st.file_uploader(
+                "Key Provisions workbook",
                 type=["xlsx", "xls"],
                 key="lb_upload_key_provisions_excel",
+                label_visibility="collapsed",
             )
-            if uploaded_kp is not None and st.button("Import Uploaded Table", key="lb_import_key_provisions_excel"):
+            if uploaded_kp is not None and st.button(
+                "Import Uploaded Table", key="lb_import_key_provisions_excel", width="stretch"
+            ):
                 try:
                     draft_state["key_provisions"] = _lb_import_key_provisions_xlsx(
                         uploaded_kp, draft_state["key_provisions"], section_labels
