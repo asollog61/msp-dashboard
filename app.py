@@ -54,6 +54,7 @@ try:
     import lease_markup as lm
     import lease_render as lr
     import lease_docs as ld
+    import lease_store as lstore
 
     # Streamlit re-runs this script without re-importing a module it already
     # holds, so a deploy can leave a new app.py talking to an old lease_*.py.
@@ -69,6 +70,8 @@ try:
         (lr, ("render_lease", "bookmark_names", "dangling_anchors")),
         (ld, ("normalize_store", "migrate_stores", "copy_document",
               "build_document", "describe_document")),
+        (lstore, ("build_store", "LeaseStore", "LocalBackend", "GitHubBackend",
+                  "StoreError", "slugify")),
     ):
         _missing = [_name for _name in _names if not hasattr(_module, _name)]
         if _missing:
@@ -5125,6 +5128,107 @@ SAVED_LEASE_SHEET = "Saved Leases"
 LB_NEW_TEMPLATE = "➕ New document"
 
 
+# ---------------------------------------------------------------------------
+# Where documents live.
+#
+# Documents used to be one gzipped JSON blob in cell A1 of the "Lease Documents"
+# tab. That was chosen because Streamlit Cloud rebuilds its filesystem on every
+# redeploy, so the Sheet was the only durable store the app could write to. It
+# cost us a 50,000 character ceiling and left every document in one opaque blob
+# with no history.
+#
+# They now live as one JSON file each in a private GitHub data repo. Each save
+# is a commit, so a lease has a real diff and a real history.
+#
+# The Sheet is still read when the repo holds nothing, which covers both the
+# one-time migration and the case where the token is missing or expired. It is
+# never written to again — leaving it frozen means a bad migration can always
+# be walked back to a known good copy.
+# ---------------------------------------------------------------------------
+
+@st.cache_resource(ttl=300)
+def get_lease_store():
+    """The GitHub-backed document store, or None if it is not configured."""
+    try:
+        return lstore.build_store(secrets=st.secrets)
+    except Exception as exc:
+        print(f"Lease store unavailable: {type(exc).__name__}: {exc}")
+        return None
+
+
+def _lb_load_documents():
+    """Every saved document, and where it came from.
+
+    Returns (documents, source) where source is "repo", "sheet" or "empty".
+    The caller needs the source because a save has to go somewhere sensible
+    and because falling back to a read-only Sheet is worth saying out loud.
+    """
+    store = get_lease_store()
+    if store is not None:
+        try:
+            documents = ld.normalize_store(store.load_all())
+            if documents:
+                return documents, "repo"
+        except lstore.StoreError as exc:
+            st.warning(f"Could not read the lease data repo — {exc}")
+        except Exception as exc:
+            st.warning(f"Could not read the lease data repo — {type(exc).__name__}: {exc}")
+
+    legacy = ld.normalize_store(_read_gsheet_config(LEASE_DOC_SHEET))
+    if legacy:
+        return legacy, "sheet"
+    return {}, "empty"
+
+
+def _lb_save_document(name, payload):
+    """Write one document. Returns (ok, message)."""
+    store = get_lease_store()
+    if store is None:
+        return False, (
+            "The lease data repo is not configured, so there is nowhere durable "
+            "to save. Add a [lease_data] section to secrets and reload."
+        )
+    try:
+        store.save_document(str(name).strip(), payload)
+        return True, ""
+    except lstore.StoreError as exc:
+        return False, str(exc)
+    except Exception as exc:
+        return False, f"{type(exc).__name__}: {exc}"
+
+
+def _lb_delete_document(name):
+    """Remove one document. Returns (ok, message)."""
+    store = get_lease_store()
+    if store is None:
+        return False, "The lease data repo is not configured."
+    try:
+        if store.delete_document(str(name).strip()):
+            return True, ""
+        return False, "That document was not found in the repo."
+    except Exception as exc:
+        return False, f"{type(exc).__name__}: {exc}"
+
+
+def _lb_migrate_sheet_to_repo(documents):
+    """Copy the Sheet's documents into the repo, once.
+
+    Every document must land before this reports success. A partial migration
+    that looked complete would be the one failure here that loses a lease, so
+    anything that does not write is named individually and the Sheet is left
+    untouched as the fallback.
+    """
+    store = get_lease_store()
+    if store is None or not documents:
+        return False, []
+    failures = []
+    for name, document in documents.items():
+        ok, message = _lb_save_document(name, document)
+        if not ok:
+            failures.append(f"{name} — {message}")
+    return (not failures), failures
+
+
 def _lb_compact_sections(sections, section_state):
     """Store a section's choice, and its text only when it departs from template language."""
     compact = {}
@@ -5763,18 +5867,17 @@ def _lb_render_template_header(working_template, saved_docs, profiles, profile_n
 
     # ---- 1. Template ----------------------------------------------------
     if editable:
-        name_col, save_col, saveas_col = st.columns([4, 1.2, 1.2])
+        name_col, save_col, saveas_col, delete_col = st.columns([4, 1.2, 1.2, 1.2])
         name_col.markdown(f"#### 📄 {working_template if existing else 'New template'}")
         if save_col.button("💾 Save", type="primary", key="lb_save_template",
                            disabled=not existing, width="stretch"):
-            updated = dict(saved_docs)
-            updated[working_template] = payload_builder(profile_name)
-            if _write_gsheet_config(LEASE_DOC_SHEET, updated):
+            ok, message = _lb_save_document(working_template, payload_builder(profile_name))
+            if ok:
                 st.session_state["lb_save_as_open"] = False
                 st.success(f"Saved: {working_template}")
                 st.rerun()
             else:
-                st.error("Could not save the document to Google Sheets.")
+                st.error(f"Could not save “{working_template}” — {message}")
         if saveas_col.button("💾 Save As…", key="lb_save_template_as", width="stretch"):
             # Opens the rename field rather than saving immediately — Save As
             # without a chance to type a name is just a duplicate.
@@ -5783,6 +5886,34 @@ def _lb_render_template_header(working_template, saved_docs, profiles, profile_n
                 working_template if existing else ""
             )
             st.rerun()
+        if delete_col.button("🗑 Delete", key="lb_delete_template",
+                             disabled=not existing, width="stretch"):
+            st.session_state["lb_delete_open"] = True
+            st.rerun()
+
+        if st.session_state.get("lb_delete_open") and existing:
+            # Two clicks, and the name spelled out in between. A saved lease is
+            # the one thing here with no undo short of the repo's history.
+            st.warning(f"Delete “{working_template}” permanently?")
+            confirm_delete_col, cancel_delete_col, _ = st.columns([1.6, 1.6, 4])
+            if confirm_delete_col.button("🗑 Yes, delete", type="primary",
+                                         key="lb_delete_confirm", width="stretch"):
+                ok, message = _lb_delete_document(working_template)
+                st.session_state["lb_delete_open"] = False
+                if ok:
+                    # The editor is still holding the deleted document's
+                    # content. Dropping the picker choice and every per-template
+                    # draft stops it being re-saved back into existence.
+                    st.session_state.pop("lb_template_edit_choice", None)
+                    for _key in [k for k in st.session_state if str(k).startswith("lb_draft_state_")]:
+                        st.session_state.pop(_key, None)
+                    st.success(f"Deleted: {working_template}")
+                    st.rerun()
+                else:
+                    st.error(f"Could not delete “{working_template}” — {message}")
+            if cancel_delete_col.button("✕ Keep it", key="lb_delete_cancel", width="stretch"):
+                st.session_state["lb_delete_open"] = False
+                st.rerun()
 
         if st.session_state.get("lb_save_as_open"):
             rename_col, confirm_col, cancel_col = st.columns([4, 1.2, 1.2])
@@ -5801,9 +5932,8 @@ def _lb_render_template_header(working_template, saved_docs, profiles, profile_n
                 elif candidate in saved_docs:
                     st.warning("A document with that name already exists.")
                 else:
-                    updated = dict(saved_docs)
-                    updated[candidate] = payload_builder(profile_name)
-                    if _write_gsheet_config(LEASE_DOC_SHEET, updated):
+                    ok, message = _lb_save_document(candidate, payload_builder(profile_name))
+                    if ok:
                         st.session_state["lb_save_as_open"] = False
                         # Switch the editor to the copy, which is what you almost
                         # always want after saving one. It has to go through a
@@ -5815,7 +5945,7 @@ def _lb_render_template_header(working_template, saved_docs, profiles, profile_n
                         st.success(f"Saved: {candidate}")
                         st.rerun()
                     else:
-                        st.error("Could not save the document to Google Sheets.")
+                        st.error(f"Could not save “{candidate}” — {message}")
             if cancel_col.button("✕ Cancel", key="lb_save_as_cancel", width="stretch"):
                 st.session_state["lb_save_as_open"] = False
                 st.rerun()
@@ -5943,16 +6073,56 @@ def render_lease_builder_tab():
     # One list of documents. "Triple Net Template" and "ABC Bakery Lease" are the
     # same kind of object; only what you leave checked differs. The old template
     # and lease sheets are folded in on first load and left untouched as backup.
-    saved_docs = ld.normalize_store(_read_gsheet_config(LEASE_DOC_SHEET))
+    saved_docs, doc_source = _lb_load_documents()
     if not saved_docs and (saved_templates or saved_leases):
         saved_docs, migration_notes = ld.migrate_stores(saved_templates, saved_leases)
-        if saved_docs and _write_gsheet_config(LEASE_DOC_SHEET, saved_docs):
-            st.success(
-                f"Merged {len(saved_templates)} template(s) and {len(saved_leases)} lease(s) "
-                f"into {len(saved_docs)} document(s). The old sheets are untouched."
+        if saved_docs:
+            merged_ok, merge_failures = _lb_migrate_sheet_to_repo(saved_docs)
+            if merged_ok:
+                doc_source = "repo"
+                st.success(
+                    f"Merged {len(saved_templates)} template(s) and {len(saved_leases)} lease(s) "
+                    f"into {len(saved_docs)} document(s). The old sheets are untouched."
+                )
+                for note in migration_notes:
+                    st.warning(note)
+            else:
+                st.error(
+                    "Some documents could not be written to the data repo, so nothing "
+                    "was migrated. The old sheets are untouched."
+                )
+                for failure in merge_failures:
+                    st.warning(failure)
+
+    # Moving documents out of the Sheet is one-way, and it happens silently the
+    # first time the repo is reachable. Saying so is the difference between a
+    # migration you can trust and one you discover later.
+    if doc_source == "sheet" and saved_docs:
+        if get_lease_store() is None:
+            st.warning(
+                f"Reading {len(saved_docs)} document(s) from the old Google Sheet. "
+                "Saving is disabled until the lease data repo is configured — "
+                "add a [lease_data] section to secrets."
             )
-            for note in migration_notes:
-                st.warning(note)
+        else:
+            migrate_col, note_col = st.columns([1.4, 4])
+            if migrate_col.button("📦 Move to data repo", type="primary", key="lb_migrate_to_repo"):
+                moved_ok, moved_failures = _lb_migrate_sheet_to_repo(saved_docs)
+                if moved_ok:
+                    get_lease_store.clear()
+                    st.success(
+                        f"Copied {len(saved_docs)} document(s) into the data repo. "
+                        "The Google Sheet is unchanged, so nothing is lost either way."
+                    )
+                    st.rerun()
+                else:
+                    st.error("Nothing was migrated — every document has to land first.")
+                    for failure in moved_failures:
+                        st.warning(failure)
+            note_col.info(
+                f"{len(saved_docs)} document(s) are still in the old Google Sheet. "
+                "Move them to the data repo to get per-document files and version history."
+            )
 
     doc_names = sorted(saved_docs)
     head2, head3 = st.columns([4, 1.4])
@@ -6692,10 +6862,38 @@ def render_lease_builder_tab():
                                     for row in draft_state["key_provisions"]
                                 ],
                             )
-                            st.success(
-                                f"Published {published_path.name}. It now appears in the base-template "
-                                f"picker as “{PUBLISHED_PREFIX}{published_path.stem}”. "
-                                "Commit and push so the live app can see it."
+                            # publish_template_docx writes into data/Lease Builder/
+                            # Published, which on Streamlit Cloud is wiped by the
+                            # next redeploy. Copying the bytes into the data repo
+                            # is what actually makes a published file durable.
+                            published_bytes = published_path.read_bytes()
+                            store = get_lease_store()
+                            if store is not None:
+                                try:
+                                    store.publish(published_path.name, published_bytes)
+                                    st.success(
+                                        f"Published {published_path.name} to the data repo. "
+                                        "It survives redeploys and is downloadable below."
+                                    )
+                                except Exception as exc:
+                                    st.warning(
+                                        f"Built {published_path.name}, but it could not be saved "
+                                        f"to the data repo — {exc}. Download it now; the local "
+                                        "copy is lost on the next redeploy."
+                                    )
+                            else:
+                                st.warning(
+                                    f"Built {published_path.name}, but the data repo is not "
+                                    "configured. Download it now — the local copy is lost on "
+                                    "the next redeploy."
+                                )
+                            st.download_button(
+                                f"⬇️ Download {published_path.name}",
+                                data=published_bytes,
+                                file_name=published_path.name,
+                                mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                                key="lb_download_published",
+                                width="stretch",
                             )
                         except Exception as exc:
                             st.error(f"Publish failed: {exc}")
