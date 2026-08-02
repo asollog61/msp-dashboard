@@ -369,6 +369,31 @@ class TestGitHubBackend(GitHubTestCase):
         backend.delete("documents/gone.json", "remove")
         self.assertEqual([c for c in fake.calls if c[0] == "DELETE"], [])
 
+    def test_a_404_on_write_raises_instead_of_pretending_to_succeed(self):
+        # The branch in secrets pointing at "master" on a "main" repo lands
+        # here. Returning quietly made a failed save look like a saved lease.
+        backend, _ = self.make({
+            ("GET", "documents/a.json"): FakeResponse(404),
+            ("PUT", "documents/a.json"): FakeResponse(404, {}, "Not Found"),
+        })
+        with self.assertRaises(ls.StoreError) as caught:
+            backend.write("documents/a.json", b"{}", "write")
+        self.assertIn("branch", str(caught.exception).lower())
+
+    def test_a_404_on_read_is_still_just_missing(self):
+        backend, _ = self.make({})
+        self.assertIsNone(backend.read("documents/a.json"))
+
+    def test_a_save_through_the_store_surfaces_the_404(self):
+        backend, _ = self.make({
+            ("GET", ls.INDEX_PATH): FakeResponse(404),
+            ("GET", "documents"): FakeResponse(404),
+            ("GET", "documents/Lease-A.json"): FakeResponse(404),
+            ("PUT", "documents/Lease-A.json"): FakeResponse(404, {}, "Not Found"),
+        })
+        with self.assertRaises(ls.StoreError):
+            ls.LeaseStore(backend).save_document("Lease A", {"sections": {}})
+
     def test_oversized_write_is_refused_before_the_request(self):
         backend, fake = self.make({})
         with self.assertRaises(ls.StoreError):

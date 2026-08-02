@@ -169,7 +169,18 @@ class GitHubBackend:
         response = requests.request(method, url, headers=headers, timeout=self.timeout, **kwargs)
 
         if response.status_code == 404:
-            return None
+            # A missing file is a normal answer to a read. A missing file is
+            # never a normal answer to a write: GitHub also returns 404 when the
+            # repo or the branch does not exist, and treating that as "nothing
+            # there" made a failed save look like a successful one.
+            if method == "GET":
+                return None
+            raise StoreError(
+                f"GitHub returned 404 for {method} {path}. Nothing was written. "
+                f"Check that “{self.repo}” exists and has a branch named "
+                f"“{self.branch}” — a branch set to “master” on a repo whose "
+                "default is “main” fails exactly this way."
+            )
         if response.status_code == 401:
             raise StoreError("GitHub rejected the token (401). It may be expired or revoked.")
         if response.status_code == 403:
