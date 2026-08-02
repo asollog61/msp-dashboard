@@ -1,0 +1,198 @@
+"""Tests for the merged lease-document store.
+
+Run: python -m unittest test_lease_docs -v
+"""
+
+from __future__ import annotations
+
+import json
+import unittest
+
+import lease_docs as ld
+
+
+def template(name_rows, sections=None, profile="MSP House Style"):
+    return {
+        "base_template": "MSP NNN Retail",
+        "key_provisions": name_rows,
+        "sections": sections or {"1": {"include": True, "choice": "Template language"}},
+        "format_profile": profile,
+        "saved_at": "2026-07-30T10:00:00",
+    }
+
+
+def provision(field, value="", alternates=None, include=True, bookmark=None):
+    return {
+        "Group": "Optional",
+        "Include": include,
+        "Field": field,
+        "Value": value,
+        "Alternates": alternates or [],
+        "Link": False,
+        "Section": "Section 1 — Premises",
+        "Bookmark": bookmark or f"Tx_{field.replace(' ', '')}",
+    }
+
+
+class TestNormalize(unittest.TestCase):
+    def test_junk_becomes_an_empty_document(self):
+        for junk in (None, "", 0, [], "nonsense"):
+            doc = ld.normalize_document(junk)
+            self.assertEqual(doc["key_provisions"], [])
+            self.assertEqual(doc["sections"], {})
+
+    def test_alternates_are_padded_to_ten(self):
+        doc = ld.normalize_document({"key_provisions": [provision("Rent", alternates=["a", "b"])]})
+        self.assertEqual(len(doc["key_provisions"][0]["Alternates"]), 10)
+        self.assertEqual(doc["key_provisions"][0]["Alternates"][:2], ["a", "b"])
+
+    def test_extra_alternates_are_truncated_not_dropped_silently(self):
+        doc = ld.normalize_document({"key_provisions": [provision("Rent", alternates=list("abcdefghijklmno"))]})
+        self.assertEqual(len(doc["key_provisions"][0]["Alternates"]), 10)
+
+    def test_section_text_only_kept_when_it_departs(self):
+        doc = ld.normalize_document({"sections": {"1": {"include": True, "text": "   "}}})
+        self.assertNotIn("text", doc["sections"]["1"])
+        doc = ld.normalize_document({"sections": {"1": {"include": True, "text": "Custom."}}})
+        self.assertEqual(doc["sections"]["1"]["text"], "Custom.")
+
+    def test_group_falls_back_to_optional(self):
+        doc = ld.normalize_document({"key_provisions": [{"Field": "X", "Group": "Weird"}]})
+        self.assertEqual(doc["key_provisions"][0]["Group"], "Optional")
+
+    def test_document_round_trips_through_json(self):
+        doc = ld.build_document([provision("Rent", "5,000", ["4,500"])],
+                                {"1": {"include": True, "choice": "Template language"}},
+                                {}, "MSP House Style")
+        self.assertEqual(ld.normalize_document(json.loads(json.dumps(doc))), doc)
+
+    def test_store_drops_blank_names(self):
+        self.assertEqual(list(ld.normalize_store({"  ": {}, "Real": {}})), ["Real"])
+
+
+class TestMigration(unittest.TestCase):
+    def test_templates_come_across_whole(self):
+        docs, notes = ld.migrate_stores({"Triple Net": template([provision("Rent", "5,000", ["4,500", "6,000"])])}, {})
+        self.assertEqual(list(docs), ["Triple Net"])
+        self.assertEqual(docs["Triple Net"]["key_provisions"][0]["Alternates"][:2], ["4,500", "6,000"])
+        self.assertEqual(notes, [])
+
+    def test_lease_gets_its_parents_alternates_baked_in(self):
+        """The whole point of the migration: a lease stored only its selections."""
+        templates = {"Triple Net": template([provision("Rent", "5,000", ["4,500", "6,000"])])}
+        leases = {"ABC Bakery": {
+            "template_name": "Triple Net",
+            "key_provisions": [{"Bookmark": "Tx_Rent", "Include": True, "Value": "6,000"}],
+            "sections": {"1": {"include": False, "choice": "Template language"}},
+            "saved_at": "2026-07-31T09:00:00",
+        }}
+        docs, notes = ld.migrate_stores(templates, leases)
+        bakery = docs["ABC Bakery"]
+        self.assertEqual(bakery["key_provisions"][0]["Value"], "6,000")
+        self.assertEqual(bakery["key_provisions"][0]["Alternates"][:2], ["4,500", "6,000"])
+        self.assertFalse(bakery["sections"]["1"]["include"])
+        self.assertEqual(bakery["copied_from"], "Triple Net")
+        self.assertEqual(notes, [])
+
+    def test_lease_keeps_provisions_its_parent_never_had(self):
+        templates = {"Triple Net": template([provision("Rent")])}
+        leases = {"ABC": {"template_name": "Triple Net",
+                          "key_provisions": [{"Bookmark": "Custom_9", "Field": "Signage", "Value": "yes"}]}}
+        docs, _ = ld.migrate_stores(templates, leases)
+        fields = [row["Field"] for row in docs["ABC"]["key_provisions"]]
+        self.assertIn("Signage", fields)
+        self.assertIn("Rent", fields)
+
+    def test_missing_parent_is_reported_not_swallowed(self):
+        leases = {"Orphan": {"template_name": "Deleted Template",
+                             "key_provisions": [{"Bookmark": "Tx_Rent", "Value": "5,000"}]}}
+        docs, notes = ld.migrate_stores({}, leases)
+        self.assertIn("Orphan", docs)
+        self.assertEqual(len(notes), 1)
+        self.assertIn("Deleted Template", notes[0])
+        # The lease's own selections still survive.
+        self.assertEqual(docs["Orphan"]["key_provisions"][0]["Value"], "5,000")
+
+    def test_name_clash_suffixes_the_lease_rather_than_overwriting(self):
+        templates = {"Retail": template([provision("Rent", "1")])}
+        leases = {"Retail": {"template_name": "Retail",
+                             "key_provisions": [{"Bookmark": "Tx_Rent", "Value": "2"}]}}
+        docs, notes = ld.migrate_stores(templates, leases)
+        self.assertEqual(sorted(docs), ["Retail", "Retail (2)"])
+        self.assertEqual(docs["Retail"]["key_provisions"][0]["Value"], "1")
+        self.assertEqual(docs["Retail (2)"]["key_provisions"][0]["Value"], "2")
+        self.assertTrue(notes)
+
+    def test_lease_with_no_parent_named(self):
+        docs, notes = ld.migrate_stores({}, {"Solo": {"key_provisions": [{"Field": "Rent"}]}})
+        self.assertIn("Solo", docs)
+        self.assertEqual(notes, [])
+
+    def test_empty_stores(self):
+        self.assertEqual(ld.migrate_stores({}, {}), ({}, []))
+        self.assertEqual(ld.migrate_stores(None, None), ({}, []))
+
+    def test_migration_is_idempotent(self):
+        templates = {"Triple Net": template([provision("Rent", "5,000", ["4,500"])])}
+        leases = {"ABC": {"template_name": "Triple Net",
+                          "key_provisions": [{"Bookmark": "Tx_Rent", "Value": "6,000"}]}}
+        once, _ = ld.migrate_stores(templates, leases)
+        twice, _ = ld.migrate_stores(once, {})
+        self.assertEqual(sorted(once), sorted(twice))
+        self.assertEqual(once["ABC"]["key_provisions"], twice["ABC"]["key_provisions"])
+
+    def test_migrated_lease_no_longer_needs_a_parent(self):
+        """After migration the parent can be deleted with no loss."""
+        templates = {"Triple Net": template([provision("Rent", "5,000", ["4,500", "6,000"])])}
+        leases = {"ABC": {"template_name": "Triple Net",
+                          "key_provisions": [{"Bookmark": "Tx_Rent", "Value": "6,000"}]}}
+        docs, _ = ld.migrate_stores(templates, leases)
+        standalone = json.loads(json.dumps(docs["ABC"]))   # parent now gone
+        self.assertEqual(ld.normalize_document(standalone)["key_provisions"][0]["Alternates"][:2],
+                         ["4,500", "6,000"])
+
+
+class TestCopy(unittest.TestCase):
+    def test_copy_is_deep(self):
+        original = ld.normalize_document(template([provision("Rent", "5,000", ["4,500"])]))
+        duplicate = ld.copy_document(original, "Triple Net")
+        duplicate["key_provisions"][0]["Value"] = "9,999"
+        duplicate["key_provisions"][0]["Alternates"][0] = "changed"
+        duplicate["sections"]["1"]["include"] = False
+        self.assertEqual(original["key_provisions"][0]["Value"], "5,000")
+        self.assertEqual(original["key_provisions"][0]["Alternates"][0], "4,500")
+        self.assertTrue(original["sections"]["1"]["include"])
+
+    def test_copy_records_its_origin_and_clears_the_timestamp(self):
+        duplicate = ld.copy_document(template([provision("Rent")]), "Triple Net")
+        self.assertEqual(duplicate["copied_from"], "Triple Net")
+        self.assertEqual(duplicate["saved_at"], "")
+
+    def test_copy_keeps_the_format_profile(self):
+        duplicate = ld.copy_document(template([provision("Rent")], profile="Compact"), "X")
+        self.assertEqual(duplicate["format_profile"], "Compact")
+
+    def test_unique_name(self):
+        taken = {"Retail", "Retail (2)"}
+        self.assertEqual(ld.unique_name("Retail", taken), "Retail (3)")
+        self.assertEqual(ld.unique_name("New", taken), "New")
+        self.assertEqual(ld.unique_name("  ", taken), "Untitled")
+
+
+class TestDescribe(unittest.TestCase):
+    def test_counts_what_is_used(self):
+        doc = ld.normalize_document(template(
+            [provision("Rent", include=True, alternates=["a"]), provision("Signage", include=False)],
+            {"1": {"include": True}, "2": {"include": False}},
+        ))
+        text = ld.describe_document(doc)
+        self.assertIn("1/2 provisions", text)
+        self.assertIn("1/2 sections", text)
+        self.assertIn("1 with alternates", text)
+
+    def test_empty_document(self):
+        self.assertIn("0/0 provisions", ld.describe_document({}))
+
+
+if __name__ == "__main__":
+    unittest.main(verbosity=2)
