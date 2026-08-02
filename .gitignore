@@ -5,3 +5,10 @@ secrets.toml
 __pycache__/
 *.pyc
 ~$*
+
+# The lease data repo is a separate repository and must live outside this one.
+# Cloning it in here makes git record a gitlink (mode 160000) that GitHub shows
+# as an unusable grey folder and that Streamlit Cloud checks out as empty, so
+# the lease files would never actually arrive.
+msp-lease-data/
+Leases and Templates/
