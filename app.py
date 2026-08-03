@@ -23,6 +23,7 @@ import gspread
 from google.oauth2.service_account import Credentials
 import openpyxl
 from openpyxl.styles import Alignment, Font as _XLFont
+from openpyxl.worksheet.datavalidation import DataValidation
 import json
 
 try:
@@ -69,7 +70,8 @@ try:
         (lm, ("parse_blocks", "to_html", "to_markup")),
         (lr, ("render_lease", "bookmark_names", "dangling_anchors")),
         (ld, ("normalize_store", "migrate_stores", "copy_document",
-              "build_document", "describe_document")),
+              "build_document", "describe_document", "apply_choice",
+              "normalize_choice", "choice_options", "CURRENT_VALUE_CHOICE")),
         (lstore, ("build_store", "LeaseStore", "LocalBackend", "GitHubBackend",
                   "StoreError", "slugify")),
     ):
@@ -4619,6 +4621,7 @@ def _lb_export_key_provisions_xlsx(rows):
             # Carets become real newlines so the cell reads naturally in Excel;
             # Alt+Enter there comes back as a caret on import.
             "Current Value": kp_value_plain(row.get("Value", "")),
+            "Choice": ld.normalize_choice(row),
             "Link": bool(row.get("Link", False)),
             "Target Section": row.get("Section", ""),
             "Bookmark": row.get("Bookmark", ""),
@@ -4634,8 +4637,23 @@ def _lb_export_key_provisions_xlsx(rows):
         worksheet = writer.book["Key Provisions"]
         worksheet.freeze_panes = "A2"
         worksheet.auto_filter.ref = worksheet.dimensions
-        worksheet.column_dimensions["G"].hidden = True
-        widths = {"A": 14, "B": 9, "C": 28, "D": 70, "E": 9, "F": 34}
+        # Choice sits at E, so everything after it shifts one column right and
+        # Bookmark — the hidden internal id — is now H rather than G.
+        worksheet.column_dimensions["H"].hidden = True
+        widths = {"A": 14, "B": 9, "C": 28, "D": 70, "E": 14, "F": 9, "G": 34}
+        # A real dropdown in Excel, so the round trip is a chooser too and not
+        # a free-text field where "alt2" silently fails to match.
+        if worksheet.max_row > 1:
+            choice_rule = DataValidation(
+                type="list",
+                formula1='"' + ",".join(
+                    [ld.CURRENT_VALUE_CHOICE] + [f"Alt {index}" for index in range(1, 11)]
+                ) + '"',
+                allow_blank=True,
+                showDropDown=False,
+            )
+            worksheet.add_data_validation(choice_rule)
+            choice_rule.add(f"E2:E{worksheet.max_row}")
         for column, width in widths.items():
             worksheet.column_dimensions[column].width = width
         # Multi-line values are only visible in Excel when the cell wraps.
@@ -4715,6 +4733,12 @@ def _lb_import_key_provisions_xlsx(uploaded_file, existing_rows, section_labels)
                 normalize_kp_value(source[column]) if column is not None else ""
             )
         row["Alternates"] = alternate_slots
+        if "Choice" in normalized:
+            row["Choice"] = str(source[normalized["Choice"]]).strip()
+        # Applied after Alternates are in place, so a choice typed in Excel is
+        # validated against the slots from the same upload rather than the ones
+        # that happened to be there before it.
+        row.update(ld.apply_choice(row))
         if "Link" in normalized:
             row["Link"] = _lb_bool(source[normalized["Link"]], row.get("Link", False))
         if "Section" in normalized:
@@ -6406,14 +6430,18 @@ def render_lease_builder_tab():
             draft_state["key_provisions"],
             key=lambda row: 0 if bool(row.get("Include")) else 1,
         )
-        # Current Value is the chooser. There is no separate Choice column: click
-        # Current Value and select any nonblank alternate in that same row.
+        # Choice picks which text the provision actually uses. It sits between
+        # Current Value and Alt 1, offers only the alternates that have text,
+        # and copies the winner into Current Value so the cell always shows
+        # what will print. Choice itself is saved, so a lease records that it
+        # uses "Alt 2" rather than only the words that happened to be there.
         grid_rows = []
         for source_row in draft_state["key_provisions"]:
-            row = dict(source_row)
+            row = ld.apply_choice(source_row)
             slots = [str(value) for value in row.get("Alternates", [])[:10]]
             slots += [""] * (10 - len(slots))
             row["Current Value"] = row.get("Value", "")
+            row["Choice"] = ld.normalize_choice(row)
             for index, value in enumerate(slots, start=1):
                 row[f"Alt {index}"] = value
             cited_in = kp_citations.get(str(row.get("Field", "")), [])
@@ -6422,7 +6450,6 @@ def render_lease_builder_tab():
             )
             row.pop("Value", None)
             row.pop("Alternates", None)
-            row.pop("Choice", None)
             row.pop("Link", None)
             row.pop("Section", None)
             grid_rows.append(row)
@@ -6434,6 +6461,12 @@ def render_lease_builder_tab():
             column for column in kp_df.columns if column not in ("Drag", "Bookmark")
         ]
         ordered_columns = get_column_order(KP_TAB_KEY, configurable_columns)
+        # A saved column order predates Choice, and get_column_order appends
+        # anything it has never seen — which would strand the chooser out past
+        # Alt 10. Put it back beside the value it controls.
+        if "Choice" in ordered_columns and "Current Value" in ordered_columns:
+            ordered_columns = [column for column in ordered_columns if column != "Choice"]
+            ordered_columns.insert(ordered_columns.index("Current Value") + 1, "Choice")
         tail = ["Bookmark"] if "Bookmark" in kp_df.columns else []
         kp_df = kp_df[[column for column in ordered_columns if column in kp_df.columns] + tail]
         kp_df.insert(0, "Drag", "")
@@ -6448,21 +6481,26 @@ def render_lease_builder_tab():
         grid_builder.configure_column("Include", header_name=use_label, editable=True, width=88,
                                       cellRenderer="agCheckboxCellRenderer", cellEditor="agCheckboxCellEditor")
         grid_builder.configure_column("Field", header_name="Key Provision", editable=True, width=165)
-        current_value_choices = JsCode("""
+        # Only slots that actually hold text are offered. Choosing an empty
+        # "Alt 7" would blank the provision in the generated lease.
+        choice_options_js = JsCode("""
             function(params) {
-                var values = [];
-                function add(value) {
-                    if (value !== null && value !== undefined && String(value).trim() !== '' && values.indexOf(String(value)) === -1) {
-                        values.push(String(value));
+                var values = ['Current Value'];
+                for (var i = 1; i <= 10; i++) {
+                    var slot = params.data['Alt ' + i];
+                    if (slot !== null && slot !== undefined && String(slot).trim() !== '') {
+                        values.push('Alt ' + i);
                     }
                 }
-                add(params.value);
-                for (var i = 1; i <= 10; i++) { add(params.data['Alt ' + i]); }
                 return { values: values };
             }
         """)
         # Free text: template mode is where the default value itself is authored.
         grid_builder.configure_column("Current Value", header_name="Default Value", editable=True, width=330)
+        grid_builder.configure_column(
+            "Choice", header_name="Choice", editable=True, width=120,
+            cellEditor="agSelectCellEditor", cellEditorParams=choice_options_js,
+        )
         # Linking is read-only: it reflects the KP: tokens found in clause text.
         grid_builder.configure_column("Linked", header_name="Linked", editable=False, width=170)
         for index in range(1, 11):
@@ -6506,14 +6544,17 @@ def render_lease_builder_tab():
         for row in edited_kp.drop(columns=["Drag"], errors="ignore").to_dict("records"):
             slots = [str(row.pop(f"Alt {index}", "")).strip() for index in range(1, 11)]
             current_value = str(row.pop("Current Value", ""))
-            row.pop("Choice", None)
+            choice = str(row.pop("Choice", "") or ld.CURRENT_VALUE_CHOICE)
             row.pop("Linked", None)  # Derived for display only.
             previous = previous_by_bookmark.get(str(row.get("Bookmark", "")), {})
             row["Link"] = bool(previous.get("Link", False))
             row["Section"] = previous.get("Section", section_labels[section_numbers[0]])
             row["Value"] = current_value
             row["Alternates"] = slots
-            edited_rows.append(row)
+            row["Choice"] = choice
+            # Re-applied every edit, so retyping a chosen alternate updates the
+            # value too rather than leaving the lease on a stale copy.
+            edited_rows.append(ld.apply_choice(row))
         draft_state["key_provisions"] = edited_rows
         selected_count = sum(1 for row in edited_rows if bool(row.get("Include")))
         count_col.caption(f"{len(edited_rows)} provisions · {selected_count} on by default")

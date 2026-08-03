@@ -179,6 +179,114 @@ class TestCopy(unittest.TestCase):
         self.assertEqual(ld.unique_name("  ", taken), "Untitled")
 
 
+class TestChoiceOptions(unittest.TestCase):
+    def test_only_filled_slots_are_offered(self):
+        row = {"Alternates": ["first", "", "third", "", "", "", "", "", "", ""]}
+        self.assertEqual(ld.choice_options(row), ["Current Value", "Alt 1", "Alt 3"])
+
+    def test_no_alternates_means_only_the_default(self):
+        self.assertEqual(ld.choice_options({"Alternates": []}), ["Current Value"])
+
+    def test_whitespace_is_not_a_choice(self):
+        self.assertEqual(ld.choice_options({"Alternates": ["   ", "real"]}),
+                         ["Current Value", "Alt 2"])
+
+
+class TestNormalizeChoice(unittest.TestCase):
+    def test_a_missing_choice_defaults(self):
+        self.assertEqual(ld.normalize_choice({"Alternates": ["a"]}), "Current Value")
+
+    def test_a_valid_choice_is_kept(self):
+        self.assertEqual(ld.normalize_choice({"Choice": "Alt 1", "Alternates": ["a"]}), "Alt 1")
+
+    def test_a_choice_pointing_at_a_blank_slot_falls_back(self):
+        # The alternate was emptied after being chosen. Printing nothing in a
+        # key provision would be worse than printing the default.
+        self.assertEqual(ld.normalize_choice({"Choice": "Alt 2", "Alternates": ["a", ""]}),
+                         "Current Value")
+
+    def test_a_nonsense_choice_falls_back(self):
+        self.assertEqual(ld.normalize_choice({"Choice": "banana", "Alternates": ["a"]}),
+                         "Current Value")
+
+    def test_out_of_range_choice_falls_back(self):
+        self.assertEqual(ld.normalize_choice({"Choice": "Alt 11", "Alternates": ["a"]}),
+                         "Current Value")
+
+
+class TestApplyChoice(unittest.TestCase):
+    def test_choosing_an_alternate_sets_the_value(self):
+        row = ld.apply_choice({"Value": "default", "Choice": "Alt 2",
+                               "Alternates": ["one", "two", "three"]})
+        self.assertEqual(row["Value"], "two")
+        self.assertEqual(row["Choice"], "Alt 2")
+
+    def test_current_value_leaves_the_typed_value_alone(self):
+        row = ld.apply_choice({"Value": "typed", "Choice": "Current Value",
+                               "Alternates": ["one"]})
+        self.assertEqual(row["Value"], "typed")
+
+    def test_reapplying_picks_up_an_edited_alternate(self):
+        # Retyping a chosen alternate must move the value with it, or the lease
+        # prints a copy of text that no longer exists anywhere in the row.
+        row = {"Value": "default", "Choice": "Alt 1", "Alternates": ["first"]}
+        row = ld.apply_choice(row)
+        self.assertEqual(row["Value"], "first")
+        row["Alternates"] = ["first, amended"]
+        self.assertEqual(ld.apply_choice(row)["Value"], "first, amended")
+
+    def test_a_blanked_alternate_restores_the_default(self):
+        row = {"Value": "default", "Choice": "Alt 1", "Alternates": [""]}
+        resolved = ld.apply_choice(row)
+        self.assertEqual(resolved["Value"], "default")
+        self.assertEqual(resolved["Choice"], "Current Value")
+
+    def test_apply_is_idempotent(self):
+        row = ld.apply_choice({"Value": "d", "Choice": "Alt 1", "Alternates": ["one"]})
+        self.assertEqual(ld.apply_choice(ld.apply_choice(row)), row)
+
+    def test_the_original_row_is_not_mutated(self):
+        original = {"Value": "default", "Choice": "Alt 1", "Alternates": ["one"]}
+        ld.apply_choice(original)
+        self.assertEqual(original["Value"], "default")
+
+    def test_case_and_spacing_in_a_choice_still_match(self):
+        row = ld.apply_choice({"Value": "d", "Choice": "alt 1", "Alternates": ["one"]})
+        self.assertEqual(row["Value"], "one")
+
+
+class TestChoiceSurvivesNormalisation(unittest.TestCase):
+    def test_normalize_provision_keeps_a_valid_choice(self):
+        row = ld.normalize_provision({"Field": "Rent", "Value": "d", "Choice": "Alt 1",
+                                      "Alternates": ["one"]})
+        self.assertEqual(row["Choice"], "Alt 1")
+
+    def test_normalize_provision_supplies_a_default(self):
+        self.assertEqual(ld.normalize_provision({"Field": "Rent"})["Choice"], "Current Value")
+
+    def test_a_document_round_trips_its_choices(self):
+        doc = ld.normalize_document({
+            "key_provisions": [{"Field": "Rent", "Value": "d", "Choice": "Alt 2",
+                                "Alternates": ["one", "two"]}],
+            "sections": {},
+        })
+        self.assertEqual(ld.normalize_document(doc)["key_provisions"][0]["Choice"], "Alt 2")
+
+    def test_a_copy_keeps_the_choice(self):
+        doc = ld.normalize_document({
+            "key_provisions": [{"Field": "Rent", "Value": "d", "Choice": "Alt 1",
+                                "Alternates": ["one"]}],
+            "sections": {},
+        })
+        self.assertEqual(ld.copy_document(doc)["key_provisions"][0]["Choice"], "Alt 1")
+
+    def test_documents_saved_before_choice_existed_still_load(self):
+        legacy = {"key_provisions": [{"Field": "Rent", "Value": "d", "Alternates": ["one"]}],
+                  "sections": {}}
+        self.assertEqual(ld.normalize_document(legacy)["key_provisions"][0]["Choice"],
+                         "Current Value")
+
+
 class TestDescribe(unittest.TestCase):
     def test_counts_what_is_used(self):
         doc = ld.normalize_document(template(

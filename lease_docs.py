@@ -18,12 +18,71 @@ This module is pure data: migration, normalization, and copying. No Streamlit.
 from __future__ import annotations
 
 import copy
+import re
 from datetime import datetime
 from typing import Any
 
 DOC_VERSION = 1
 
 ALTERNATE_SLOTS = 10
+
+# A provision's Value is what prints in the lease. Choice records where that
+# text came from — the typed default, or one of the Alt slots. Keeping Value
+# authoritative means nothing downstream has to understand choices; keeping
+# Choice alongside it is what makes "which leases use this clause" answerable.
+CURRENT_VALUE_CHOICE = "Current Value"
+_ALT_CHOICE_RE = re.compile(r"^\s*Alt\s*(\d+)\s*$", re.IGNORECASE)
+
+
+def choice_options(row: Any) -> list[str]:
+    """The choices offered for one provision: the default, then each filled alternate.
+
+    Blank slots are not offered. Selecting "Alt 7" when Alt 7 is empty would
+    silently blank a key provision in the lease.
+    """
+    source = row if isinstance(row, dict) else {}
+    alternates = _pad_alternates(source.get("Alternates"))
+    return [CURRENT_VALUE_CHOICE] + [
+        f"Alt {index}"
+        for index, value in enumerate(alternates, start=1)
+        if str(value).strip()
+    ]
+
+
+def normalize_choice(row: Any) -> str:
+    """A choice that still points at real text, or the default.
+
+    An alternate that gets blanked after being chosen falls back here rather
+    than leaving the provision pointing at nothing.
+    """
+    source = row if isinstance(row, dict) else {}
+    raw = str(source.get("Choice", "") or CURRENT_VALUE_CHOICE).strip()
+    # "alt 2", "ALT2" and "Alt 2" are the same choice. Excel is a free-text
+    # field even with a dropdown on it, so a case difference must not quietly
+    # demote the row back to the default value.
+    match = _ALT_CHOICE_RE.match(raw)
+    canonical = f"Alt {int(match.group(1))}" if match else raw
+    if canonical.casefold() == CURRENT_VALUE_CHOICE.casefold():
+        canonical = CURRENT_VALUE_CHOICE
+    return canonical if canonical in choice_options(source) else CURRENT_VALUE_CHOICE
+
+
+def apply_choice(row: Any) -> dict[str, Any]:
+    """Materialise the chosen alternate into Value.
+
+    Re-applied on every edit, so changing the text of a chosen alternate keeps
+    Value in step instead of leaving the lease printing a stale copy.
+    """
+    resolved = dict(row) if isinstance(row, dict) else {}
+    choice = normalize_choice(resolved)
+    resolved["Choice"] = choice
+    match = _ALT_CHOICE_RE.match(choice)
+    if match:
+        alternates = _pad_alternates(resolved.get("Alternates"))
+        index = int(match.group(1)) - 1
+        if 0 <= index < len(alternates) and str(alternates[index]).strip():
+            resolved["Value"] = str(alternates[index])
+    return resolved
 
 
 def _rows(value: Any) -> list[dict[str, Any]]:
@@ -43,6 +102,7 @@ def normalize_provision(row: dict[str, Any]) -> dict[str, Any]:
         "Field": str(row.get("Field", "") or "Key Provision"),
         "Value": str(row.get("Value", "") or ""),
         "Alternates": _pad_alternates(row.get("Alternates")),
+        "Choice": normalize_choice(row),
         "Link": bool(row.get("Link", False)),
         "Section": str(row.get("Section", "") or ""),
         "Bookmark": str(row.get("Bookmark", "") or ""),
@@ -111,6 +171,8 @@ def _hydrate_lease(lease: dict[str, Any], parent: dict[str, Any]) -> dict[str, A
         if saved is not None:
             row["Include"] = bool(saved.get("Include", row.get("Include", True)))
             row["Value"] = str(saved.get("Value", row.get("Value", "")))
+            if saved.get("Choice"):
+                row["Choice"] = saved["Choice"]
         merged.append(row)
     # A provision added on the lease itself has no parent row; keep it.
     for leftover in by_bookmark.values():
