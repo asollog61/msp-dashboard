@@ -221,16 +221,16 @@ class TestApplyChoice(unittest.TestCase):
         self.assertEqual(row["Value"], "two")
         self.assertEqual(row["Choice"], "Alt 2")
 
-    def test_no_choice_leaves_the_typed_value_alone(self):
+    def test_no_choice_means_no_value(self):
         row = ld.apply_choice({"Value": "typed", "Choice": "", "Alternates": ["one"]})
-        self.assertEqual(row["Value"], "typed")
+        self.assertEqual(row["Value"], "")
 
     def test_the_legacy_current_value_string_normalises_to_blank(self):
         # Documents saved before the chooser dropped that label must not end up
         # with an option that no longer exists in the dropdown.
         row = ld.apply_choice({"Value": "typed", "Choice": "Current Value",
                                "Alternates": ["one"]})
-        self.assertEqual(row["Value"], "typed")
+        self.assertEqual(row["Value"], "")
         self.assertEqual(row["Choice"], "")
 
     def test_reapplying_picks_up_an_edited_alternate(self):
@@ -242,10 +242,10 @@ class TestApplyChoice(unittest.TestCase):
         row["Alternates"] = ["first, amended"]
         self.assertEqual(ld.apply_choice(row)["Value"], "first, amended")
 
-    def test_a_blanked_alternate_restores_the_default(self):
+    def test_a_blanked_alternate_clears_the_value(self):
         row = {"Value": "default", "Choice": "Alt 1", "Alternates": [""]}
         resolved = ld.apply_choice(row)
-        self.assertEqual(resolved["Value"], "default")
+        self.assertEqual(resolved["Value"], "")
         self.assertEqual(resolved["Choice"], "")
 
     def test_apply_is_idempotent(self):
@@ -291,6 +291,50 @@ class TestChoiceSurvivesNormalisation(unittest.TestCase):
         legacy = {"key_provisions": [{"Field": "Rent", "Value": "d", "Alternates": ["one"]}],
                   "sections": {}}
         self.assertEqual(ld.normalize_document(legacy)["key_provisions"][0]["Choice"], "")
+
+
+class TestAdoptLegacyValue(unittest.TestCase):
+    """Rows written before the chooser existed must not be blanked."""
+
+    def test_a_typed_value_is_promoted_into_alt_1(self):
+        row = ld.adopt_legacy_value({"Value": "MARION STREET 114 LLC", "Alternates": []})
+        self.assertEqual(row["Alternates"][0], "MARION STREET 114 LLC")
+        self.assertEqual(row["Choice"], "Alt 1")
+
+    def test_promotion_survives_normalisation(self):
+        row = ld.normalize_provision({"Field": "Landlord", "Value": "MARION STREET 114 LLC"})
+        self.assertEqual(row["Value"], "MARION STREET 114 LLC")
+        self.assertEqual(row["Choice"], "Alt 1")
+        self.assertEqual(row["Alternates"][0], "MARION STREET 114 LLC")
+
+    def test_a_row_that_already_has_alternates_is_left_alone(self):
+        row = ld.adopt_legacy_value({"Value": "typed", "Alternates": ["one"]})
+        self.assertEqual(row["Alternates"], ["one"])
+        self.assertNotIn("Choice", row)
+
+    def test_a_row_with_a_choice_is_left_alone(self):
+        row = ld.adopt_legacy_value({"Value": "v", "Choice": "Alt 2",
+                                     "Alternates": ["a", "b"]})
+        self.assertEqual(row["Choice"], "Alt 2")
+
+    def test_a_blank_row_stays_blank(self):
+        row = ld.adopt_legacy_value({"Value": "", "Alternates": []})
+        self.assertEqual(row.get("Choice", ""), "")
+
+    def test_promotion_is_idempotent(self):
+        once = ld.normalize_provision({"Field": "X", "Value": "text"})
+        twice = ld.normalize_provision(once)
+        self.assertEqual(once, twice)
+
+    def test_a_whole_legacy_document_keeps_every_value(self):
+        legacy = {"key_provisions": [
+            {"Field": "Landlord", "Value": "MARION STREET 114 LLC"},
+            {"Field": "Tenant", "Value": "CHEZ ALICE"},
+        ], "sections": {}}
+        rows = ld.normalize_document(legacy)["key_provisions"]
+        self.assertEqual([r["Value"] for r in rows],
+                         ["MARION STREET 114 LLC", "CHEZ ALICE"])
+        self.assertTrue(all(r["Choice"] == "Alt 1" for r in rows))
 
 
 class TestDescribe(unittest.TestCase):

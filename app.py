@@ -6596,8 +6596,11 @@ def render_lease_builder_tab():
                 return { values: values };
             }
         """)
-        # Free text: template mode is where the default value itself is authored.
-        grid_builder.configure_column("Current Value", header_name="Default Value", editable=True, width=330)
+        # Read-only: the value mirrors the chosen alternate. Typing here would
+        # be discarded the moment the choice was re-applied, which is worse
+        # than not offering it. Edit the Alt column instead.
+        grid_builder.configure_column("Current Value", header_name="Current Value",
+                                      editable=False, width=330)
         grid_builder.configure_column(
             "Choice", header_name="Choice", editable=True, width=120,
             cellEditor="agSelectCellEditor", cellEditorParams=choice_options_js,
@@ -6618,7 +6621,24 @@ def render_lease_builder_tab():
                     suppressSizeToFit=True, suppressAutoSize=True,
                 )
 
+        # Without this the picked text only appears after Streamlit reruns, so
+        # the grid looks like the choice did nothing. This updates the cell in
+        # the browser the instant the dropdown closes.
+        on_choice_changed = JsCode("""
+            function(params) {
+                if (!params.colDef || params.colDef.field !== 'Choice') { return; }
+                var choice = params.newValue ? String(params.newValue).trim() : '';
+                var text = '';
+                var match = /^Alt\s*(\d+)$/i.exec(choice);
+                if (match) {
+                    var slot = params.data['Alt ' + match[1]];
+                    text = (slot === null || slot === undefined) ? '' : String(slot);
+                }
+                params.node.setDataValue('Current Value', text);
+            }
+        """)
         grid_builder.configure_grid_options(
+            onCellValueChanged=on_choice_changed,
             rowDragManaged=True,
             animateRows=True,
             suppressMoveWhenRowDragging=False,

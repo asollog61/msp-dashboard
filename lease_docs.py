@@ -89,7 +89,33 @@ def apply_choice(row: Any) -> dict[str, Any]:
         index = int(match.group(1)) - 1
         if 0 <= index < len(alternates) and str(alternates[index]).strip():
             resolved["Value"] = str(alternates[index])
+    else:
+        # No choice means no value. Every provision's text lives in an Alt
+        # slot; Value only ever mirrors the chosen one. A provision showing
+        # text with nothing selected would be text no alternate accounts for,
+        # and it would survive into the lease unnoticed.
+        resolved["Value"] = ""
     return resolved
+
+
+def adopt_legacy_value(row: Any) -> dict[str, Any]:
+    """Move a typed value into Alt 1 for rows written before Choice existed.
+
+    Those rows carry their text in Value with no Choice and no alternates.
+    Blanking them to match the chooser would delete real lease language, so
+    the text is promoted into Alt 1 and selected — the same move as typing it
+    into the Alt 1 column by hand.
+    """
+    source = dict(row) if isinstance(row, dict) else {}
+    value = str(source.get("Value", "") or "").strip()
+    alternates = _pad_alternates(source.get("Alternates"))
+    already_chosen = bool(_ALT_CHOICE_RE.match(str(source.get("Choice", "") or "").strip()))
+    if not value or already_chosen or any(str(slot).strip() for slot in alternates):
+        return source
+    alternates[0] = str(source.get("Value", ""))
+    source["Alternates"] = alternates
+    source["Choice"] = "Alt 1"
+    return source
 
 
 def _rows(value: Any) -> list[dict[str, Any]]:
@@ -103,6 +129,7 @@ def _pad_alternates(value: Any) -> list[str]:
 
 def normalize_provision(row: dict[str, Any]) -> dict[str, Any]:
     """One key-provision row with every field present and the right type."""
+    row = adopt_legacy_value(row)
     return {
         "Group": "Mandatory" if str(row.get("Group", "")).strip() == "Mandatory" else "Optional",
         "Include": bool(row.get("Include", True)),
