@@ -6659,7 +6659,14 @@ def render_lease_builder_tab():
             data_return_mode=DataReturnMode.AS_INPUT,
             fit_columns_on_grid_load=False,
             allow_unsafe_jscode=True,
-            key=f"lb_kp_grid_v8_{Path(template['path']).stem}",
+            # kp_version has to be in the key. AgGrid keeps its row model in the
+            # browser and keys it on this string, so without the version an
+            # Excel import writes the new rows into draft_state, the grid hands
+            # back the rows it was already holding, and the read-back below
+            # overwrites the import with pre-import data. The import appeared to
+            # do nothing at all.
+            key=(f"lb_kp_grid_v8_{Path(template['path']).stem}"
+                 f"_{draft_state.get('kp_version', 0)}"),
         )
         edited_kp = grid_result.data if hasattr(grid_result, "data") else grid_result["data"]
         if edited_kp is None:
