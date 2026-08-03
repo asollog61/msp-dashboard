@@ -27,22 +27,29 @@ DOC_VERSION = 1
 ALTERNATE_SLOTS = 10
 
 # A provision's Value is what prints in the lease. Choice records where that
-# text came from — the typed default, or one of the Alt slots. Keeping Value
-# authoritative means nothing downstream has to understand choices; keeping
-# Choice alongside it is what makes "which leases use this clause" answerable.
-CURRENT_VALUE_CHOICE = "Current Value"
+# text came from — one of the Alt slots, or nothing, meaning the value was
+# typed directly. Keeping Value authoritative means nothing downstream has to
+# understand choices; keeping Choice alongside it is what makes "which leases
+# use this clause" answerable.
+#
+# The chooser offers the Alt slots only. Blank is how a provision says "no
+# alternate — this value was typed", and is the state every provision starts
+# in. Earlier documents wrote the literal string "Current Value" for that, so
+# it is still accepted on read and normalised away.
+NO_CHOICE = ""
+CURRENT_VALUE_CHOICE = "Current Value"  # Legacy spelling of NO_CHOICE.
 _ALT_CHOICE_RE = re.compile(r"^\s*Alt\s*(\d+)\s*$", re.IGNORECASE)
 
 
 def choice_options(row: Any) -> list[str]:
-    """The choices offered for one provision: the default, then each filled alternate.
+    """The choices offered for one provision: blank, then each filled alternate.
 
     Blank slots are not offered. Selecting "Alt 7" when Alt 7 is empty would
     silently blank a key provision in the lease.
     """
     source = row if isinstance(row, dict) else {}
     alternates = _pad_alternates(source.get("Alternates"))
-    return [CURRENT_VALUE_CHOICE] + [
+    return [NO_CHOICE] + [
         f"Alt {index}"
         for index, value in enumerate(alternates, start=1)
         if str(value).strip()
@@ -56,15 +63,15 @@ def normalize_choice(row: Any) -> str:
     than leaving the provision pointing at nothing.
     """
     source = row if isinstance(row, dict) else {}
-    raw = str(source.get("Choice", "") or CURRENT_VALUE_CHOICE).strip()
+    raw = str(source.get("Choice", "") or "").strip()
     # "alt 2", "ALT2" and "Alt 2" are the same choice. Excel is a free-text
     # field even with a dropdown on it, so a case difference must not quietly
-    # demote the row back to the default value.
+    # demote the row back to no choice at all.
     match = _ALT_CHOICE_RE.match(raw)
     canonical = f"Alt {int(match.group(1))}" if match else raw
     if canonical.casefold() == CURRENT_VALUE_CHOICE.casefold():
-        canonical = CURRENT_VALUE_CHOICE
-    return canonical if canonical in choice_options(source) else CURRENT_VALUE_CHOICE
+        canonical = NO_CHOICE
+    return canonical if canonical in choice_options(source) else NO_CHOICE
 
 
 def apply_choice(row: Any) -> dict[str, Any]:
@@ -136,6 +143,10 @@ def normalize_document(raw: Any) -> dict[str, Any]:
         },
         "rent_schedules": source.get("rent_schedules") if isinstance(source.get("rent_schedules"), dict) else {},
         "format_profile": str(source.get("format_profile", "") or ""),
+        # Which space in the tenancy workbook this lease covers. Stored as a
+        # key rather than resolved values so reopening the document re-reads
+        # the workbook and picks up corrections.
+        "space_key": str(source.get("space_key", "") or ""),
         "copied_from": str(source.get("copied_from", "") or ""),
         "saved_at": str(source.get("saved_at", "") or ""),
     }

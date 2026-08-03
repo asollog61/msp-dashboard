@@ -182,19 +182,19 @@ class TestCopy(unittest.TestCase):
 class TestChoiceOptions(unittest.TestCase):
     def test_only_filled_slots_are_offered(self):
         row = {"Alternates": ["first", "", "third", "", "", "", "", "", "", ""]}
-        self.assertEqual(ld.choice_options(row), ["Current Value", "Alt 1", "Alt 3"])
+        self.assertEqual(ld.choice_options(row), ["", "Alt 1", "Alt 3"])
 
     def test_no_alternates_means_only_the_default(self):
-        self.assertEqual(ld.choice_options({"Alternates": []}), ["Current Value"])
+        self.assertEqual(ld.choice_options({"Alternates": []}), [""])
 
     def test_whitespace_is_not_a_choice(self):
         self.assertEqual(ld.choice_options({"Alternates": ["   ", "real"]}),
-                         ["Current Value", "Alt 2"])
+                         ["", "Alt 2"])
 
 
 class TestNormalizeChoice(unittest.TestCase):
-    def test_a_missing_choice_defaults(self):
-        self.assertEqual(ld.normalize_choice({"Alternates": ["a"]}), "Current Value")
+    def test_a_missing_choice_is_blank(self):
+        self.assertEqual(ld.normalize_choice({"Alternates": ["a"]}), "")
 
     def test_a_valid_choice_is_kept(self):
         self.assertEqual(ld.normalize_choice({"Choice": "Alt 1", "Alternates": ["a"]}), "Alt 1")
@@ -203,15 +203,15 @@ class TestNormalizeChoice(unittest.TestCase):
         # The alternate was emptied after being chosen. Printing nothing in a
         # key provision would be worse than printing the default.
         self.assertEqual(ld.normalize_choice({"Choice": "Alt 2", "Alternates": ["a", ""]}),
-                         "Current Value")
+                         "")
 
     def test_a_nonsense_choice_falls_back(self):
         self.assertEqual(ld.normalize_choice({"Choice": "banana", "Alternates": ["a"]}),
-                         "Current Value")
+                         "")
 
     def test_out_of_range_choice_falls_back(self):
         self.assertEqual(ld.normalize_choice({"Choice": "Alt 11", "Alternates": ["a"]}),
-                         "Current Value")
+                         "")
 
 
 class TestApplyChoice(unittest.TestCase):
@@ -221,10 +221,17 @@ class TestApplyChoice(unittest.TestCase):
         self.assertEqual(row["Value"], "two")
         self.assertEqual(row["Choice"], "Alt 2")
 
-    def test_current_value_leaves_the_typed_value_alone(self):
+    def test_no_choice_leaves_the_typed_value_alone(self):
+        row = ld.apply_choice({"Value": "typed", "Choice": "", "Alternates": ["one"]})
+        self.assertEqual(row["Value"], "typed")
+
+    def test_the_legacy_current_value_string_normalises_to_blank(self):
+        # Documents saved before the chooser dropped that label must not end up
+        # with an option that no longer exists in the dropdown.
         row = ld.apply_choice({"Value": "typed", "Choice": "Current Value",
                                "Alternates": ["one"]})
         self.assertEqual(row["Value"], "typed")
+        self.assertEqual(row["Choice"], "")
 
     def test_reapplying_picks_up_an_edited_alternate(self):
         # Retyping a chosen alternate must move the value with it, or the lease
@@ -239,7 +246,7 @@ class TestApplyChoice(unittest.TestCase):
         row = {"Value": "default", "Choice": "Alt 1", "Alternates": [""]}
         resolved = ld.apply_choice(row)
         self.assertEqual(resolved["Value"], "default")
-        self.assertEqual(resolved["Choice"], "Current Value")
+        self.assertEqual(resolved["Choice"], "")
 
     def test_apply_is_idempotent(self):
         row = ld.apply_choice({"Value": "d", "Choice": "Alt 1", "Alternates": ["one"]})
@@ -262,7 +269,7 @@ class TestChoiceSurvivesNormalisation(unittest.TestCase):
         self.assertEqual(row["Choice"], "Alt 1")
 
     def test_normalize_provision_supplies_a_default(self):
-        self.assertEqual(ld.normalize_provision({"Field": "Rent"})["Choice"], "Current Value")
+        self.assertEqual(ld.normalize_provision({"Field": "Rent"})["Choice"], "")
 
     def test_a_document_round_trips_its_choices(self):
         doc = ld.normalize_document({
@@ -283,8 +290,7 @@ class TestChoiceSurvivesNormalisation(unittest.TestCase):
     def test_documents_saved_before_choice_existed_still_load(self):
         legacy = {"key_provisions": [{"Field": "Rent", "Value": "d", "Alternates": ["one"]}],
                   "sections": {}}
-        self.assertEqual(ld.normalize_document(legacy)["key_provisions"][0]["Choice"],
-                         "Current Value")
+        self.assertEqual(ld.normalize_document(legacy)["key_provisions"][0]["Choice"], "")
 
 
 class TestDescribe(unittest.TestCase):

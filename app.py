@@ -56,6 +56,7 @@ try:
     import lease_render as lr
     import lease_docs as ld
     import lease_store as lstore
+    import lease_space as lsp
 
     # Streamlit re-runs this script without re-importing a module it already
     # holds, so a deploy can leave a new app.py talking to an old lease_*.py.
@@ -71,7 +72,9 @@ try:
         (lr, ("render_lease", "bookmark_names", "dangling_anchors")),
         (ld, ("normalize_store", "migrate_stores", "copy_document",
               "build_document", "describe_document", "apply_choice",
-              "normalize_choice", "choice_options", "CURRENT_VALUE_CHOICE")),
+              "normalize_choice", "choice_options", "NO_CHOICE")),
+        (lsp, ("space_records", "find_space", "resolve", "resolve_provisions",
+               "token_names", "field_label", "unresolved", "SPACE_TOKEN_RE")),
         (lstore, ("build_store", "LeaseStore", "LocalBackend", "GitHubBackend",
                   "StoreError", "slugify")),
     ):
@@ -4647,7 +4650,7 @@ def _lb_export_key_provisions_xlsx(rows):
             choice_rule = DataValidation(
                 type="list",
                 formula1='"' + ",".join(
-                    [ld.CURRENT_VALUE_CHOICE] + [f"Alt {index}" for index in range(1, 11)]
+                    f"Alt {index}" for index in range(1, 11)
                 ) + '"',
                 allow_blank=True,
                 showDropDown=False,
@@ -5180,6 +5183,22 @@ def get_lease_store():
         return None
 
 
+@st.cache_data(ttl=300)
+def _lb_space_records():
+    """Leasable spaces from the tenancy workbook, ready for the picker.
+
+    On Streamlit Cloud the workbook is whatever was last committed to the repo,
+    so this is a snapshot rather than live data. The Reload button clears the
+    cache; a genuinely stale workbook needs a new commit.
+    """
+    try:
+        _, _, summaries = load_tenancy()
+        return lsp.space_records(summaries)
+    except Exception as exc:
+        print(f"Tenancy spaces unavailable: {type(exc).__name__}: {exc}")
+        return []
+
+
 def _lb_load_documents():
     """Every saved document, and where it came from.
 
@@ -5363,8 +5382,38 @@ def _lb_token_citations(sections, draft_state, include_only=True):
     return citations
 
 
+def _lb_apply_space(draft_state, sections, space):
+    """A copy of the draft and the section list with [Space:...] tokens resolved.
+
+    Resolution happens on the way out to Word, never in what is stored. The
+    saved document keeps the tokens, so re-picking the space re-renders every
+    number instead of baking one unit's figures into the template forever.
+
+    An unresolvable token is left in place rather than dropped — a lease that
+    reads "[Space:Sqft]" is obviously wrong, whereas one reading "Approximately
+    Total Gross Square Feet" reads as finished.
+    """
+    if not space:
+        return draft_state, sections
+    resolved_state = dict(draft_state)
+    resolved_state["key_provisions"] = lsp.resolve_provisions(
+        draft_state.get("key_provisions", []), space
+    )
+    resolved_state["sections"] = {
+        number: ({**config, "text": lsp.resolve(config["text"], space)}
+                 if isinstance(config, dict) and config.get("text") else dict(config or {}))
+        for number, config in (draft_state.get("sections") or {}).items()
+    }
+    resolved_sections = [
+        {**section, "text": lsp.resolve(section.get("text", ""), space)}
+        for section in (sections or [])
+    ]
+    return resolved_state, resolved_sections
+
+
 def _lb_build_current_word(template_path, draft_name, clean_notes, sections, draft_state,
-                           force_include_all=False, token_report=None):
+                           force_include_all=False, token_report=None, space=None):
+    draft_state, sections = _lb_apply_space(draft_state, sections, space)
     section_labels = {
         f"Section {section['number']} — {section['title']}": str(section['number'])
         for section in sections
@@ -5445,7 +5494,7 @@ def _lb_build_current_word(template_path, draft_name, clean_notes, sections, dra
     )
 
 
-def _lb_build_rules_word(draft_state, sections, settings):
+def _lb_build_rules_word(draft_state, sections, settings, space=None):
     """Generate the lease with the rules-based renderer — no base .docx.
 
     Clause text comes from the draft's own section state, so edits made in the
@@ -5455,6 +5504,7 @@ def _lb_build_rules_word(draft_state, sections, settings):
     """
     from io import BytesIO
 
+    draft_state, sections = _lb_apply_space(draft_state, sections, space)
     values = {
         str(row.get("Field", "")): str(row.get("Value", "") or "")
         for row in draft_state["key_provisions"]
@@ -6163,6 +6213,53 @@ def render_lease_builder_tab():
     if working_template in saved_docs:
         st.caption(ld.describe_document(saved_docs[working_template]))
 
+    # ---- Space ------------------------------------------------------------
+    # The facts a lease repeats about its space already live in the tenancy
+    # workbook. Picking one here resolves every [Space:...] token, so the same
+    # document produces a correct lease for any unit.
+    space_records = _lb_space_records()
+    active_space = None
+    if space_records:
+        space_labels = [record["_label"] for record in space_records]
+        saved_space_key = str((saved_docs.get(working_template) or {}).get("space_key", ""))
+        saved_space = lsp.find_space(space_records, saved_space_key)
+        if "lb_space_choice" not in st.session_state and saved_space:
+            st.session_state["lb_space_choice"] = saved_space["_label"]
+        space_col, refresh_col = st.columns([4, 1.4])
+        chosen_label = space_col.selectbox(
+            "Space", ["— none —"] + space_labels, key="lb_space_choice",
+            help="From the MSP Tenancy workbook. Resolves [Space:...] tokens in "
+                 "key provisions and clause text.",
+        )
+        if refresh_col.button("🔄 Reload tenancy", key="lb_space_refresh", width="stretch"):
+            _lb_space_records.clear()
+            st.rerun()
+        active_space = next(
+            (record for record in space_records if record["_label"] == chosen_label), None
+        )
+        if active_space:
+            fields = [
+                f"**{lsp.field_label(name)}:** {active_space[name]}"
+                for name in lsp.token_names()
+                if active_space.get(name)
+            ]
+            st.caption(" · ".join(fields))
+            blank = [
+                lsp.field_label(name) for name in lsp.token_names()
+                if not active_space.get(name)
+            ]
+            if blank:
+                # A blank field leaves its token unresolved rather than printing
+                # nothing, so it is better to say so before the lease is built.
+                st.caption(f"⚠️ Not in the workbook for this space: {', '.join(blank)}")
+        else:
+            st.caption(
+                "No space selected — [Space:...] tokens stay as written. "
+                f"Available: {', '.join('[Space:' + name + ']' for name in lsp.token_names())}"
+            )
+    else:
+        st.caption("MSP Tenancy workbook not found — [Space:...] tokens cannot resolve.")
+
     # ---- New document: a copy of an existing one --------------------------
     if working_template == LB_NEW_TEMPLATE:
         if not doc_names:
@@ -6329,13 +6426,17 @@ def render_lease_builder_tab():
     def template_payload(profile_name):
         # The whole document, self-contained: alternates included, so it
         # never depends on another document still existing.
-        return ld.build_document(
+        payload = ld.build_document(
             draft_state["key_provisions"],
             _lb_compact_sections(sections, draft_state["sections"]),
             draft_state.get("rent_schedules"),
             profile_name,
             copied_from=draft_state.get("copied_from", ""),
         )
+        # Saved by key, not by resolved values: reopening the document re-reads
+        # the workbook, so a corrected square footage reaches an existing lease.
+        payload["space_key"] = str((active_space or {}).get("_key", ""))
+        return payload
 
     active_profile, active_settings = _lb_render_template_header(
         working_template, saved_docs, saved_profiles,
@@ -6485,7 +6586,7 @@ def render_lease_builder_tab():
         # "Alt 7" would blank the provision in the generated lease.
         choice_options_js = JsCode("""
             function(params) {
-                var values = ['Current Value'];
+                var values = [''];
                 for (var i = 1; i <= 10; i++) {
                     var slot = params.data['Alt ' + i];
                     if (slot !== null && slot !== undefined && String(slot).trim() !== '') {
@@ -6544,7 +6645,7 @@ def render_lease_builder_tab():
         for row in edited_kp.drop(columns=["Drag"], errors="ignore").to_dict("records"):
             slots = [str(row.pop(f"Alt {index}", "")).strip() for index in range(1, 11)]
             current_value = str(row.pop("Current Value", ""))
-            choice = str(row.pop("Choice", "") or ld.CURRENT_VALUE_CHOICE)
+            choice = str(row.pop("Choice", "") or ld.NO_CHOICE)
             row.pop("Linked", None)  # Derived for display only.
             previous = previous_by_bookmark.get(str(row.get("Bookmark", "")), {})
             row["Link"] = bool(previous.get("Link", False))
@@ -6961,13 +7062,15 @@ def render_lease_builder_tab():
             try:
                 if use_rules_engine:
                     live_word_bytes, rules_renderer = _lb_build_rules_word(
-                        draft_state, sections, draft_state.get("formatting")
+                        draft_state, sections, draft_state.get("formatting"),
+                        space=active_space,
                     )
                     token_report = {"unresolved": sorted(rules_renderer.unresolved), "blank": []}
                 else:
                     live_word_bytes = _lb_build_current_word(
                         template["path"], draft_name, clean_notes, sections, draft_state,
                         force_include_all=False, token_report=token_report,
+                        space=active_space,
                     )
             except Exception as exc:
                 st.error(f"Current draft could not be generated: {type(exc).__name__}: {exc}")
