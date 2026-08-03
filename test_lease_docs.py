@@ -354,3 +354,39 @@ class TestDescribe(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
+
+
+class TestInferChoice(unittest.TestCase):
+    """Workbooks exported before the Choice column existed."""
+
+    def test_a_value_matching_an_alternate_selects_it(self):
+        row = ld.infer_choice({"Value": "two", "Alternates": ["one", "two", "three"]})
+        self.assertEqual(row["Choice"], "Alt 2")
+
+    def test_an_explicit_choice_wins(self):
+        row = ld.infer_choice({"Value": "two", "Choice": "Alt 3",
+                               "Alternates": ["one", "two", "three"]})
+        self.assertEqual(row["Choice"], "Alt 3")
+
+    def test_a_value_matching_nothing_stays_unchosen(self):
+        row = ld.infer_choice({"Value": "elsewhere", "Alternates": ["one"]})
+        self.assertEqual(row.get("Choice", ""), "")
+
+    def test_the_first_matching_slot_wins(self):
+        row = ld.infer_choice({"Value": "same", "Alternates": ["same", "same"]})
+        self.assertEqual(row["Choice"], "Alt 1")
+
+    def test_surrounding_whitespace_still_matches(self):
+        row = ld.infer_choice({"Value": " two ", "Alternates": ["one", "two"]})
+        self.assertEqual(row["Choice"], "Alt 2")
+
+    def test_a_blank_value_infers_nothing(self):
+        self.assertEqual(ld.infer_choice({"Value": "", "Alternates": ["one"]}).get("Choice", ""), "")
+
+    def test_inference_then_apply_preserves_the_value(self):
+        # The whole point: an old workbook must import without blanking.
+        row = {"Value": "1280", "Alternates": ["1280", "15"]}
+        row.update(ld.infer_choice(row))
+        row.update(ld.apply_choice(row))
+        self.assertEqual(row["Value"], "1280")
+        self.assertEqual(row["Choice"], "Alt 1")

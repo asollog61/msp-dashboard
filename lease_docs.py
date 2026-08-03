@@ -98,6 +98,27 @@ def apply_choice(row: Any) -> dict[str, Any]:
     return resolved
 
 
+def infer_choice(row: Any) -> dict[str, Any]:
+    """Select the alternate a row's value already matches.
+
+    For workbooks exported before the Choice column existed: the value is
+    sitting there and one of the Alt slots holds the same text, so the choice
+    is recoverable rather than lost. Without this an older upload would import
+    its alternates, select nothing, and blank every value.
+    """
+    source = dict(row) if isinstance(row, dict) else {}
+    if _ALT_CHOICE_RE.match(str(source.get("Choice", "") or "").strip()):
+        return source
+    value = str(source.get("Value", "") or "").strip()
+    if not value:
+        return source
+    for index, slot in enumerate(_pad_alternates(source.get("Alternates")), start=1):
+        if str(slot).strip() == value:
+            source["Choice"] = f"Alt {index}"
+            break
+    return source
+
+
 def adopt_legacy_value(row: Any) -> dict[str, Any]:
     """Move a typed value into Alt 1 for rows written before Choice existed.
 

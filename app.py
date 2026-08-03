@@ -72,7 +72,8 @@ try:
         (lr, ("render_lease", "bookmark_names", "dangling_anchors")),
         (ld, ("normalize_store", "migrate_stores", "copy_document",
               "build_document", "describe_document", "apply_choice",
-              "normalize_choice", "choice_options", "NO_CHOICE")),
+              "normalize_choice", "choice_options", "NO_CHOICE",
+              "infer_choice", "adopt_legacy_value")),
         (lsp, ("space_records", "find_space", "resolve", "resolve_provisions",
                "token_names", "field_label", "unresolved", "SPACE_TOKEN_RE")),
         (lstore, ("build_store", "LeaseStore", "LocalBackend", "GitHubBackend",
@@ -4675,7 +4676,7 @@ def _lb_import_key_provisions_xlsx(uploaded_file, existing_rows, section_labels)
         "Group": "Group", "Use": "Include", "Include": "Include",
         "Key Provision": "Field", "Field": "Field", "Name": "Field",
         "Current Value": "Value", "Value": "Value", "Link": "Link", "Target Section": "Section",
-        "Section": "Section", "Bookmark": "Bookmark",
+        "Section": "Section", "Bookmark": "Bookmark", "Choice": "Choice",
     }
     normalized = {}
     for column in imported.columns:
@@ -4705,7 +4706,7 @@ def _lb_import_key_provisions_xlsx(uploaded_file, existing_rows, section_labels)
                 "Field": field or "New Key Provision",
                 "Value": "",
                 "Alternates": [],
-                "Choice": "Current Value",
+                "Choice": "",
                 "Link": False,
                 "Section": next(iter(section_labels.values())),
                 "Bookmark": "Custom_" + uuid4().hex[:12],
@@ -4738,6 +4739,11 @@ def _lb_import_key_provisions_xlsx(uploaded_file, existing_rows, section_labels)
         row["Alternates"] = alternate_slots
         if "Choice" in normalized:
             row["Choice"] = str(source[normalized["Choice"]]).strip()
+        else:
+            # A workbook exported before the Choice column existed. The value
+            # and the alternates are both present, so recover which slot was
+            # in use instead of importing the alternates and selecting none.
+            row.update(ld.infer_choice(row))
         # Applied after Alternates are in place, so a choice typed in Excel is
         # validated against the slots from the same upload rather than the ones
         # that happened to be there before it.
