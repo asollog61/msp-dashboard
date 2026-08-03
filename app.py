@@ -5929,7 +5929,7 @@ def _lb_render_section_preview(draft_state, preview_sections, focus_section, wor
 
 
 def _lb_render_template_header(working_template, saved_docs, profiles, profile_name,
-                               payload_builder, editable=True):
+                               payload_builder, editable=True, action_slot=None):
     """The three things that identify what you are editing, at the top.
 
     1. which template, and how to save it
@@ -5946,100 +5946,104 @@ def _lb_render_template_header(working_template, saved_docs, profiles, profile_n
     existing = working_template != LB_NEW_TEMPLATE
 
     # ---- 1. Template ----------------------------------------------------
-    if editable:
-        name_col, save_col, saveas_col, delete_col = st.columns([4, 1.2, 1.2, 1.2])
-        name_col.markdown(f"#### 📄 {working_template if existing else 'New template'}")
-        if save_col.button("💾 Save", type="primary", key="lb_save_template",
+    # Everything below goes into the row reserved under the Document picker.
+    # The name is not repeated as a heading — the picker already shows it, and
+    # a second copy was most of the wasted height.
+    home = action_slot if action_slot is not None else st.container()
+    with home:
+        if editable:
+            save_col, saveas_col, delete_col, _pad = st.columns([1, 1.25, 1.05, 3.7])
+            if save_col.button("💾 Save", type="primary", key="lb_save_template",
                            disabled=not existing, width="stretch"):
-            ok, message = _lb_save_document(working_template, payload_builder(profile_name))
-            if ok:
-                st.session_state["lb_save_as_open"] = False
-                st.success(f"Saved: {working_template}")
-                st.rerun()
-            else:
-                st.error(f"Could not save “{working_template}” — {message}")
-        if saveas_col.button("💾 Save As…", key="lb_save_template_as", width="stretch"):
-            # Opens the rename field rather than saving immediately — Save As
-            # without a chance to type a name is just a duplicate.
-            st.session_state["lb_save_as_open"] = True
-            st.session_state["lb_save_template_as_name"] = (
-                working_template if existing else ""
-            )
-            st.rerun()
-        if delete_col.button("🗑 Delete", key="lb_delete_template",
-                             disabled=not existing, width="stretch"):
-            st.session_state["lb_delete_open"] = True
-            st.rerun()
-
-        if st.session_state.get("lb_delete_open") and existing:
-            # Two clicks, and the name spelled out in between. A saved lease is
-            # the one thing here with no undo short of the repo's history.
-            st.warning(f"Delete “{working_template}” permanently?")
-            confirm_delete_col, cancel_delete_col, _ = st.columns([1.6, 1.6, 4])
-            if confirm_delete_col.button("🗑 Yes, delete", type="primary",
-                                         key="lb_delete_confirm", width="stretch"):
-                ok, message = _lb_delete_document(working_template)
-                st.session_state["lb_delete_open"] = False
+                ok, message = _lb_save_document(working_template, payload_builder(profile_name))
                 if ok:
-                    # The editor is still holding the deleted document's
-                    # content. Dropping the picker choice and every per-template
-                    # draft stops it being re-saved back into existence.
-                    st.session_state.pop("lb_template_edit_choice", None)
-                    for _key in [k for k in st.session_state if str(k).startswith("lb_draft_state_")]:
-                        st.session_state.pop(_key, None)
-                    st.success(f"Deleted: {working_template}")
+                    st.session_state["lb_save_as_open"] = False
+                    st.success(f"Saved: {working_template}")
                     st.rerun()
                 else:
-                    st.error(f"Could not delete “{working_template}” — {message}")
-            if cancel_delete_col.button("✕ Keep it", key="lb_delete_cancel", width="stretch"):
-                st.session_state["lb_delete_open"] = False
+                    st.error(f"Could not save “{working_template}” — {message}")
+            if saveas_col.button("💾 Save As…", key="lb_save_template_as", width="stretch"):
+                # Opens the rename field rather than saving immediately — Save As
+                # without a chance to type a name is just a duplicate.
+                st.session_state["lb_save_as_open"] = True
+                st.session_state["lb_save_template_as_name"] = (
+                    working_template if existing else ""
+                )
+                st.rerun()
+            if delete_col.button("🗑 Delete", key="lb_delete_template",
+                                 disabled=not existing, width="stretch"):
+                st.session_state["lb_delete_open"] = True
                 st.rerun()
 
-        if st.session_state.get("lb_save_as_open"):
-            rename_col, confirm_col, cancel_col = st.columns([4, 1.2, 1.2])
-            save_as_name = rename_col.text_input(
-                "New template name", key="lb_save_template_as_name",
-                placeholder="e.g., MSP NNN Retail — Restaurant",
-                label_visibility="collapsed",
-            )
-            if confirm_col.button("✔ Save copy", type="primary",
-                                  key="lb_save_as_confirm", width="stretch"):
-                candidate = save_as_name.strip()
-                if not candidate:
-                    st.warning("Enter a template name first.")
-                elif candidate == working_template:
-                    st.warning("That is the current name — use Save to overwrite it.")
-                elif candidate in saved_docs:
-                    st.warning("A document with that name already exists.")
-                else:
-                    ok, message = _lb_save_document(candidate, payload_builder(profile_name))
+            if st.session_state.get("lb_delete_open") and existing:
+                # Two clicks, and the name spelled out in between. A saved lease is
+                # the one thing here with no undo short of the repo's history.
+                st.warning(f"Delete “{working_template}” permanently?")
+                confirm_delete_col, cancel_delete_col, _ = st.columns([1.3, 1.1, 4.6])
+                if confirm_delete_col.button("🗑 Yes, delete", type="primary",
+                                             key="lb_delete_confirm", width="stretch"):
+                    ok, message = _lb_delete_document(working_template)
+                    st.session_state["lb_delete_open"] = False
                     if ok:
-                        st.session_state["lb_save_as_open"] = False
-                        # Switch the editor to the copy, which is what you almost
-                        # always want after saving one. It has to go through a
-                        # plain key: Streamlit forbids assigning to a widget's own
-                        # key once that widget has been created this run, and the
-                        # picker was built at the top of the tab.
-                        st.session_state["lb_pending_template_choice"] = candidate
-                        st.session_state.pop("lb_pending_copy", None)
-                        st.success(f"Saved: {candidate}")
+                        # The editor is still holding the deleted document's
+                        # content. Dropping the picker choice and every per-template
+                        # draft stops it being re-saved back into existence.
+                        st.session_state.pop("lb_template_edit_choice", None)
+                        for _key in [k for k in st.session_state if str(k).startswith("lb_draft_state_")]:
+                            st.session_state.pop(_key, None)
+                        st.success(f"Deleted: {working_template}")
                         st.rerun()
                     else:
-                        st.error(f"Could not save “{candidate}” — {message}")
-            if cancel_col.button("✕ Cancel", key="lb_save_as_cancel", width="stretch"):
-                st.session_state["lb_save_as_open"] = False
-                st.rerun()
+                        st.error(f"Could not delete “{working_template}” — {message}")
+                if cancel_delete_col.button("✕ Keep it", key="lb_delete_cancel", width="stretch"):
+                    st.session_state["lb_delete_open"] = False
+                    st.rerun()
 
-        if not existing:
-            st.caption("New document — use Save As to name and create it.")
-    else:
-        st.markdown(f"#### 📄 {working_template if existing else 'New template'}")
+            if st.session_state.get("lb_save_as_open"):
+                rename_col, confirm_col, cancel_col = st.columns([3.4, 1.2, 1])
+                save_as_name = rename_col.text_input(
+                    "New template name", key="lb_save_template_as_name",
+                    placeholder="e.g., MSP NNN Retail — Restaurant",
+                    label_visibility="collapsed",
+                )
+                if confirm_col.button("✔ Save copy", type="primary",
+                                      key="lb_save_as_confirm", width="stretch"):
+                    candidate = save_as_name.strip()
+                    if not candidate:
+                        st.warning("Enter a template name first.")
+                    elif candidate == working_template:
+                        st.warning("That is the current name — use Save to overwrite it.")
+                    elif candidate in saved_docs:
+                        st.warning("A document with that name already exists.")
+                    else:
+                        ok, message = _lb_save_document(candidate, payload_builder(profile_name))
+                        if ok:
+                            st.session_state["lb_save_as_open"] = False
+                            # Switch the editor to the copy, which is what you almost
+                            # always want after saving one. It has to go through a
+                            # plain key: Streamlit forbids assigning to a widget's own
+                            # key once that widget has been created this run, and the
+                            # picker was built at the top of the tab.
+                            st.session_state["lb_pending_template_choice"] = candidate
+                            st.session_state.pop("lb_pending_copy", None)
+                            st.success(f"Saved: {candidate}")
+                            st.rerun()
+                        else:
+                            st.error(f"Could not save “{candidate}” — {message}")
+                if cancel_col.button("✕ Cancel", key="lb_save_as_cancel", width="stretch"):
+                    st.session_state["lb_save_as_open"] = False
+                    st.rerun()
+
+            if not existing:
+                st.caption("New document — use Save As to name and create it.")
+        else:
+            st.markdown(f"#### 📄 {working_template if existing else 'New template'}")
 
     # ---- 2. Content -----------------------------------------------------
     sections = library.get("sections", [])
     provisions = library.get("key_provisions", [])
     extracted = str(library.get("extracted_at", ""))[:10]
-    content_col, extract_col = st.columns([4, 1.4])
+    content_col, extract_col = st.columns([5.6, 1.1])
     if sections:
         revisions = library.get("tracked_changes_resolved") or {}
         note = (
@@ -6065,7 +6069,7 @@ def _lb_render_template_header(working_template, saved_docs, profiles, profile_n
 
     # ---- 3. Formatting --------------------------------------------------
     settings = lf.profile_settings(profiles, profile_name)
-    profile_col, summary_col = st.columns([2, 4])
+    profile_col, summary_col = st.columns([2.6, 3.4])
     chosen = profile_col.selectbox(
         "Format profile", sorted(profiles),
         index=sorted(profiles).index(profile_name),
@@ -6205,7 +6209,7 @@ def render_lease_builder_tab():
             )
 
     doc_names = sorted(saved_docs)
-    head2, head3 = st.columns([4, 1.4])
+    head2, head3, _head_pad = st.columns([2.6, 1.1, 2.3])
     # A "Save As" from the previous run parks its new name here. Applying it
     # before the picker exists is the only legal moment to set a widget key.
     pending_choice = st.session_state.pop("lb_pending_template_choice", None)
@@ -6216,6 +6220,10 @@ def render_lease_builder_tab():
         help="Templates and leases are the same thing — name them however you like.",
     )
     clean_notes = head3.toggle("Clean draft", value=True, key="lb_clean_notes")
+    # Save / Save As / Delete belong with the picker they act on, but they need
+    # draft_state to build a payload and that does not exist yet. Reserving the
+    # row here and filling it later is what lets them sit where they belong.
+    lb_action_slot = st.container()
     if working_template in saved_docs:
         st.caption(ld.describe_document(saved_docs[working_template]))
 
@@ -6231,7 +6239,7 @@ def render_lease_builder_tab():
         saved_space = lsp.find_space(space_records, saved_space_key)
         if "lb_space_choice" not in st.session_state and saved_space:
             st.session_state["lb_space_choice"] = saved_space["_label"]
-        space_col, refresh_col = st.columns([4, 1.4])
+        space_col, refresh_col, _space_pad = st.columns([2.6, 1.1, 2.3])
         chosen_label = space_col.selectbox(
             "Space", ["— none —"] + space_labels, key="lb_space_choice",
             help="From the MSP Tenancy workbook. Resolves [Space:...] tokens in "
@@ -6447,6 +6455,7 @@ def render_lease_builder_tab():
     active_profile, active_settings = _lb_render_template_header(
         working_template, saved_docs, saved_profiles,
         draft_state.get("format_profile"), template_payload, editable=True,
+        action_slot=lb_action_slot,
     )
     draft_state["format_profile"] = active_profile
     draft_state["formatting"] = active_settings
