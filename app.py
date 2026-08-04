@@ -67,7 +67,8 @@ try:
               "migrate_template_formatting", "describe_settings", "normalize_settings",
               "settings_diff", "default_settings", "validate_settings",
               "DEFAULT_PROFILE_NAME", "DEFAULTS")),
-        (lc, ("load_content", "extract_from_docx", "write_content")),
+        (lc, ("load_content", "extract_from_docx", "write_content",
+              "available_masters")),
         (lm, ("parse_blocks", "to_html", "to_markup")),
         (lr, ("render_lease", "bookmark_names", "dangling_anchors")),
         (ld, ("normalize_store", "migrate_stores", "copy_document",
@@ -5929,7 +5930,8 @@ def _lb_render_section_preview(draft_state, preview_sections, focus_section, wor
 
 
 def _lb_render_template_header(working_template, saved_docs, profiles, profile_name,
-                               payload_builder, editable=True, action_slot=None):
+                               payload_builder, editable=True, action_slot=None,
+                               extract_slot=None, format_slot=None):
     """The three things that identify what you are editing, at the top.
 
     1. which template, and how to save it
@@ -6040,77 +6042,104 @@ def _lb_render_template_header(working_template, saved_docs, profiles, profile_n
             st.markdown(f"#### 📄 {working_template if existing else 'New template'}")
 
     # ---- 2. Content -----------------------------------------------------
-    sections = library.get("sections", [])
-    provisions = library.get("key_provisions", [])
-    extracted = str(library.get("extracted_at", ""))[:10]
-    content_col, extract_col = st.columns([5.6, 1.1])
-    if sections:
-        revisions = library.get("tracked_changes_resolved") or {}
-        note = (
-            f" · {revisions.get('insertions', 0)} tracked edits resolved"
-            if revisions.get("insertions") else ""
-        )
-        content_col.caption(
-            f"**Content** · `lease_content.json` · {len(sections)} sections · "
-            f"{len(provisions)} key provisions · extracted {extracted}{note}"
-        )
-    else:
-        content_col.warning(
-            "No extracted content found. Run `python lease_content.py --extract` "
-            "to read the master lease into JSON."
-        )
-    if editable and extract_col.button("🔄 Re-extract", key="lb_reextract", width="stretch"):
-        try:
-            written = lc.write_content(lc.extract_from_docx())
-            st.success(f"Re-extracted into {Path(written).name}.")
-            st.rerun()
-        except Exception as exc:
-            st.error(f"Could not re-extract: {type(exc).__name__}: {exc}")
+    # Rendered into the row reserved at the very top of the tab: which
+    # master to read from is the first decision, before anything is named.
+    extract_home = extract_slot if extract_slot is not None else st.container()
+    with extract_home:
+        sections = library.get("sections", [])
+        provisions = library.get("key_provisions", [])
+        extracted = str(library.get("extracted_at", ""))[:10]
+        content_col, source_col, extract_col = st.columns([3.3, 2.3, 1.1])
+        if sections:
+            revisions = library.get("tracked_changes_resolved") or {}
+            note = (
+                f" · {revisions.get('insertions', 0)} tracked edits resolved"
+                if revisions.get("insertions") else ""
+            )
+            content_col.caption(
+                f"**Content** · `lease_content.json` · {len(sections)} sections · "
+                f"{len(provisions)} key provisions · extracted {extracted}{note}"
+            )
+        else:
+            content_col.warning(
+                "No extracted content found. Run `python lease_content.py --extract` "
+                "to read the master lease into JSON."
+            )
+        # Which Word file the clause library is read from. This is not the same as
+        # the "base Word template" above: that one feeds the legacy generator, this
+        # one is where every section's text actually comes from. Having only the
+        # former visible made the real source impossible to see or change.
+        masters = lc.available_masters() if editable else []
+        chosen_master = masters[0] if masters else None
+        if editable:
+            if masters:
+                chosen_master = source_col.selectbox(
+                    "Extract from", masters, format_func=lambda path: path.name,
+                    key="lb_extract_source", label_visibility="collapsed",
+                    help="The master .docx that Re-extract reads clause text from. "
+                         "Newest first.",
+                )
+            else:
+                source_col.caption("No master .docx found in data/Lease Builder/Templates.")
+
+        if editable and extract_col.button("🔄 Re-extract", key="lb_reextract",
+                                           width="stretch", disabled=not masters):
+            try:
+                written = lc.write_content(lc.extract_from_docx(chosen_master))
+                st.success(
+                    f"Re-extracted {Path(chosen_master).name} into {Path(written).name}."
+                )
+                st.rerun()
+            except Exception as exc:
+                st.error(f"Could not re-extract: {type(exc).__name__}: {exc}")
 
     # ---- 3. Formatting --------------------------------------------------
-    settings = lf.profile_settings(profiles, profile_name)
-    profile_col, summary_col = st.columns([2.6, 3.4])
-    chosen = profile_col.selectbox(
-        "Format profile", sorted(profiles),
-        index=sorted(profiles).index(profile_name),
-        key="lb_format_profile", label_visibility="collapsed", disabled=not editable,
-    )
-    if chosen != profile_name:
-        profile_name = chosen
+    # Rendered under the Save buttons and above the Space picker.
+    format_home = format_slot if format_slot is not None else st.container()
+    with format_home:
         settings = lf.profile_settings(profiles, profile_name)
-        for key in [k for k in st.session_state if k.startswith("lb_fmt_")]:
-            del st.session_state[key]
-    summary_col.caption(f"**Formatting** · {lf.describe_settings(settings)}")
-
-    edited = _lb_render_formatting_form(settings, editable=editable)
-    if editable and edited != settings:
-        fmt_save, fmt_name, fmt_saveas = st.columns([1.4, 2.6, 1.4])
-        if fmt_save.button("💾 Save profile", key="lb_fmt_save", width="stretch"):
-            updated = dict(profiles)
-            updated[profile_name] = lf.settings_diff(edited)
-            if _write_gsheet_config(LEASE_FORMAT_SHEET, updated):
-                st.success(f"Saved format profile: {profile_name}")
-                st.rerun()
-            else:
-                st.error("Could not save the format profile to Google Sheets.")
-        new_profile = fmt_name.text_input(
-            "New profile name", key="lb_fmt_profile_name",
-            placeholder="e.g., MSP House Style — Compact", label_visibility="collapsed",
+        profile_col, summary_col = st.columns([2.6, 3.4])
+        chosen = profile_col.selectbox(
+            "Format profile", sorted(profiles),
+            index=sorted(profiles).index(profile_name),
+            key="lb_format_profile", label_visibility="collapsed", disabled=not editable,
         )
-        if fmt_saveas.button("💾 Save as new", key="lb_fmt_save_as", width="stretch"):
-            if not new_profile.strip():
-                st.warning("Name the new profile first.")
-            elif new_profile.strip() in profiles:
-                st.warning("A profile with that name already exists.")
-            else:
+        if chosen != profile_name:
+            profile_name = chosen
+            settings = lf.profile_settings(profiles, profile_name)
+            for key in [k for k in st.session_state if k.startswith("lb_fmt_")]:
+                del st.session_state[key]
+        summary_col.caption(f"**Formatting** · {lf.describe_settings(settings)}")
+
+        edited = _lb_render_formatting_form(settings, editable=editable)
+        if editable and edited != settings:
+            fmt_save, fmt_name, fmt_saveas = st.columns([1.4, 2.6, 1.4])
+            if fmt_save.button("💾 Save profile", key="lb_fmt_save", width="stretch"):
                 updated = dict(profiles)
-                updated[new_profile.strip()] = lf.settings_diff(edited)
+                updated[profile_name] = lf.settings_diff(edited)
                 if _write_gsheet_config(LEASE_FORMAT_SHEET, updated):
-                    st.success(f"Saved format profile: {new_profile.strip()}")
+                    st.success(f"Saved format profile: {profile_name}")
                     st.rerun()
                 else:
                     st.error("Could not save the format profile to Google Sheets.")
-        st.caption("Unsaved formatting changes — they apply to the preview now, but save to keep them.")
+            new_profile = fmt_name.text_input(
+                "New profile name", key="lb_fmt_profile_name",
+                placeholder="e.g., MSP House Style — Compact", label_visibility="collapsed",
+            )
+            if fmt_saveas.button("💾 Save as new", key="lb_fmt_save_as", width="stretch"):
+                if not new_profile.strip():
+                    st.warning("Name the new profile first.")
+                elif new_profile.strip() in profiles:
+                    st.warning("A profile with that name already exists.")
+                else:
+                    updated = dict(profiles)
+                    updated[new_profile.strip()] = lf.settings_diff(edited)
+                    if _write_gsheet_config(LEASE_FORMAT_SHEET, updated):
+                        st.success(f"Saved format profile: {new_profile.strip()}")
+                        st.rerun()
+                    else:
+                        st.error("Could not save the format profile to Google Sheets.")
+            st.caption("Unsaved formatting changes — they apply to the preview now, but save to keep them.")
 
     st.divider()
     return profile_name, edited
@@ -6209,6 +6238,12 @@ def render_lease_builder_tab():
             )
 
     doc_names = sorted(saved_docs)
+    # The tab reads top to bottom in the order the work happens: pick the
+    # master to extract from, name the document you are building, choose its
+    # formatting, choose its space, then edit provisions. Two of these rows
+    # depend on draft_state, which does not exist yet, so they are reserved
+    # here and filled once it does.
+    lb_extract_slot = st.container()
     head2, _head_pad = st.columns([2.6, 3.4])
     # A "Save As" from the previous run parks its new name here. Applying it
     # before the picker exists is the only legal moment to set a widget key.
@@ -6230,6 +6265,8 @@ def render_lease_builder_tab():
     lb_action_slot = st.container()
     if working_template in saved_docs:
         st.caption(ld.describe_document(saved_docs[working_template]))
+
+    lb_format_slot = st.container()
 
     # ---- Space ------------------------------------------------------------
     # The facts a lease repeats about its space already live in the tenancy
@@ -6460,6 +6497,8 @@ def render_lease_builder_tab():
         working_template, saved_docs, saved_profiles,
         draft_state.get("format_profile"), template_payload, editable=True,
         action_slot=lb_action_slot,
+        extract_slot=lb_extract_slot,
+        format_slot=lb_format_slot,
     )
     draft_state["format_profile"] = active_profile
     draft_state["formatting"] = active_settings

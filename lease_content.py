@@ -32,6 +32,18 @@ import lease_builder as lb
 BASE_DIR = Path(__file__).resolve().parent
 TEMPLATE_DIR = BASE_DIR / "data" / "Lease Builder"
 CONTENT_FILE = TEMPLATE_DIR / "lease_content.json"
+def available_masters() -> list[Path]:
+    """Every hand-authored master that could be extracted, newest first."""
+    found = []
+    for folder in (TEMPLATE_DIR / "Templates", TEMPLATE_DIR):
+        if folder.exists():
+            found += [
+                path for path in folder.glob("*.docx")
+                if not path.name.startswith("~$") and " TEST" not in path.stem.upper()
+            ]
+    return sorted(found, key=lambda path: path.stat().st_mtime, reverse=True)
+
+
 def _latest_master() -> Path:
     """The newest hand-authored master, wherever it currently lives.
 
