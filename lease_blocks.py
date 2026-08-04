@@ -334,7 +334,10 @@ def read_master(path: str | Path) -> dict[str, Any]:
     for container in containers:
         container["blocks"] = (container.pop("table_blocks", [])
                                + _group_blocks(container["paragraphs"]))
-        container.pop("paragraphs")
+        # The unhighlighted paragraphs are the bulk of the lease. Dropping them
+        # left the document view showing only the parts with decisions in them,
+        # which is the opposite of "what does this actually say".
+        container["body"] = container.pop("paragraphs")
 
     return {"source": Path(path).name, "containers": containers, "warnings": warnings}
 

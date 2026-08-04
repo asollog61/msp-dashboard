@@ -29,42 +29,76 @@ import lease_blocks as lbk
 
 STYLE = """
 <style>
-.lv-doc { font-family: 'Times New Roman', Georgia, serif; font-size: 14.5px;
-          line-height: 1.5; }
-.lv-doc p { margin: 0 0 .5rem 0; text-align: justify; }
-.lv-h { font-weight: 700; margin: 1.1rem 0 .4rem 0 !important; }
+/* The document pane is a sheet of paper: white, serif, justified, with real
+   margins. Anything else and it stops reading like a lease. */
+.lv-page { background: #fdfdfb; color: #17171a; padding: 2.6rem 3rem;
+           border-radius: 3px; box-shadow: 0 1px 14px rgba(0,0,0,.45);
+           font-family: 'Times New Roman', Georgia, serif; font-size: 13.5px;
+           line-height: 1.62; }
+.lv-page p { margin: 0 0 .62rem 0; text-align: justify; }
+.lv-page .lv-h { font-weight: 700; text-align: left;
+                 margin: 1.5rem 0 .55rem 0; }
+.lv-page .lv-h:first-child { margin-top: 0; }
 .lv-lead { font-weight: 700; }
-.lv-i1 { margin-left: 1.9rem !important; }
-.lv-i2 { margin-left: 3.8rem !important; }
-.lv-token { color: #d13438; font-weight: 600; }
+.lv-num { display: inline-block; min-width: 1.9rem; font-weight: 700; }
+.lv-l1 { margin-left: 2.2rem; }
+.lv-l2 { margin-left: 4.4rem; }
+.lv-token { color: #c0392b; font-weight: 600; }
+.lv-hit { background: #fff6c9; }
 
-.lv-index { font-family: system-ui, sans-serif; font-size: 12.5px;
-            line-height: 1.85; border-left: 3px solid rgba(128,128,128,.3);
-            padding-left: .8rem; margin-bottom: 1.1rem; }
-.lv-index a { text-decoration: none; opacity: .8; }
-.lv-index a:hover { text-decoration: underline; opacity: 1; }
-.lv-index .on { font-weight: 700; opacity: 1; }
-.lv-badge { font-size: 11px; opacity: .75; }
-.lv-badge.set { color: #46b8d0; }
-.lv-badge.opt { color: #4bbd7a; }
+/* Key Provisions keeps its table, because that is what it is in Word. */
+.lv-kps { width: 100%; border-collapse: collapse; margin: .3rem 0 1rem 0;
+          font-size: 12.5px; }
+.lv-kps td { border: 1px solid #b9b9b3; padding: .34rem .5rem;
+             vertical-align: top; }
+.lv-kps td:first-child { font-weight: 700; width: 31%; background: #f2f2ee; }
+.lv-kps .lv-alt { display: block; padding-top: .25rem; color: #6b6b66;
+                  font-size: 11.5px; font-style: italic; }
 
-.lv-opts { font-family: system-ui, sans-serif; font-size: 13px; }
-.lv-card { border: 1px solid rgba(128,128,128,.35); border-radius: .5rem;
-           padding: .7rem .8rem; margin-bottom: .8rem; }
-.lv-card.set { border-left: 3px solid #1f8fa8; }
+/* Left rail: navigation only. */
+.lv-nav { font-family: system-ui, sans-serif; font-size: 12.5px; line-height: 1.45; }
+.lv-nav a { text-decoration: none; display: block; padding: .3rem .5rem;
+            border-radius: .35rem; opacity: .82; }
+.lv-nav a:hover { background: rgba(128,128,128,.16); opacity: 1; }
+.lv-nav a.on { background: rgba(88,166,255,.20); opacity: 1; font-weight: 600; }
+.lv-nav .lv-sub { padding-left: 1rem; }
+.lv-badge { font-size: 10.5px; opacity: .8; }
+.lv-badge.set { color: #2f9bb5; }
+.lv-badge.opt { color: #2e9e5b; }
+.lv-nav-h { font-family: system-ui, sans-serif; font-size: 10.5px;
+            letter-spacing: .07em; text-transform: uppercase; opacity: .55;
+            margin: .9rem 0 .35rem .5rem; }
+
+/* Options panel, shown under the document. */
+.lv-opts { font-family: system-ui, sans-serif; font-size: 12.5px; }
+.lv-card { border: 1px solid rgba(128,128,128,.32); border-radius: .5rem;
+           padding: .6rem .75rem; margin-bottom: .7rem; }
+.lv-card.set { border-left: 3px solid #2f9bb5; }
 .lv-card.opt { border-left: 3px solid #2e9e5b; }
 .lv-tag { font-size: 10.5px; letter-spacing: .05em; text-transform: uppercase;
-          opacity: .7; display: block; margin-bottom: .45rem; }
-.lv-choice { border-top: 1px solid rgba(128,128,128,.22); padding: .45rem 0 .1rem 0;
-             font-family: 'Times New Roman', Georgia, serif; font-size: 13.5px;
+          opacity: .72; display: block; margin-bottom: .4rem; }
+.lv-choice { border-top: 1px solid rgba(128,128,128,.2); padding: .4rem 0 .1rem;
+             font-family: 'Times New Roman', Georgia, serif; font-size: 13px;
              line-height: 1.45; }
 .lv-choice:first-of-type { border-top: none; }
-.lv-name { font-family: system-ui, sans-serif; font-size: 11.5px;
-           font-weight: 600; opacity: .85; display: block; margin-bottom: .15rem; }
-.lv-in  { color: #4bbd7a; }
+.lv-name { font-family: system-ui, sans-serif; font-size: 11px; font-weight: 600;
+           opacity: .85; display: block; margin-bottom: .15rem; }
+.lv-in  { color: #2e9e5b; }
 .lv-out { opacity: .5; }
 </style>
 """
+
+# Word restarts numbering per level: 1. then a. then i.
+_ROMAN = ["i", "ii", "iii", "iv", "v", "vi", "vii", "viii", "ix", "x", "xi", "xii"]
+
+
+def _marker(level: int, index: int) -> str:
+    if level <= 0:
+        return f"{index}."
+    if level == 1:
+        return f"{chr(96 + index) if index <= 26 else index}."
+    return f"{_ROMAN[index - 1] if index <= len(_ROMAN) else index}."
+
 
 LEAD_IN_RE = re.compile(r"^([^.:\n]{3,70}?)([.:]\s)(.*)$", re.DOTALL)
 TOKEN_RE = re.compile(r"\[\s*(?:Space|KP)\s*:[^\]]*\]", re.IGNORECASE)
@@ -180,49 +214,96 @@ def _is_on(selection: dict, label: str, block: dict) -> bool:
 # Left pane: the lease as it reads
 # ---------------------------------------------------------------------------
 
-def render_document(master: dict[str, Any], selection: dict | None = None) -> str:
-    """Only what is in the lease. No alternatives, no tags, no dimming."""
+def _kps_table(provisions: list[dict], selection: dict, label: str) -> str:
+    """The Key Provisions Summary, as the bordered table it is in Word."""
+    rows = []
+    for provision in provisions:
+        value = provision.get("text", "")
+        alternatives = provision.get("alternatives") or []
+        if alternatives:
+            picked = selection.get(f"{label}|kp|{provision['field']}")
+            value = next((a for a in alternatives if a == picked), alternatives[0])
+        note = ""
+        if len(alternatives) > 1:
+            note = (f'<span class="lv-alt">{len(alternatives)} versions available'
+                    f'</span>')
+        elif provision.get("optional"):
+            note = '<span class="lv-alt">optional provision</span>'
+        rows.append(
+            f'<tr><td>{html.escape(provision.get("field", ""))}</td>'
+            f'<td>{_escape(value).replace(chr(10), "<br>")}{note}</td></tr>'
+        )
+    return f'<table class="lv-kps">{"".join(rows)}</table>' if rows else ""
+
+
+def render_document(master: dict[str, Any], selection: dict | None = None,
+                    only: str | None = None) -> str:
+    """The lease as it will print — every paragraph, in order, decisions applied.
+
+    Walks the container's full paragraph list rather than its blocks, because
+    the blocks are only the parts with choices in them. Reading the blocks
+    alone produced a document missing most of its own text.
+
+    A cyan paragraph is emitted only if it belongs to the option in use; a
+    green paragraph only if that block is switched on. Everything else is
+    fixed text and always prints.
+    """
     selection = selection if selection is not None else default_selection(master)
-    parts = [STYLE, '<div class="lv-doc">']
+    parts = [STYLE, '<div class="lv-page">']
 
     for container in master["containers"]:
         label = str(container["label"])
-        blocks = container.get("blocks", [])
+        if only is not None and label != only:
+            continue
+        body = container.get("body", [])
         provisions = provisions_in(container)
-        if not blocks and container["kind"] == "front":
+        if not body and not provisions:
             continue
 
         parts.append(f'<p class="lv-h" id="{_anchor(container)}">'
                      f'{html.escape(_heading(container))}</p>')
+        if provisions:
+            parts.append(_kps_table(provisions, selection, label))
 
-        for provision in provisions:
-            value = provision.get("text", "")
-            if provision.get("alternatives"):
-                value = provision["alternatives"][0]
-            if value:
-                parts.append(
-                    f'<p><span class="lv-lead">{html.escape(provision.get("field",""))}</span> '
-                    f'{_escape(value)}</p>'
-                )
-
+        # Which cyan option is in use, so its paragraphs can be kept and the
+        # rest of the run dropped.
         groups = groups_in(container)
-        rendered = set()
-        for block in container.get("blocks", []):
-            if block.get("field") is not None:
+        keep, drop = set(), set()
+        for group, members in groups.items():
+            winner = _chosen(selection, label, group, members)
+            for member in members:
+                target = keep if member["name"] == winner["name"] else drop
+                target.add(member["text"])
+                target.update(member.get("children", []))
+        for block in optional_in(container):
+            target = keep if _is_on(selection, label, block) else drop
+            target.add(block["text"])
+            target.update(block.get("children", []))
+
+        counters: dict[int, int] = {}
+        for entry in body:
+            text = entry.get("text", "")
+            if entry.get("separator") or not text:
                 continue
-            group = block.get("choice_group")
-            if group:
-                if group in rendered:
-                    continue
-                rendered.add(group)
-                winner = _chosen(selection, label, group, groups[group])
-                parts.append(_para(winner["text"], winner.get("indent", 0)))
-                for child in winner.get("children", []):
-                    parts.append(_para(child, winner.get("indent", 0) + 1))
-            elif _is_on(selection, label, block):
-                parts.append(_para(block["text"], block.get("indent", 0)))
-                for child in block.get("children", []):
-                    parts.append(_para(child, block.get("indent", 0) + 1))
+            if entry.get("colour") in lbk.SCAFFOLDING:
+                continue
+            if text in drop and text not in keep:
+                continue
+
+            level = int(entry.get("indent", 0) or 0)
+            counters[level] = counters.get(level, 0) + 1
+            for deeper in [k for k in counters if k > level]:
+                counters.pop(deeper)
+            marker = _marker(level, counters[level]) if level else ""
+
+            body_html = _escape(text)
+            match = LEAD_IN_RE.match(body_html)
+            if match:
+                body_html = (f'<span class="lv-lead">{match.group(1)}'
+                             f'{match.group(2).rstrip()}</span> {match.group(3)}')
+            klass = f" lv-l{min(level, 2)}" if level else ""
+            prefix = f'<span class="lv-num">{marker}</span>' if marker else ""
+            parts.append(f'<p class="{klass.strip()}">{prefix}{body_html}</p>')
 
     parts.append("</div>")
     return "".join(parts)
@@ -231,6 +312,25 @@ def render_document(master: dict[str, Any], selection: dict | None = None) -> st
 # ---------------------------------------------------------------------------
 # Right pane: the index, and one section's decisions
 # ---------------------------------------------------------------------------
+
+def render_nav(master: dict[str, Any], active: str | None = None) -> str:
+    """The left rail: every section, badged where it asks something of you."""
+    rows = ['<div class="lv-nav">', '<div class="lv-nav-h">Sections</div>']
+    for container in master["containers"]:
+        if not container.get("body") and not provisions_in(container):
+            continue
+        label = str(container["label"])
+        badge = describe_decisions(container) if decisions_in(container) else ""
+        on = " on" if active == label else ""
+        rows.append(
+            f'<a class="{on.strip()}" href="?lb_section={html.escape(label)}">'
+            f'{html.escape(_heading(container))}'
+            + (f' {badge}' if badge else "")
+            + "</a>"
+        )
+    rows.append("</div>")
+    return STYLE + "".join(rows)
+
 
 def render_index(master: dict[str, Any], active: str | None = None) -> str:
     """Sections that ask something of you, each saying what and how many."""
