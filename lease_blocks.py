@@ -17,10 +17,11 @@ absorbs the highlighted paragraphs that follow it at a deeper indent. So
 "Conditional Reduction" carries "Application of Credit" and "Reinstatement
 Rights" with it, and switching the parent off takes the children too.
 
-**Adjacency groups a choice.** Consecutive cyan blocks at the same indent form
-one pick-one set. Real content between them closes the set; a rule of asterisks
-does not — that is a divider drawn inside a set, and it is stripped on the way
-out.
+**Separators divide the choices inside a cyan set.** A run of cyan is one
+pick-one set, and each rule of asterisks inside it ends one option and starts
+the next — so one separator means two choices, two separators mean three. An
+option is everything between two separators, however many paragraphs that is.
+Separators only ever appear inside cyan, and are stripped on the way out.
 
 Containers are numbered sections *and* the exhibits after them. Without that
 second half every exhibit collapses into Section 56, which is where the
@@ -53,8 +54,8 @@ NAMED_CONTAINER_RE = re.compile(
 )
 # A run-in heading: the bold lead-in that names a block.
 RUN_IN_RE = re.compile(r"^\s*([^.:\n]{3,70}?)\s*[.:]\s")
-# A rule of repeated symbols: a hard break between choice groups. Used where a
-# section is flat and indentation cannot express that one group has ended.
+# A rule of repeated symbols, used only inside a cyan set: it ends one choice
+# and begins the next. N separators describe N+1 choices.
 SEPARATOR_RE = re.compile(r"^[\s*_=~.\-\u2013\u2014]{3,}$")
 # The colour legend at the top of the master describes the convention; it is
 # not part of any lease.
@@ -70,14 +71,37 @@ def _highlight(run: Any) -> str | None:
 
 
 def _indent(paragraph: Any) -> int:
+    """How deeply nested a paragraph is, as a level rather than a measurement.
+
+    Word stores two things that look like indentation and disagree. `w:ind`
+    is the visual left margin; `w:numPr/w:ilvl` is the list level, which is
+    what the numbering (1, a, b, 2) actually reflects.
+
+    In the guaranty they invert each other: "No Release" is item 1.d with
+    ilvl=1 but w:ind=0, while "Good Guy Clause" is item 2 with ilvl=0 but
+    w:ind=720. Reading the margin made Good Guy a child of No Release —
+    the exact opposite of the document. The list level is authoritative
+    wherever there is one.
+    """
     properties = paragraph._element.find(qn("w:pPr"))
     if properties is None:
         return 0
+    numbering = properties.find(qn("w:numPr"))
+    if numbering is not None:
+        level = numbering.find(qn("w:ilvl"))
+        if level is not None:
+            try:
+                return int(level.get(qn("w:val")) or 0)
+            except (TypeError, ValueError):
+                return 0
     element = properties.find(qn("w:ind"))
     if element is None:
         return 0
     try:
-        return int(element.get(qn("w:left")) or 0)
+        # Not in a list: fall back to the margin, expressed in the same units
+        # as a list level so the two can be compared. Word's default step is
+        # half an inch.
+        return int(element.get(qn("w:left")) or 0) // 720
     except (TypeError, ValueError):
         return 0
 
@@ -262,22 +286,85 @@ def read_master(path: str | Path) -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 def _group_blocks(paragraphs: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Highlighted paragraphs collapsed into blocks, then into choice groups."""
+    """Highlighted paragraphs collapsed into blocks and pick-one sets.
+
+    Cyan is handled first and differently. A run of cyan paragraphs is one
+    pick-one set, and the rules of asterisks inside it delimit the options —
+    so an option is *everything between two separators*, however many
+    paragraphs that is. Exhibit C is the case that proves it: AS IS/WHERE IS
+    is one option, and the entire Phase 1 and Phase 2 build-out is the other.
+
+    Green and yellow use the indent rule instead: a block absorbs the deeper
+    indented highlighted paragraphs beneath it.
+    """
     blocks: list[dict[str, Any]] = []
+    consumed: set[int] = set()
+    group = 0
+
+    index = 0
+    while index < len(paragraphs):
+        if index in consumed or paragraphs[index].get("separator") \
+                or paragraphs[index]["colour"] != PICK_ONE:
+            index += 1
+            continue
+
+        # Extend over every cyan paragraph and every separator between them.
+        end = index
+        last_cyan = index
+        while end < len(paragraphs):
+            entry = paragraphs[end]
+            if entry.get("separator"):
+                end += 1
+                continue
+            if entry["colour"] != PICK_ONE:
+                break
+            last_cyan = end
+            end += 1
+        run = paragraphs[index:last_cyan + 1]
+        consumed.update(range(index, last_cyan + 1))
+
+        # Split the run into options at the separators.
+        options: list[list[dict[str, Any]]] = [[]]
+        for entry in run:
+            if entry.get("separator"):
+                options.append([])
+            else:
+                options[-1].append(entry)
+        options = [option for option in options if option]
+
+        group += 1
+        for option in options:
+            head, *rest = option
+            blocks.append({
+                "name": block_name(head["text"]),
+                "colour": PICK_ONE,
+                "indent": head["indent"],
+                "text": head["text"],
+                "children": [entry["text"] for entry in rest],
+                "position": paragraphs.index(head),
+                # A lone cyan block is not a choice between anything, so only
+                # a real set gets a group.
+                **({"choice_group": group} if len(options) > 1 else {}),
+            })
+        index = last_cyan + 1
+
+    # Green and yellow: the indent rule.
     index = 0
     while index < len(paragraphs):
         entry = paragraphs[index]
-        if entry.get("separator") or not entry["colour"]:
+        if index in consumed or entry.get("separator") or not entry["colour"]:
             index += 1
             continue
         children: list[str] = []
         cursor = index + 1
-        # Deeper-indented highlighted paragraphs belong to this block.
         while cursor < len(paragraphs):
             following = paragraphs[cursor]
+            if following.get("separator"):
+                break
             if not following["colour"] or following["indent"] <= entry["indent"]:
                 break
             children.append(following["text"])
+            consumed.add(cursor)
             cursor += 1
         blocks.append({
             "name": block_name(entry["text"]),
@@ -289,47 +376,8 @@ def _group_blocks(paragraphs: list[dict[str, Any]]) -> list[dict[str, Any]]:
         })
         index = cursor
 
-    _assign_choice_groups(blocks, paragraphs)
+    blocks.sort(key=lambda block: block["position"])
     return blocks
-
-
-def _assign_choice_groups(blocks: list[dict[str, Any]], paragraphs: list[dict]) -> None:
-    """Consecutive cyan blocks at one indent become a single pick-one group."""
-    blocks = [b for b in blocks if b["position"] >= 0]
-    group = 0
-    run: list[dict[str, Any]] = []
-
-    def close():
-        nonlocal group, run
-        if len(run) >= 2:
-            group += 1
-            for member in run:
-                member["choice_group"] = group
-        run = []
-
-    previous_end = None
-    for block in blocks:
-        if block["colour"] != PICK_ONE:
-            close()
-            previous_end = None
-            continue
-        # Real content between two cyan blocks separates them. A rule of
-        # asterisks does not: it is a divider drawn *inside* a set to show
-        # where one option ends and the next begins, which is how it reads in
-        # Word. Treating it as a group break turned every marked pair into two
-        # unrelated singles.
-        gap_clean = previous_end is None or not any(
-            not paragraphs[i]["colour"] and not paragraphs[i].get("separator")
-            for i in range(previous_end, block["position"])
-        )
-        if run and (block["indent"] != run[-1]["indent"] or not gap_clean):
-            close()
-        run.append(block)
-        previous_end = block["position"] + len(block["children"]) + 1
-        while (previous_end < len(paragraphs)
-               and paragraphs[previous_end].get("separator")):
-            previous_end += 1
-    close()
 
 
 # ---------------------------------------------------------------------------

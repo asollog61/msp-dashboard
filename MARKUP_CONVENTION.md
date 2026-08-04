@@ -15,17 +15,18 @@ Source of truth: `2026_08_01 MSP Master_Lease.v9B NNN Retail.docx`.
 
 | Highlight | Meaning | Behaviour in the builder |
 |---|---|---|
-| **Green** | Independent optional block | A checkbox. On or off, no effect on anything else. |
-| **Cyan** | One of a set of competing versions | A radio group. Exactly one may be selected, or none. |
-| **Magenta** | Optional key provision (front matter only) | Offered in the Key Provisions table rather than the section body. |
+| **Bright green** | Independent optional block, **out** by default | A checkbox. Off unless you opt in. Two adjacent green blocks can both be in. |
+| **Turquoise (cyan)** | One of a set of competing versions | A radio group. Exactly one may be selected, or none. |
+| **Yellow** | Optional key provision (front matter only) | Offered in the Key Provisions table rather than the section body. |
+| **Grey / red** | Scaffolding — directions and notes to self | Stripped on extract. Never reaches a lease. |
 
-**No highlight** means the text is fixed. It is always in the lease and cannot
-be switched off. That is the default, and most of the document should stay that
-way.
+**No highlight** means the text is in the lease by default. It can still be
+switched off deal by deal — it simply is not surfaced as a decision. Most of
+the document should stay this way.
 
-Magenta is used because it is currently unused as a highlight anywhere in the
-master. Yellow is deliberately *not* used — it reads as "unfinished" and three
-stray yellow runs already exist.
+The three active colours are all light ones, so text stays readable behind
+them. Highlights never survive into a generated lease, so they exist purely for
+you in Word.
 
 ### Red text is not part of this
 
@@ -69,29 +70,39 @@ its parent. If you flatten the indent, it becomes a separate block.
 
 ## Cyan: competing versions
 
-Consecutive cyan blocks at the same indent level form **one** radio group.
-A block of any other kind, or an unhighlighted paragraph, closes the group.
+A run of cyan is **one** pick-one set. Inside it, a rule of asterisks ends one
+choice and begins the next:
 
 ```
-  720   Termination Right. Tenant may...                CYAN  ┐
-  720   Rent Credit. Tenant may elect...                CYAN  ┘ pick one
+        AS IS/WHERE IS                                  CYAN  ┐
+        The premises to be delivered AS-IS...           CYAN  │ choice 1
+        ***********************************                   │
+        PHASE 1 –                                       CYAN  │
+        DEMO THE ENTIRE PREMISES...                     CYAN  │ choice 2
+        Gas: ...  Water: ...  Sewer: ...  HVAC: ...     CYAN  │
+        PHASE 2 –   Electric: ...                       CYAN  ┘
 ```
 
-The literal `OR` paragraph you have been writing between alternatives is no
-longer needed — colour and adjacency carry it. **Delete those `OR` paragraphs**
-when you re-colour, or they will be extracted as a one-word alternative.
+**One separator means two choices. Two separators mean three.** A choice is
+everything between two separators, however many paragraphs that takes — the
+eight paragraphs of the phased build-out above are a single option, not eight.
 
-To offer two *separate* radio groups inside one section, put an unhighlighted
-paragraph between them, or make one of them green.
+Separators appear **only inside cyan**. They are stripped and never reach a
+lease.
 
-### The case this fixes
+A cyan run with no separator in it is a single optional block, not a choice —
+there is nothing to choose between.
 
-Section 2 currently holds three near-identical copies of the Option to Cancel
-language, adjacent, with nothing marking them as alternatives to each other.
-Colour them all cyan and they become one pick-one group. Leave them green and
-you will be able to select all three into the same lease.
+### Green is not a choice
 
----
+Two adjacent green blocks are two independent things that can both be in the
+lease. Section 2's *Termination Right* and *Rent Credit* are green on purpose:
+when that provision is included, the lease describes both remedies and the
+tenant elects between them later, in the real world. Making them cyan would
+force one out of the document at drafting time, which is wrong.
+
+Use cyan only when including one version means the other must not appear at
+all.
 
 ## Naming
 
@@ -109,25 +120,29 @@ usually worse. Give every optional block a bold run-in heading.
 
 ## Front matter (before Section 1)
 
-Twenty highlighted paragraphs currently sit above Section 1. These are optional
-key provisions — items that belong in the Key Provisions Summary table and,
-when included, need corresponding language somewhere in the section body.
+These live in the Key Provisions Summary **table**, and are read from the table
+rows rather than from body paragraphs. Thirteen are marked today.
 
-Mark these **magenta**. They are routed to the Key Provisions table, which
-already has its own chooser, rather than being treated as section text.
+Mark them **yellow**. They are routed to the Key Provisions table, which has
+its own chooser, rather than being treated as section text.
 
 An unhighlighted front-matter provision is mandatory and always present.
+
+**Every key provision needs a matching section.** If *Exclusivity* appears in
+the summary, there must be an exclusivity clause in the body. The reverse is
+fine — a section may exist with no summary row.
 
 ---
 
 ## Checklist before re-extracting
 
 - [ ] Every optional block is green **or** cyan, never both
-- [ ] Competing versions are cyan and adjacent, with nothing between them
-- [ ] Leftover `OR` separator paragraphs deleted
+- [ ] Cyan is used only where including one version means the other must not appear
+- [ ] Separators appear only inside cyan, one fewer than the number of choices
 - [ ] Child paragraphs indented deeper than their parent
 - [ ] Every optional block has a bold run-in heading
-- [ ] Front-matter optional provisions are magenta
+- [ ] No two blocks in one set share a name
+- [ ] Front-matter optional provisions are yellow
 - [ ] Nothing is highlighted that should always appear in every lease
 
 Then run **Re-extract** and check the report, which lists every block found,
