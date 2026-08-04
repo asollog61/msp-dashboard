@@ -6049,7 +6049,9 @@ def _lb_render_template_header(working_template, saved_docs, profiles, profile_n
         sections = library.get("sections", [])
         provisions = library.get("key_provisions", [])
         extracted = str(library.get("extracted_at", ""))[:10]
-        content_col, source_col, extract_col = st.columns([3.3, 2.3, 1.1])
+        st.markdown("##### 1 · Master document")
+        source_col, extract_col, _src_pad = st.columns([2.6, 1.1, 2.3])
+        content_col = st.container()
         if sections:
             revisions = library.get("tracked_changes_resolved") or {}
             note = (
@@ -6097,6 +6099,7 @@ def _lb_render_template_header(working_template, saved_docs, profiles, profile_n
     # Rendered under the Save buttons and above the Space picker.
     format_home = format_slot if format_slot is not None else st.container()
     with format_home:
+        st.markdown("##### 3 · Formatting")
         settings = lf.profile_settings(profiles, profile_name)
         profile_col, summary_col = st.columns([2.6, 3.4])
         chosen = profile_col.selectbox(
@@ -6141,7 +6144,6 @@ def _lb_render_template_header(working_template, saved_docs, profiles, profile_n
                         st.error("Could not save the format profile to Google Sheets.")
             st.caption("Unsaved formatting changes — they apply to the preview now, but save to keep them.")
 
-    st.divider()
     return profile_name, edited
 
 
@@ -6244,6 +6246,7 @@ def render_lease_builder_tab():
     # depend on draft_state, which does not exist yet, so they are reserved
     # here and filled once it does.
     lb_extract_slot = st.container()
+    st.markdown("##### 2 · This document")
     head2, _head_pad = st.columns([2.6, 3.4])
     # A "Save As" from the previous run parks its new name here. Applying it
     # before the picker exists is the only legal moment to set a widget key.
@@ -6252,6 +6255,7 @@ def render_lease_builder_tab():
         st.session_state["lb_template_edit_choice"] = pending_choice
     working_template = head2.selectbox(
         "Document", doc_names + [LB_NEW_TEMPLATE], key="lb_template_edit_choice",
+        label_visibility="collapsed",
         help="Templates and leases are the same thing — name them however you like.",
     )
     # Drafting cleanup is no longer optional. It was always left on, and the
@@ -6272,6 +6276,7 @@ def render_lease_builder_tab():
     # The facts a lease repeats about its space already live in the tenancy
     # workbook. Picking one here resolves every [Space:...] token, so the same
     # document produces a correct lease for any unit.
+    st.markdown("##### 4 · Space")
     space_records = _lb_space_records()
     active_space = None
     if space_records:
@@ -6283,6 +6288,7 @@ def render_lease_builder_tab():
         space_col, refresh_col, _space_pad = st.columns([2.6, 1.1, 2.3])
         chosen_label = space_col.selectbox(
             "Space", ["— none —"] + space_labels, key="lb_space_choice",
+            label_visibility="collapsed",
             help="From the MSP Tenancy workbook. Resolves [Space:...] tokens in "
                  "key provisions and clause text.",
         )
@@ -6510,7 +6516,7 @@ def render_lease_builder_tab():
     use_label = "Use"
 
     with left:
-        st.markdown("### Key Provisions")
+        st.markdown("##### 5 · Key Provisions")
         st.caption(
             "Every provision in the base template is listed. Fill in **Alt 1–Alt 10** to define the "
             "values a lease can choose from. **Default On** decides whether a new lease starts with "
