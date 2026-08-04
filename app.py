@@ -78,7 +78,9 @@ try:
         (lsp, ("space_records", "find_space", "resolve", "resolve_provisions",
                "token_names", "field_label", "unresolved", "SPACE_TOKEN_RE")),
         (lbk, ("read_master", "report", "paragraph_colour", "block_name")),
-        (lvw, ("render_master", "render_index", "decisions_in")),
+        (lvw, ("render_document", "render_options", "render_index",
+               "default_selection", "find_container", "first_with_decisions",
+               "decisions_in")),
         (lstore, ("build_store", "LeaseStore", "LocalBackend", "GitHubBackend",
                   "StoreError", "slugify")),
     ):
@@ -6352,9 +6354,12 @@ def render_lease_builder_tab():
     else:
         st.caption("MSP Tenancy workbook not found — [Space:...] tokens cannot resolve.")
 
-    # ---- 5. Document view --------------------------------------------------
-    # The lease as a document rather than a form: the same reading order as
-    # Word, every section linked, and each decision shown where it occurs.
+    # ---- 5. Document and options ------------------------------------------
+    # Split pane. Left is the lease as it will actually read — only what is
+    # in, nothing dimmed. Right is what this section could say instead. The
+    # index links carry ?lb_section=, because Streamlit reruns on a query
+    # change while a bare #anchor only scrolls, and clicking a heading has to
+    # drive the right-hand pane.
     st.markdown("##### 5 · Document")
     try:
         _stamp = Path(chosen_master).stat().st_mtime
@@ -6364,29 +6369,33 @@ def render_lease_builder_tab():
     if master_blocks is None:
         st.warning("Could not read the master's structure.")
     else:
-        containers = [c for c in master_blocks["containers"] if c.get("blocks")]
-        decisions = sum(lvw.decisions_in(c) for c in containers)
-        view_col, jump_col = st.columns([2.6, 3.4])
-        view_mode = view_col.radio(
-            "View", ["Whole document", "One section"], horizontal=True,
-            key="lb_view_mode", label_visibility="collapsed",
-        )
-        only = None
-        if view_mode == "One section":
-            labels = {lvw._heading(c): str(c["label"]) for c in containers}
-            picked = jump_col.selectbox(
-                "Section", list(labels), key="lb_view_section",
-                label_visibility="collapsed",
+        picked_label = st.query_params.get("lb_section")
+        active = (lvw.find_container(master_blocks, picked_label)
+                  or lvw.first_with_decisions(master_blocks))
+        selection = lvw.default_selection(master_blocks)
+
+        doc_col, opt_col = st.columns([3, 2], gap="medium")
+        with doc_col:
+            st.caption("The lease as it reads")
+            st.markdown(
+                f'<div style="max-height:70vh;overflow-y:auto;padding-right:.8rem">'
+                f'{lvw.render_document(master_blocks, selection)}</div>',
+                unsafe_allow_html=True,
             )
-            only = labels.get(picked)
-        else:
-            jump_col.caption(
-                f"{len(containers)} sections with options · {decisions} decisions"
+        with opt_col:
+            st.caption("Sections with choices")
+            st.markdown(
+                lvw.render_index(master_blocks,
+                                 str(active["label"]) if active else None),
+                unsafe_allow_html=True,
             )
-        st.markdown(
-            lvw.render_master(master_blocks, selection=None, only=only),
-            unsafe_allow_html=True,
-        )
+            if active is not None:
+                st.caption(f"Options — {lvw._heading(active)}")
+                st.markdown(
+                    f'<div style="max-height:45vh;overflow-y:auto;padding-right:.8rem">'
+                    f'{lvw.render_options(active, selection)}</div>',
+                    unsafe_allow_html=True,
+                )
         if master_blocks.get("warnings"):
             with st.expander(f"⚠️ {len(master_blocks['warnings'])} markup warning(s)"):
                 for warning in master_blocks["warnings"]:
