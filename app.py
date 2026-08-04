@@ -6209,7 +6209,7 @@ def render_lease_builder_tab():
             )
 
     doc_names = sorted(saved_docs)
-    head2, head3, _head_pad = st.columns([2.6, 1.1, 2.3])
+    head2, _head_pad = st.columns([2.6, 3.4])
     # A "Save As" from the previous run parks its new name here. Applying it
     # before the picker exists is the only legal moment to set a widget key.
     pending_choice = st.session_state.pop("lb_pending_template_choice", None)
@@ -6219,7 +6219,11 @@ def render_lease_builder_tab():
         "Document", doc_names + [LB_NEW_TEMPLATE], key="lb_template_edit_choice",
         help="Templates and leases are the same thing — name them however you like.",
     )
-    clean_notes = head3.toggle("Clean draft", value=True, key="lb_clean_notes")
+    # Drafting cleanup is no longer optional. It was always left on, and the
+    # rules-based generator ignores it entirely, so the toggle only offered a
+    # way to emit the Directions block and 223 unresolved tracked changes into
+    # a lease. Kept as a constant so the legacy path and Publish still clean.
+    clean_notes = True
     # Save / Save As / Delete belong with the picker they act on, but they need
     # draft_state to build a payload and that does not exist yet. Reserving the
     # row here and filling it later is what lets them sit where they belong.
