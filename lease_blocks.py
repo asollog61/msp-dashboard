@@ -185,32 +185,83 @@ def _iter_body(document: Any):
             yield "tbl", Table(child, document)
 
 
-def _key_provisions_from_table(table: Any) -> list[dict[str, Any]]:
-    """Optional key provisions read off a summary table.
+def _unique_cells(row: Any) -> list[Any]:
+    """A row's cells with merges collapsed.
 
-    A row is a field/value pair. Yellow anywhere in the row marks the whole
-    provision optional, and the first cell names it.
+    python-docx returns a merged cell once per column it spans, so a two-column
+    row built from a three-column table hands back the value cell twice and its
+    paragraphs get counted twice with it.
+    """
+    seen, cells = set(), []
+    for cell in row.cells:
+        if id(cell._tc) not in seen:
+            seen.add(id(cell._tc))
+            cells.append(cell)
+    return cells
+
+
+def _key_provisions_from_table(table: Any) -> list[dict[str, Any]]:
+    """Key provisions read off the summary table.
+
+    The first cell names the provision, the second holds its value. The same
+    convention that governs the body applies inside that cell: cyan paragraphs
+    split by asterisk rules are competing versions of the value, yellow marks
+    the whole provision optional, and grey or red is scaffolding.
+
+    This is what replaced the Excel round trip. Alternatives used to exist only
+    in a spreadsheet, which meant the master could not answer "what are my
+    choices" on its own.
     """
     found = []
     for row in table.rows:
-        cells = row.cells
-        if not cells:
+        cells = _unique_cells(row)
+        if len(cells) < 2:
             continue
-        marked = any(
-            paragraph_colour(paragraph) == KEY_PROVISION
-            for cell in cells for paragraph in cell.paragraphs
-        )
-        if not marked:
+        field = cells[0].text.strip()
+        paragraphs = [
+            {"text": paragraph.text.strip(),
+             "colour": paragraph_colour(paragraph),
+             "separator": bool(SEPARATOR_RE.match(paragraph.text.strip()))}
+            for paragraph in cells[1].paragraphs
+            if paragraph.text.strip()
+        ]
+        optional = any(entry["colour"] == KEY_PROVISION for entry in paragraphs)
+        # Drafting notes never reach a lease, and must not become a value.
+        paragraphs = [e for e in paragraphs if e["colour"] not in SCAFFOLDING]
+        if not field and not paragraphs:
             continue
-        label = cells[0].text.strip()
-        value = " ".join(cell.text.strip() for cell in cells[1:]).strip()
-        if not label and not value:
-            continue
+
+        # Cyan runs split by separators are the competing values.
+        alternatives, current, in_run = [], [], False
+        base = []
+        for entry in paragraphs:
+            # Separator first: the rule is highlighted along with the choices
+            # around it, so testing colour first would swallow it as content.
+            if entry["separator"]:
+                if in_run and current:
+                    alternatives.append("\n".join(current))
+                    current = []
+                continue
+            if entry["colour"] == PICK_ONE:
+                in_run = True
+                current.append(entry["text"])
+            else:
+                if in_run and current:
+                    alternatives.append("\n".join(current))
+                    current = []
+                in_run = False
+                base.append(entry["text"])
+        if current:
+            alternatives.append("\n".join(current))
+
         found.append({
-            "name": block_name(label or value),
-            "colour": KEY_PROVISION,
+            "name": block_name(field or (base[0] if base else "")),
+            "field": field,
+            "colour": KEY_PROVISION if optional else None,
+            "optional": optional,
             "indent": 0,
-            "text": value or label,
+            "text": "\n".join(base),
+            "alternatives": alternatives,
             "children": [],
             "position": -1,
         })
@@ -248,7 +299,14 @@ def read_master(path: str | Path) -> dict[str, Any]:
             kind, label = opened
             title = ""
             if kind == "section":
-                title = SECTION_RE.match(text).group(2).strip()
+                # "Section 8.  Security Deposit.  Tenant will be subject to…"
+                # The title is only the run-in heading; the rest of that
+                # paragraph is the clause body and made every entry in the
+                # index a wall of text.
+                rest = SECTION_RE.match(text).group(2).strip()
+                stop = re.search(r"[.:]\s", rest)
+                title = (rest[:stop.start()] if stop and stop.start() <= 70
+                         else rest[:70]).strip(" .\t")
             current = {"kind": kind, "label": label, "title": title, "paragraphs": []}
             pending_title = kind in ("exhibit", "appendix")
             continue

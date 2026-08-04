@@ -55,6 +55,8 @@ try:
     import lease_docs as ld
     import lease_store as lstore
     import lease_space as lsp
+    import lease_blocks as lbk
+    import lease_view as lvw
 
     # Streamlit re-runs this script without re-importing a module it already
     # holds, so a deploy can leave a new app.py talking to an old lease_*.py.
@@ -75,6 +77,8 @@ try:
               "infer_choice", "adopt_legacy_value")),
         (lsp, ("space_records", "find_space", "resolve", "resolve_provisions",
                "token_names", "field_label", "unresolved", "SPACE_TOKEN_RE")),
+        (lbk, ("read_master", "report", "paragraph_colour", "block_name")),
+        (lvw, ("render_master", "render_index", "decisions_in")),
         (lstore, ("build_store", "LeaseStore", "LocalBackend", "GitHubBackend",
                   "StoreError", "slugify")),
     ):
@@ -5188,6 +5192,17 @@ def get_lease_store():
         return None
 
 
+@st.cache_data(show_spinner=False)
+def _lb_read_master(path, stamp):
+    """The master's option structure. Keyed on the file's timestamp so editing
+    the .docx and reloading picks the change up without a manual clear."""
+    try:
+        return lbk.read_master(path)
+    except Exception as exc:
+        print(f"Could not read the master: {type(exc).__name__}: {exc}")
+        return None
+
+
 @st.cache_data(ttl=300)
 def _lb_space_records():
     """Leasable spaces from the tenancy workbook, ready for the picker.
@@ -6337,6 +6352,46 @@ def render_lease_builder_tab():
     else:
         st.caption("MSP Tenancy workbook not found — [Space:...] tokens cannot resolve.")
 
+    # ---- 5. Document view --------------------------------------------------
+    # The lease as a document rather than a form: the same reading order as
+    # Word, every section linked, and each decision shown where it occurs.
+    st.markdown("##### 5 · Document")
+    try:
+        _stamp = Path(chosen_master).stat().st_mtime
+    except OSError:
+        _stamp = 0
+    master_blocks = _lb_read_master(str(chosen_master), _stamp)
+    if master_blocks is None:
+        st.warning("Could not read the master's structure.")
+    else:
+        containers = [c for c in master_blocks["containers"] if c.get("blocks")]
+        decisions = sum(lvw.decisions_in(c) for c in containers)
+        view_col, jump_col = st.columns([2.6, 3.4])
+        view_mode = view_col.radio(
+            "View", ["Whole document", "One section"], horizontal=True,
+            key="lb_view_mode", label_visibility="collapsed",
+        )
+        only = None
+        if view_mode == "One section":
+            labels = {lvw._heading(c): str(c["label"]) for c in containers}
+            picked = jump_col.selectbox(
+                "Section", list(labels), key="lb_view_section",
+                label_visibility="collapsed",
+            )
+            only = labels.get(picked)
+        else:
+            jump_col.caption(
+                f"{len(containers)} sections with options · {decisions} decisions"
+            )
+        st.markdown(
+            lvw.render_master(master_blocks, selection=None, only=only),
+            unsafe_allow_html=True,
+        )
+        if master_blocks.get("warnings"):
+            with st.expander(f"⚠️ {len(master_blocks['warnings'])} markup warning(s)"):
+                for warning in master_blocks["warnings"]:
+                    st.caption(warning)
+
     # ---- New document: a copy of an existing one --------------------------
     if working_template == LB_NEW_TEMPLATE:
         if not doc_names:
@@ -6523,7 +6578,7 @@ def render_lease_builder_tab():
     use_label = "Use"
 
     with left:
-        st.markdown("##### 5 · Key Provisions")
+        st.markdown("##### 6 · Key Provisions")
         st.caption(
             "Every provision in the base template is listed. Fill in **Alt 1–Alt 10** to define the "
             "values a lease can choose from. **Default On** decides whether a new lease starts with "
