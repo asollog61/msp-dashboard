@@ -77,7 +77,7 @@ try:
         (lsp, ("space_records", "find_space", "resolve", "resolve_provisions",
                "token_names", "field_label", "unresolved", "SPACE_TOKEN_RE")),
         (lbk, ("read_master", "report", "paragraph_colour", "block_name")),
-        (lvw, ("render_document", "render_options", "STYLE", "groups_in",
+        (lvw, ("render_document", "STYLE", "groups_in", "_kps_table",
                "optional_in", "provisions_in",
                "default_selection", "find_container", "first_with_decisions",
                "decisions_in")),
@@ -6195,11 +6195,10 @@ def render_lease_builder_tab():
         st.caption("MSP Tenancy workbook not found — [Space:...] tokens cannot resolve.")
 
     # ---- 5. Document -------------------------------------------------------
-    # Navigation and the include/exclude controls are native widgets, not HTML.
-    # st.html renders inside an iframe, so a link in it cannot drive the parent
-    # app — clicking one opened a new tab instead of changing the section.
-    # Widgets talk to session state directly, which is what makes a checkbox
-    # move a clause between "in" and "out" and have the text update.
+    # Every paragraph is droppable, not just the ones marked green. The middle
+    # column is therefore a list of rows with a keep control, not a rendered
+    # page — a page cannot be clicked. Anything unticked moves to the right,
+    # where it can be put back.
     st.markdown("##### 5 · Document")
     try:
         _stamp = Path(chosen_master).stat().st_mtime
@@ -6209,7 +6208,6 @@ def render_lease_builder_tab():
     if master_blocks is None:
         st.warning("Could not read the master's structure.")
     else:
-        st.html(lvw.STYLE)
         pickable = [c for c in master_blocks["containers"]
                     if c.get("body") or lvw.provisions_in(c)]
 
@@ -6218,56 +6216,78 @@ def render_lease_builder_tab():
             head = lvw._heading(container)
             return f"{head}  ·  {count} to decide" if count else head
 
-        nav_col, main_col = st.columns([1, 3], gap="medium")
+        nav_col, mid_col, out_col = st.columns([1.1, 2.6, 1.8], gap="medium")
+
         with nav_col:
             st.caption("Sections")
-            chosen_section = st.radio(
-                "Section", pickable, format_func=_label, key="lb_doc_section",
-                label_visibility="collapsed",
-            )
+            section = st.radio("Section", pickable, format_func=_label,
+                               key="lb_doc_section", label_visibility="collapsed")
 
-        # Selections live in session state so a checkbox survives the rerun.
-        key_for = lambda kind, name: f"lb_sel_{chosen_section['label']}_{kind}_{name}"
-        selection = {}
-        label = str(chosen_section["label"])
-        for group, members in lvw.groups_in(chosen_section).items():
-            picked = st.session_state.get(key_for("set", group), members[0]["name"])
-            selection[f"{label}|set{group}"] = picked
-        for block in lvw.optional_in(chosen_section):
-            selection[f"{label}|opt|{block['name']}"] = bool(
-                st.session_state.get(key_for("opt", block["name"]), False)
-            )
+        label = str(section["label"])
+        body = [e for e in section.get("body", [])
+                if e.get("text") and not e.get("separator")
+                and e.get("colour") not in lbk.SCAFFOLDING]
 
-        with main_col:
-            text_col, opt_col = st.columns([3, 2], gap="medium")
-            with text_col:
-                st.caption("In the lease")
-                st.html(
-                    f'<div style="max-height:62vh;overflow-y:auto;padding:.2rem">'
-                    f'{lvw.render_document(master_blocks, selection, only=label)}</div>'
+        # Which cyan option is in use decides whether its siblings start out.
+        groups = lvw.groups_in(section)
+        chosen_names, alt_text = {}, {}
+        for group, members in sorted(groups.items()):
+            key = f"lb_set_{label}_{group}"
+            names = [m["name"] for m in members]
+            chosen_names[group] = st.session_state.get(key, names[0])
+            for member in members:
+                for line in [member["text"], *member.get("children", [])]:
+                    alt_text[line] = (group, member["name"])
+
+        def _default_keep(entry):
+            line = entry["text"]
+            if line in alt_text:
+                group, name = alt_text[line]
+                return chosen_names[group] == name
+            return entry.get("colour") != lbk.OPTIONAL_OUT
+
+        keep_key = lambda i: f"lb_keep_{label}_{i}"
+        kept, dropped = [], []
+        for index, entry in enumerate(body):
+            if keep_key(index) not in st.session_state:
+                st.session_state[keep_key(index)] = _default_keep(entry)
+            (kept if st.session_state[keep_key(index)] else dropped).append((index, entry))
+
+        with mid_col:
+            st.caption(f"In the lease — {lvw._heading(section)}")
+            provisions = lvw.provisions_in(section)
+            if provisions:
+                st.html(lvw.STYLE + lvw._kps_table(provisions, {}, label))
+            if not body:
+                st.caption("No body text in this container.")
+            for index, entry in kept:
+                tick_col, text_col = st.columns([0.08, 0.92], gap="small")
+                tick_col.checkbox(" ", key=keep_key(index), label_visibility="collapsed")
+                depth = int(entry.get("indent", 0) or 0)
+                prefix = "&nbsp;" * (depth * 6)
+                text_col.markdown(
+                    f"{prefix}{entry['text'][:700]}"
+                    + ("…" if len(entry["text"]) > 700 else ""),
+                    unsafe_allow_html=True,
                 )
-            with opt_col:
-                st.caption("Options")
-                groups = lvw.groups_in(chosen_section)
-                optional = lvw.optional_in(chosen_section)
-                if not groups and not optional:
-                    st.caption("Nothing to decide in this section.")
-                for group, members in sorted(groups.items()):
-                    names = [m["name"] for m in members]
-                    st.radio(
-                        f"Choose one of {len(members)}", names,
-                        key=key_for("set", group),
-                        index=names.index(selection[f"{label}|set{group}"]),
-                    )
-                    with st.expander("See the wording", expanded=False):
-                        for member in members:
-                            st.html(f'<div class="lv-choice"><span class="lv-name">'
-                                    f'{member["name"]}</span>{member["text"][:600]}</div>')
-                for block in optional:
+
+        with out_col:
+            st.caption("Options and omissions")
+            for group, members in sorted(groups.items()):
+                names = [m["name"] for m in members]
+                st.radio(f"Choose one of {len(members)}", names,
+                         key=f"lb_set_{label}_{group}",
+                         index=names.index(chosen_names[group]))
+            if dropped:
+                st.caption(f"Not in the lease ({len(dropped)})")
+                for index, entry in dropped:
                     st.checkbox(
-                        block["name"], key=key_for("opt", block["name"]),
-                        help=block["text"][:300],
+                        (entry["text"][:90] + ("…" if len(entry["text"]) > 90 else "")),
+                        key=keep_key(index), help=entry["text"][:500],
                     )
+            elif not groups:
+                st.caption("Nothing removed. Untick a paragraph to move it here.")
+
         if master_blocks.get("warnings"):
             with st.expander(f"⚠️ {len(master_blocks['warnings'])} markup warning(s)"):
                 for warning in master_blocks["warnings"]:
