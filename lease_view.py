@@ -49,9 +49,12 @@ STYLE = """
 /* Key Provisions keeps its table, because that is what it is in Word. */
 .lv-kps { width: 100%; border-collapse: collapse; margin: .3rem 0 1rem 0;
           font-size: 12.5px; }
-.lv-kps td { border: 1px solid #b9b9b3; padding: .34rem .5rem;
-             vertical-align: top; }
-.lv-kps td:first-child { font-weight: 700; width: 31%; background: #f2f2ee; }
+/* The colour must be stated. Rendered outside .lv-page the cells inherit the
+   dark theme's light text, which on a light cell is unreadable. */
+.lv-kps td { border: 1px solid #b9b9b3; padding: .34rem .5rem; vertical-align: top;
+             background: #fdfdfb; color: #17171a; }
+.lv-kps td:first-child { font-weight: 700; width: 31%; background: #eeeee9;
+                         color: #17171a; }
 .lv-kps .lv-alt { display: block; padding-top: .25rem; color: #6b6b66;
                   font-size: 11.5px; font-style: italic; }
 

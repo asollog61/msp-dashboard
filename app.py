@@ -6253,11 +6253,31 @@ def render_lease_builder_tab():
                 st.session_state[keep_key(index)] = _default_keep(entry)
             (kept if st.session_state[keep_key(index)] else dropped).append((index, entry))
 
+        # Key provisions get the same keep/drop treatment as paragraphs. They
+        # are table rows rather than body text, so they need their own control
+        # — without one, the Key Provisions section had nothing to act on.
+        provisions = lvw.provisions_in(section)
+        prov_key = lambda i: f"lb_kp_{label}_{i}"
+        prov_in, prov_out = [], []
+        for index, provision in enumerate(provisions):
+            if prov_key(index) not in st.session_state:
+                st.session_state[prov_key(index)] = not provision.get("optional", False)
+            (prov_in if st.session_state[prov_key(index)] else prov_out).append(
+                (index, provision))
+
         with mid_col:
             st.caption(f"In the lease — {lvw._heading(section)}")
-            provisions = lvw.provisions_in(section)
             if provisions:
-                st.html(lvw.STYLE + lvw._kps_table(provisions, {}, label))
+                st.html(lvw.STYLE)
+                for index, provision in prov_in:
+                    tick, name, value = st.columns([0.08, 0.32, 0.60], gap="small")
+                    tick.checkbox(" ", key=prov_key(index), label_visibility="collapsed")
+                    name.markdown(f"**{provision.get('field','')}**")
+                    text = provision.get("text", "")
+                    if provision.get("alternatives"):
+                        text = provision["alternatives"][0]
+                    value.markdown(text[:300] + ("…" if len(text) > 300 else ""))
+                st.divider()
             if not body:
                 st.caption("No body text in this container.")
             for index, entry in kept:
@@ -6278,6 +6298,12 @@ def render_lease_builder_tab():
                 st.radio(f"Choose one of {len(members)}", names,
                          key=f"lb_set_{label}_{group}",
                          index=names.index(chosen_names[group]))
+            if prov_out:
+                st.caption(f"Provisions removed ({len(prov_out)})")
+                for index, provision in prov_out:
+                    st.checkbox(provision.get("field", "") or "provision",
+                                key=prov_key(index),
+                                help=(provision.get("text", "") or "")[:400])
             if dropped:
                 st.caption(f"Not in the lease ({len(dropped)})")
                 for index, entry in dropped:
@@ -6285,8 +6311,8 @@ def render_lease_builder_tab():
                         (entry["text"][:90] + ("…" if len(entry["text"]) > 90 else "")),
                         key=keep_key(index), help=entry["text"][:500],
                     )
-            elif not groups:
-                st.caption("Nothing removed. Untick a paragraph to move it here.")
+            elif not groups and not prov_out:
+                st.caption("Nothing removed. Untick anything on the left to move it here.")
 
         if master_blocks.get("warnings"):
             with st.expander(f"⚠️ {len(master_blocks['warnings'])} markup warning(s)"):
