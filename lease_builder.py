@@ -19,6 +19,10 @@ from docx.text.paragraph import Paragraph
 BASE_DIR = Path(__file__).resolve().parent
 TEMPLATE_DIR = BASE_DIR / "data" / "Lease Builder"
 PUBLISHED_DIR = TEMPLATE_DIR / "Published"
+# Hand-authored masters were moved into their own subfolder so the data
+# directory stops mixing source documents with generated ones. Both places are
+# scanned, because older checkouts still keep them at the top level.
+MASTERS_DIR = TEMPLATE_DIR / "Templates"
 PUBLISHED_PREFIX = "📦 "
 CLAUSE_LIBRARY_FILE = TEMPLATE_DIR / "lease_clause_library.json"
 SECTION_RE = re.compile(
@@ -58,6 +62,7 @@ def discover_templates() -> list[dict[str, str]]:
             templates.append({"label": (prefix + label.strip()).strip(), "path": str(path)})
 
     add_from(TEMPLATE_DIR)
+    add_from(MASTERS_DIR)
     add_from(PUBLISHED_DIR, prefix=PUBLISHED_PREFIX)
     return templates
 

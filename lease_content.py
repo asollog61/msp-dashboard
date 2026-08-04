@@ -32,7 +32,28 @@ import lease_builder as lb
 BASE_DIR = Path(__file__).resolve().parent
 TEMPLATE_DIR = BASE_DIR / "data" / "Lease Builder"
 CONTENT_FILE = TEMPLATE_DIR / "lease_content.json"
-DEFAULT_SOURCE = TEMPLATE_DIR / "2026_07_30 MSP Master_Lease.v8 NNN Retail.docx"
+def _latest_master() -> Path:
+    """The newest hand-authored master, wherever it currently lives.
+
+    Pinning a filename here meant every new version of the master silently
+    stopped being the extract source — v8 was still named long after v9B
+    replaced it, and the file had since been archived. Picking the most
+    recently modified .docx keeps Re-extract pointed at the document actually
+    being edited.
+    """
+    candidates = []
+    for folder in (TEMPLATE_DIR / "Templates", TEMPLATE_DIR):
+        if folder.exists():
+            candidates += [
+                path for path in folder.glob("*.docx")
+                if not path.name.startswith("~$") and " TEST" not in path.stem.upper()
+            ]
+    if not candidates:
+        return TEMPLATE_DIR / "master.docx"
+    return max(candidates, key=lambda path: path.stat().st_mtime)
+
+
+DEFAULT_SOURCE = _latest_master()
 
 CONTENT_VERSION = 1
 
