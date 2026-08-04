@@ -77,7 +77,8 @@ try:
         (lsp, ("space_records", "find_space", "resolve", "resolve_provisions",
                "token_names", "field_label", "unresolved", "SPACE_TOKEN_RE")),
         (lbk, ("read_master", "report", "paragraph_colour", "block_name")),
-        (lvw, ("render_document", "render_options", "render_nav", "STYLE",
+        (lvw, ("render_document", "render_options", "STYLE", "groups_in",
+               "optional_in", "provisions_in",
                "default_selection", "find_container", "first_with_decisions",
                "decisions_in")),
         (lstore, ("build_store", "LeaseStore", "LocalBackend", "GitHubBackend",
@@ -6194,10 +6195,11 @@ def render_lease_builder_tab():
         st.caption("MSP Tenancy workbook not found — [Space:...] tokens cannot resolve.")
 
     # ---- 5. Document -------------------------------------------------------
-    # Navigation on the left, the lease on the right. The rail links carry
-    # ?lb_section= rather than a bare #anchor, because Streamlit reruns on a
-    # query change and only scrolls on an anchor — the query is what lets a
-    # click actually change which section is rendered.
+    # Navigation and the include/exclude controls are native widgets, not HTML.
+    # st.html renders inside an iframe, so a link in it cannot drive the parent
+    # app — clicking one opened a new tab instead of changing the section.
+    # Widgets talk to session state directly, which is what makes a checkbox
+    # move a clause between "in" and "out" and have the text update.
     st.markdown("##### 5 · Document")
     try:
         _stamp = Path(chosen_master).stat().st_mtime
@@ -6207,37 +6209,65 @@ def render_lease_builder_tab():
     if master_blocks is None:
         st.warning("Could not read the master's structure.")
     else:
-        picked = st.query_params.get("lb_section")
-        active = lvw.find_container(master_blocks, picked)
-        selection = lvw.default_selection(master_blocks)
-
-        # st.markdown strips <style>, which printed the whole stylesheet as
-        # visible text. st.html renders it, and the sheet is injected once
-        # rather than once per pane.
         st.html(lvw.STYLE)
-        nav_col, doc_col = st.columns([1, 3], gap="medium")
+        pickable = [c for c in master_blocks["containers"]
+                    if c.get("body") or lvw.provisions_in(c)]
+
+        def _label(container):
+            count = lvw.decisions_in(container)
+            head = lvw._heading(container)
+            return f"{head}  ·  {count} to decide" if count else head
+
+        nav_col, main_col = st.columns([1, 3], gap="medium")
         with nav_col:
-            st.html(
-                f'<div style="max-height:78vh;overflow-y:auto">'
-                f'{lvw.render_nav(master_blocks, str(active["label"]) if active else None)}'
-                f'</div>'
+            st.caption("Sections")
+            chosen_section = st.radio(
+                "Section", pickable, format_func=_label, key="lb_doc_section",
+                label_visibility="collapsed",
             )
-        with doc_col:
-            only = str(active["label"]) if active else None
-            st.caption(
-                f"{lvw._heading(active)} — as it reads" if active
-                else "Whole lease — as it reads. Pick a section on the left to focus it."
+
+        # Selections live in session state so a checkbox survives the rerun.
+        key_for = lambda kind, name: f"lb_sel_{chosen_section['label']}_{kind}_{name}"
+        selection = {}
+        label = str(chosen_section["label"])
+        for group, members in lvw.groups_in(chosen_section).items():
+            picked = st.session_state.get(key_for("set", group), members[0]["name"])
+            selection[f"{label}|set{group}"] = picked
+        for block in lvw.optional_in(chosen_section):
+            selection[f"{label}|opt|{block['name']}"] = bool(
+                st.session_state.get(key_for("opt", block["name"]), False)
             )
-            st.html(
-                f'<div style="max-height:60vh;overflow-y:auto;padding:.2rem">'
-                f'{lvw.render_document(master_blocks, selection, only=only)}</div>'
-            )
-            if active is not None and lvw.decisions_in(active):
-                st.caption("Options in this section")
+
+        with main_col:
+            text_col, opt_col = st.columns([3, 2], gap="medium")
+            with text_col:
+                st.caption("In the lease")
                 st.html(
-                    f'<div style="max-height:40vh;overflow-y:auto;padding-right:.6rem">'
-                    f'{lvw.render_options(active, selection)}</div>'
+                    f'<div style="max-height:62vh;overflow-y:auto;padding:.2rem">'
+                    f'{lvw.render_document(master_blocks, selection, only=label)}</div>'
                 )
+            with opt_col:
+                st.caption("Options")
+                groups = lvw.groups_in(chosen_section)
+                optional = lvw.optional_in(chosen_section)
+                if not groups and not optional:
+                    st.caption("Nothing to decide in this section.")
+                for group, members in sorted(groups.items()):
+                    names = [m["name"] for m in members]
+                    st.radio(
+                        f"Choose one of {len(members)}", names,
+                        key=key_for("set", group),
+                        index=names.index(selection[f"{label}|set{group}"]),
+                    )
+                    with st.expander("See the wording", expanded=False):
+                        for member in members:
+                            st.html(f'<div class="lv-choice"><span class="lv-name">'
+                                    f'{member["name"]}</span>{member["text"][:600]}</div>')
+                for block in optional:
+                    st.checkbox(
+                        block["name"], key=key_for("opt", block["name"]),
+                        help=block["text"][:300],
+                    )
         if master_blocks.get("warnings"):
             with st.expander(f"⚠️ {len(master_blocks['warnings'])} markup warning(s)"):
                 for warning in master_blocks["warnings"]:
