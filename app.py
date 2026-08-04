@@ -36,7 +36,6 @@ try:
     from lease_builder import (
         BOOKMARK_LABELS,
         build_word_document,
-        discover_templates,
         find_kp_references,
         humanize_bookmark,
         inspect_template,
@@ -48,7 +47,6 @@ try:
         normalize_kp_value,
         load_clause_library,
         publish_template_docx,
-        PUBLISHED_PREFIX,
     )
     import lease_format as lf
     import lease_content as lc
@@ -68,7 +66,7 @@ try:
               "settings_diff", "default_settings", "validate_settings",
               "DEFAULT_PROFILE_NAME", "DEFAULTS")),
         (lc, ("load_content", "extract_from_docx", "write_content",
-              "available_masters")),
+              "available_masters", "TEMPLATE_DIR")),
         (lm, ("parse_blocks", "to_html", "to_markup")),
         (lr, ("render_lease", "bookmark_names", "dangling_anchors")),
         (ld, ("normalize_store", "migrate_stores", "copy_document",
@@ -5931,7 +5929,7 @@ def _lb_render_section_preview(draft_state, preview_sections, focus_section, wor
 
 def _lb_render_template_header(working_template, saved_docs, profiles, profile_name,
                                payload_builder, editable=True, action_slot=None,
-                               extract_slot=None, format_slot=None):
+                               format_slot=None):
     """The three things that identify what you are editing, at the top.
 
     1. which template, and how to save it
@@ -6041,59 +6039,6 @@ def _lb_render_template_header(working_template, saved_docs, profiles, profile_n
         else:
             st.markdown(f"#### 📄 {working_template if existing else 'New template'}")
 
-    # ---- 2. Content -----------------------------------------------------
-    # Rendered into the row reserved at the very top of the tab: which
-    # master to read from is the first decision, before anything is named.
-    extract_home = extract_slot if extract_slot is not None else st.container()
-    with extract_home:
-        sections = library.get("sections", [])
-        provisions = library.get("key_provisions", [])
-        extracted = str(library.get("extracted_at", ""))[:10]
-        st.markdown("##### 1 · Master document")
-        source_col, extract_col, _src_pad = st.columns([2.6, 1.1, 2.3])
-        content_col = st.container()
-        if sections:
-            revisions = library.get("tracked_changes_resolved") or {}
-            note = (
-                f" · {revisions.get('insertions', 0)} tracked edits resolved"
-                if revisions.get("insertions") else ""
-            )
-            content_col.caption(
-                f"**Content** · `lease_content.json` · {len(sections)} sections · "
-                f"{len(provisions)} key provisions · extracted {extracted}{note}"
-            )
-        else:
-            content_col.warning(
-                "No extracted content found. Run `python lease_content.py --extract` "
-                "to read the master lease into JSON."
-            )
-        # Which Word file the clause library is read from. This is not the same as
-        # the "base Word template" above: that one feeds the legacy generator, this
-        # one is where every section's text actually comes from. Having only the
-        # former visible made the real source impossible to see or change.
-        masters = lc.available_masters() if editable else []
-        chosen_master = masters[0] if masters else None
-        if editable:
-            if masters:
-                chosen_master = source_col.selectbox(
-                    "Extract from", masters, format_func=lambda path: path.name,
-                    key="lb_extract_source", label_visibility="collapsed",
-                    help="The master .docx that Re-extract reads clause text from. "
-                         "Newest first.",
-                )
-            else:
-                source_col.caption("No master .docx found in data/Lease Builder/Templates.")
-
-        if editable and extract_col.button("🔄 Re-extract", key="lb_reextract",
-                                           width="stretch", disabled=not masters):
-            try:
-                written = lc.write_content(lc.extract_from_docx(chosen_master))
-                st.success(
-                    f"Re-extracted {Path(chosen_master).name} into {Path(written).name}."
-                )
-                st.rerun()
-            except Exception as exc:
-                st.error(f"Could not re-extract: {type(exc).__name__}: {exc}")
 
     # ---- 3. Formatting --------------------------------------------------
     # Rendered under the Save buttons and above the Space picker.
@@ -6174,10 +6119,8 @@ def render_lease_builder_tab():
             )
         return
 
-    templates = discover_templates()
-    if not templates:
-        st.warning("No DOCX lease templates were found in data/Lease Builder.")
-        return
+    # discover_templates() is gone: the master picked in step 1 is the only
+    # Word document the tab uses, so there is no second list to reconcile.
 
     saved_templates = _read_gsheet_config(LEASE_TEMPLATE_SHEET) or {}
     saved_leases = _read_gsheet_config(SAVED_LEASE_SHEET) or {}
@@ -6245,7 +6188,80 @@ def render_lease_builder_tab():
     # formatting, choose its space, then edit provisions. Two of these rows
     # depend on draft_state, which does not exist yet, so they are reserved
     # here and filled once it does.
-    lb_extract_slot = st.container()
+    # ---- 1. Master document ------------------------------------------------
+    # One Word file, not two. This master is both the source the clause library
+    # is extracted from and the base the Word generator builds on — there was
+    # never a reason for those to be different documents, and having two
+    # pickers meant the lease could be generated from a file that had nothing
+    # to do with the text on screen.
+    st.markdown("##### 1 · Master document")
+    library = lc.load_content()
+    masters = lc.available_masters()
+    if not masters:
+        st.warning(
+            "No master .docx found. Put one in `data/Lease Builder/Templates`, "
+            "or upload one below."
+        )
+    source_col, extract_col, _src_pad = st.columns([2.6, 1.1, 2.3])
+    chosen_master = None
+    if masters:
+        chosen_master = source_col.selectbox(
+            "Master", masters, format_func=lambda path: path.name,
+            key="lb_extract_source", label_visibility="collapsed",
+            help="The master .docx the clause library is read from, and the "
+                 "base the generated lease is built on. Newest first.",
+        )
+    if extract_col.button("🔄 Re-extract", key="lb_reextract",
+                          width="stretch", disabled=not masters):
+        try:
+            written = lc.write_content(lc.extract_from_docx(chosen_master))
+            st.success(
+                f"Re-extracted {Path(chosen_master).name} into {Path(written).name}. "
+                "Commit and push lease_content.json to keep this past the next "
+                "redeploy — Streamlit Cloud rebuilds its filesystem from the repo."
+            )
+            st.rerun()
+        except Exception as exc:
+            st.error(f"Could not re-extract: {type(exc).__name__}: {exc}")
+
+    with st.expander("⬆️ Upload a different master (.docx)", expanded=not masters):
+        st.caption(
+            "The app runs on Streamlit Cloud and cannot browse your computer, so "
+            "a master is uploaded rather than opened by path. It lands in "
+            "`data/Lease Builder/Templates` and joins the list above."
+        )
+        uploaded_master = st.file_uploader(
+            "Master lease", type=["docx"], key="lb_upload_master",
+            label_visibility="collapsed",
+        )
+        if uploaded_master is not None and st.button(
+            "Add to masters", key="lb_add_master", width="stretch"
+        ):
+            try:
+                target = lc.TEMPLATE_DIR / "Templates" / Path(uploaded_master.name).name
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_bytes(uploaded_master.getbuffer())
+                st.success(f"Added {target.name}. Select it above, then Re-extract.")
+                st.rerun()
+            except Exception as exc:
+                st.error(f"Could not save it: {type(exc).__name__}: {exc}")
+
+    content_sections = library.get("sections", [])
+    if content_sections:
+        revisions = library.get("tracked_changes_resolved") or {}
+        note = (f" · {revisions.get('insertions', 0)} tracked edits resolved"
+                if revisions.get("insertions") else "")
+        st.caption(
+            f"Content · `lease_content.json` · {len(content_sections)} sections · "
+            f"{len(library.get('key_provisions', []))} key provisions · "
+            f"extracted {str(library.get('extracted_at', ''))[:10]}{note}"
+        )
+    else:
+        st.warning("No extracted content yet — pick a master above and Re-extract.")
+
+    if not masters:
+        return
+
     st.markdown("##### 2 · This document")
     head2, _head_pad = st.columns([2.6, 3.4])
     # A "Save As" from the previous run parks its new name here. Applying it
@@ -6341,17 +6357,9 @@ def render_lease_builder_tab():
 
     draft_name = working_template if working_template != LB_NEW_TEMPLATE else "MSP Lease"
 
-    with st.expander("⚙️ Advanced — base Word template", expanded=False):
-        st.caption(
-            "Legacy path. Clause text now comes from `lease_content.json`; this "
-            "file is only still used by the old Word-template generator."
-        )
-        selected_label = st.selectbox(
-            "Base lease template (.docx)", [item["label"] for item in templates],
-            key="lb_template",
-        )
-
-    template = next(item for item in templates if item["label"] == selected_label)
+    # The base for the Word generator is the master chosen in step 1.
+    selected_label = chosen_master.stem
+    template = {"label": selected_label, "path": str(chosen_master)}
 
     try:
         template_data = inspect_template(template["path"])
@@ -6503,7 +6511,6 @@ def render_lease_builder_tab():
         working_template, saved_docs, saved_profiles,
         draft_state.get("format_profile"), template_payload, editable=True,
         action_slot=lb_action_slot,
-        extract_slot=lb_extract_slot,
         format_slot=lb_format_slot,
     )
     draft_state["format_profile"] = active_profile
