@@ -249,7 +249,7 @@ def render_document(master: dict[str, Any], selection: dict | None = None,
     fixed text and always prints.
     """
     selection = selection if selection is not None else default_selection(master)
-    parts = [STYLE, '<div class="lv-page">']
+    parts = ['<div class="lv-page">']
 
     for container in master["containers"]:
         label = str(container["label"])
@@ -329,7 +329,7 @@ def render_nav(master: dict[str, Any], active: str | None = None) -> str:
             + "</a>"
         )
     rows.append("</div>")
-    return STYLE + "".join(rows)
+    return "".join(rows)
 
 
 def render_index(master: dict[str, Any], active: str | None = None) -> str:
@@ -354,7 +354,7 @@ def render_options(container: dict[str, Any], selection: dict | None = None) -> 
     """Everything this section could say instead of what it says now."""
     label = str(container["label"])
     selection = selection or {}
-    parts = [STYLE, '<div class="lv-opts">']
+    parts = ['<div class="lv-opts">']
 
     for provision in provisions_in(container):
         if not (provision.get("alternatives") or provision.get("optional")):
@@ -407,7 +407,7 @@ def render_options(container: dict[str, Any], selection: dict | None = None) -> 
         )
         parts.append("</div>")
 
-    if len(parts) == 2:
+    if len(parts) == 1:
         parts.append('<div class="lv-card">Nothing to decide in this section.</div>')
     parts.append("</div>")
     return "".join(parts)

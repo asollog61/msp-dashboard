@@ -23,7 +23,6 @@ import gspread
 from google.oauth2.service_account import Credentials
 import openpyxl
 from openpyxl.styles import Alignment, Font as _XLFont
-from openpyxl.worksheet.datavalidation import DataValidation
 import json
 
 try:
@@ -78,7 +77,7 @@ try:
         (lsp, ("space_records", "find_space", "resolve", "resolve_provisions",
                "token_names", "field_label", "unresolved", "SPACE_TOKEN_RE")),
         (lbk, ("read_master", "report", "paragraph_colour", "block_name")),
-        (lvw, ("render_document", "render_options", "render_nav",
+        (lvw, ("render_document", "render_options", "render_nav", "STYLE",
                "default_selection", "find_container", "first_with_decisions",
                "decisions_in")),
         (lstore, ("build_store", "LeaseStore", "LocalBackend", "GitHubBackend",
@@ -4618,166 +4617,6 @@ def _lb_bool(value, default=False):
     return default
 
 
-def _lb_export_key_provisions_xlsx(rows):
-    """Export the editable key-provision table; Bookmark is hidden but retained for re-import."""
-    export_rows = []
-    for row in rows:
-        alternates = list(row.get("Alternates", []))[:10]
-        export_row = {
-            "Group": row.get("Group", "Optional"),
-            "Use": bool(row.get("Include", True)),
-            "Key Provision": row.get("Field", ""),
-            # Carets become real newlines so the cell reads naturally in Excel;
-            # Alt+Enter there comes back as a caret on import.
-            "Current Value": kp_value_plain(row.get("Value", "")),
-            "Choice": ld.normalize_choice(row),
-            "Link": bool(row.get("Link", False)),
-            "Target Section": row.get("Section", ""),
-            "Bookmark": row.get("Bookmark", ""),
-        }
-        for index in range(10):
-            export_row[f"Alt {index + 1}"] = (
-                kp_value_plain(alternates[index]) if index < len(alternates) else ""
-            )
-        export_rows.append(export_row)
-    output = BytesIO()
-    with pd.ExcelWriter(output, engine="openpyxl") as writer:
-        pd.DataFrame(export_rows).to_excel(writer, index=False, sheet_name="Key Provisions")
-        worksheet = writer.book["Key Provisions"]
-        worksheet.freeze_panes = "A2"
-        worksheet.auto_filter.ref = worksheet.dimensions
-        # Choice sits at E, so everything after it shifts one column right and
-        # Bookmark — the hidden internal id — is now H rather than G.
-        worksheet.column_dimensions["H"].hidden = True
-        widths = {"A": 14, "B": 9, "C": 28, "D": 70, "E": 14, "F": 9, "G": 34}
-        # A real dropdown in Excel, so the round trip is a chooser too and not
-        # a free-text field where "alt2" silently fails to match.
-        if worksheet.max_row > 1:
-            choice_rule = DataValidation(
-                type="list",
-                formula1='"' + ",".join(
-                    f"Alt {index}" for index in range(1, 11)
-                ) + '"',
-                allow_blank=True,
-                showDropDown=False,
-            )
-            worksheet.add_data_validation(choice_rule)
-            choice_rule.add(f"E2:E{worksheet.max_row}")
-        for column, width in widths.items():
-            worksheet.column_dimensions[column].width = width
-        # Multi-line values are only visible in Excel when the cell wraps.
-        for excel_row in worksheet.iter_rows(min_row=2, min_col=4):
-            for cell in excel_row:
-                cell.alignment = Alignment(wrap_text=True, vertical="top")
-    return output.getvalue()
-
-
-def _lb_import_key_provisions_xlsx(uploaded_file, existing_rows, section_labels):
-    """Merge an uploaded key-provision workbook into the current draft by Bookmark or name."""
-    uploaded_file.seek(0)
-    imported = pd.read_excel(uploaded_file, sheet_name=0, dtype=object)
-    imported = imported.astype(object).where(imported.notna(), "")
-    aliases = {
-        "Group": "Group", "Use": "Include", "Include": "Include",
-        "Key Provision": "Field", "Field": "Field", "Name": "Field",
-        "Current Value": "Value", "Value": "Value", "Link": "Link", "Target Section": "Section",
-        "Section": "Section", "Bookmark": "Bookmark", "Choice": "Choice",
-    }
-    normalized = {}
-    for column in imported.columns:
-        key = aliases.get(str(column).strip())
-        if key:
-            normalized[key] = column
-    if "Field" not in normalized and "Bookmark" not in normalized:
-        raise ValueError("The workbook needs a Key Provision/Field or Bookmark column.")
-
-    by_bookmark = {str(row.get("Bookmark", "")): row for row in existing_rows}
-    by_field = {str(row.get("Field", "")).strip().lower(): row for row in existing_rows}
-    # Rows are collected in spreadsheet order, so reordering in Excel reorders
-    # the provisions too. Matching is by identity, not by id(), which is not a
-    # safe key for dicts that come and go during the loop.
-    ordered = []
-    matched = set()
-    for _, source in imported.iterrows():
-        bookmark = str(source.get(normalized.get("Bookmark", "__missing__"), "")).strip()
-        field = str(source.get(normalized.get("Field", "__missing__"), "")).strip()
-        if not bookmark and not field:
-            continue  # a blank spreadsheet row is padding, not a provision
-        row = by_bookmark.get(bookmark) if bookmark else by_field.get(field.lower())
-        if row is None:
-            row = {
-                "Group": "Optional",
-                "Include": True,
-                "Field": field or "New Key Provision",
-                "Value": "",
-                "Alternates": [],
-                "Choice": "",
-                "Link": False,
-                "Section": next(iter(section_labels.values())),
-                "Bookmark": "Custom_" + uuid4().hex[:12],
-            }
-        else:
-            matched.add(str(row.get("Bookmark", "")) or str(row.get("Field", "")))
-        ordered.append(row)
-        if "Group" in normalized:
-            group = str(source[normalized["Group"]]).strip()
-            row["Group"] = group if group in {"Mandatory", "Optional"} else "Optional"
-        if "Include" in normalized:
-            row["Include"] = _lb_bool(source[normalized["Include"]], row.get("Include", True))
-        if "Field" in normalized and field:
-            row["Field"] = field
-        if "Value" in normalized:
-            # An Alt+Enter newline typed in Excel is stored as a caret.
-            row["Value"] = normalize_kp_value(source[normalized["Value"]])
-        # Keep literal Alt 1–Alt 10 positions. Empty earlier cells must not
-        # shift Alt 3 into Alt 1.
-        alternate_slots = []
-        for index in range(1, 11):
-            column = next(
-                (column_name for column_name in imported.columns
-                 if str(column_name).strip().lower() == f"alt {index}".lower()),
-                None,
-            )
-            alternate_slots.append(
-                normalize_kp_value(source[column]) if column is not None else ""
-            )
-        row["Alternates"] = alternate_slots
-        if "Choice" in normalized:
-            row["Choice"] = str(source[normalized["Choice"]]).strip()
-        else:
-            # A workbook exported before the Choice column existed. The value
-            # and the alternates are both present, so recover which slot was
-            # in use instead of importing the alternates and selecting none.
-            row.update(ld.infer_choice(row))
-        # Applied after Alternates are in place, so a choice typed in Excel is
-        # validated against the slots from the same upload rather than the ones
-        # that happened to be there before it.
-        row.update(ld.apply_choice(row))
-        if "Link" in normalized:
-            row["Link"] = _lb_bool(source[normalized["Link"]], row.get("Link", False))
-        if "Section" in normalized:
-            target = str(source[normalized["Section"]]).strip()
-            target = section_labels.get(target, target) if isinstance(section_labels, dict) else target
-            row["Section"] = target if target in section_labels.values() else next(iter(section_labels.values()))
-    # The spreadsheet is the whole list, not a set of additions: a provision
-    # deleted there has to disappear here, otherwise there is no way to remove
-    # one at all. Removals are returned so the caller can report them rather
-    # than quietly dropping rows out of a lease.
-    removed = [
-        str(row.get("Field", ""))
-        for row in existing_rows
-        if (str(row.get("Bookmark", "")) or str(row.get("Field", ""))) not in matched
-    ]
-    # A sheet that matched nothing is far more likely to be the wrong file than
-    # a deliberate wipe, so the existing rows are kept and the caller is told.
-    if not ordered:
-        raise ValueError(
-            "No key provisions were found in that spreadsheet. Nothing was changed — "
-            "check that it has Bookmark and Field columns."
-        )
-    return ordered, removed
-
-
 def _lb_section_body(section_number, text):
     text = str(text or "").strip()
     pattern = re.compile(
@@ -6372,13 +6211,16 @@ def render_lease_builder_tab():
         active = lvw.find_container(master_blocks, picked)
         selection = lvw.default_selection(master_blocks)
 
+        # st.markdown strips <style>, which printed the whole stylesheet as
+        # visible text. st.html renders it, and the sheet is injected once
+        # rather than once per pane.
+        st.html(lvw.STYLE)
         nav_col, doc_col = st.columns([1, 3], gap="medium")
         with nav_col:
-            st.markdown(
+            st.html(
                 f'<div style="max-height:78vh;overflow-y:auto">'
                 f'{lvw.render_nav(master_blocks, str(active["label"]) if active else None)}'
-                f'</div>',
-                unsafe_allow_html=True,
+                f'</div>'
             )
         with doc_col:
             only = str(active["label"]) if active else None
@@ -6386,17 +6228,15 @@ def render_lease_builder_tab():
                 f"{lvw._heading(active)} — as it reads" if active
                 else "Whole lease — as it reads. Pick a section on the left to focus it."
             )
-            st.markdown(
+            st.html(
                 f'<div style="max-height:60vh;overflow-y:auto;padding:.2rem">'
-                f'{lvw.render_document(master_blocks, selection, only=only)}</div>',
-                unsafe_allow_html=True,
+                f'{lvw.render_document(master_blocks, selection, only=only)}</div>'
             )
             if active is not None and lvw.decisions_in(active):
                 st.caption("Options in this section")
-                st.markdown(
+                st.html(
                     f'<div style="max-height:40vh;overflow-y:auto;padding-right:.6rem">'
-                    f'{lvw.render_options(active, selection)}</div>',
-                    unsafe_allow_html=True,
+                    f'{lvw.render_options(active, selection)}</div>'
                 )
         if master_blocks.get("warnings"):
             with st.expander(f"⚠️ {len(master_blocks['warnings'])} markup warning(s)"):
@@ -6589,303 +6429,13 @@ def render_lease_builder_tab():
     use_label = "Use"
 
     with left:
-        st.markdown("##### 6 · Key Provisions")
-        st.caption(
-            "Every provision in the base template is listed. Fill in **Alt 1–Alt 10** to define the "
-            "values a lease can choose from. **Default On** decides whether a new lease starts with "
-            "that provision checked."
-        )
-        command_col, count_col = st.columns([2, 3])
-        master_key = f"lb_kp_master_{Path(template['path']).stem}"
-        master_applied_key = master_key + "_applied"
-        st.session_state.setdefault(master_key, True)
-        st.session_state.setdefault(master_applied_key, True)
-        master_value = command_col.checkbox(f"{use_label}: all / none", key=master_key)
-        if master_value != st.session_state[master_applied_key]:
-            for row in draft_state["key_provisions"]:
-                row["Include"] = master_value
-            draft_state["kp_version"] += 1
-            st.session_state[master_applied_key] = master_value
-            st.rerun()
-
-        # Always-visible Excel controls sit directly above the grid. The uploader
-        # lives in a popover so it reads as a button rather than a drop zone.
-        excel_col, upload_col = st.columns([1, 1])
-        excel_col.download_button(
-            "⬇️ Download Excel",
-            data=_lb_export_key_provisions_xlsx(draft_state["key_provisions"]),
-            file_name="MSP_Key_Provisions.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            key="lb_download_key_provisions_excel",
-            width="stretch",
-        )
-        with upload_col.popover("⬆️ Upload Excel", width="stretch"):
-            st.caption("Bulk-edit the Alt 1–Alt 10 choice lists in Excel, then upload the workbook back.")
-            uploaded_kp = st.file_uploader(
-                "Key Provisions workbook",
-                type=["xlsx", "xls"],
-                key="lb_upload_key_provisions_excel",
-                label_visibility="collapsed",
-            )
-            if uploaded_kp is not None and st.button(
-                "Import Uploaded Table", key="lb_import_key_provisions_excel", width="stretch"
-            ):
-                try:
-                    imported_rows, removed_fields = _lb_import_key_provisions_xlsx(
-                        uploaded_kp, draft_state["key_provisions"], section_labels
-                    )
-                    # A provision still cited by a [KP:] token would leave a hole
-                    # in the clause, so say so before it reaches a signed lease.
-                    still_cited = sorted({
-                        name for name in removed_fields
-                        if any(name in find_kp_references(
-                                   str(config.get("text", "")), removed_fields)
-                               for config in draft_state["sections"].values())
-                    })
-                    draft_state["key_provisions"] = imported_rows
-                    draft_state["kp_version"] += 1
-                    if removed_fields:
-                        st.warning(
-                            f"Imported. {len(removed_fields)} provision(s) were not in the "
-                            f"spreadsheet and have been removed: {', '.join(removed_fields)}"
-                        )
-                    else:
-                        st.success("Key Provisions table imported.")
-                    if still_cited:
-                        st.error(
-                            "These removed provisions are still cross-referenced in clause "
-                            f"text and will now print as literal tokens: {', '.join(still_cited)}"
-                        )
-                    st.rerun()
-                except Exception as exc:
-                    st.error(f"Key Provisions import failed: {exc}")
-
-        # Template mode shows every section, so citations are not filtered there.
-        kp_citations = _lb_token_citations(sections, draft_state, include_only=False)
-
-        # Single editable Key Provisions grid. The drag handle is the only reorder control.
-        draft_state["key_provisions"] = sorted(
-            draft_state["key_provisions"],
-            key=lambda row: 0 if bool(row.get("Include")) else 1,
-        )
-        # Choice picks which text the provision actually uses. It sits between
-        # Current Value and Alt 1, offers only the alternates that have text,
-        # and copies the winner into Current Value so the cell always shows
-        # what will print. Choice itself is saved, so a lease records that it
-        # uses "Alt 2" rather than only the words that happened to be there.
-        grid_rows = []
-        for source_row in draft_state["key_provisions"]:
-            row = ld.apply_choice(source_row)
-            slots = [str(value) for value in row.get("Alternates", [])[:10]]
-            slots += [""] * (10 - len(slots))
-            row["Current Value"] = row.get("Value", "")
-            row["Choice"] = ld.normalize_choice(row)
-            for index, value in enumerate(slots, start=1):
-                row[f"Alt {index}"] = value
-            cited_in = kp_citations.get(str(row.get("Field", "")), [])
-            row["Linked"] = (
-                "Yes — " + ", ".join(f"§{number}" for number in cited_in) if cited_in else ""
-            )
-            row.pop("Value", None)
-            row.pop("Alternates", None)
-            row.pop("Link", None)
-            row.pop("Section", None)
-            grid_rows.append(row)
-        kp_df = pd.DataFrame(grid_rows)
-        # Drag must stay the first column (it is the reorder handle) and Bookmark
-        # is an internal id, so neither is offered to the column config editor.
-        KP_TAB_KEY = "key provisions"
-        configurable_columns = [
-            column for column in kp_df.columns if column not in ("Drag", "Bookmark")
-        ]
-        ordered_columns = get_column_order(KP_TAB_KEY, configurable_columns)
-        # A saved column order predates Choice, and get_column_order appends
-        # anything it has never seen — which would strand the chooser out past
-        # Alt 10. Put it back beside the value it controls.
-        if "Choice" in ordered_columns and "Current Value" in ordered_columns:
-            ordered_columns = [column for column in ordered_columns if column != "Choice"]
-            ordered_columns.insert(ordered_columns.index("Current Value") + 1, "Choice")
-        tail = ["Bookmark"] if "Bookmark" in kp_df.columns else []
-        kp_df = kp_df[[column for column in ordered_columns if column in kp_df.columns] + tail]
-        kp_df.insert(0, "Drag", "")
-        grid_builder = GridOptionsBuilder.from_dataframe(kp_df)
-        grid_builder.configure_default_column(resizable=True, sortable=False, filter=False, editable=False)
-        grid_builder.configure_column("Drag", header_name="", rowDrag=True, editable=False, width=42, suppressMenu=True)
-        # Group, Link and Target Section describe the template's structure, so a
-        # lease can read them but only template mode can change them.
-        grid_builder.configure_column("Group", header_name="Group", editable=True, width=105,
-                                      cellEditor="agSelectCellEditor",
-                                      cellEditorParams={"values": ["Mandatory", "Optional"]})
-        grid_builder.configure_column("Include", header_name=use_label, editable=True, width=88,
-                                      cellRenderer="agCheckboxCellRenderer", cellEditor="agCheckboxCellEditor")
-        grid_builder.configure_column("Field", header_name="Key Provision", editable=True, width=165)
-        # Only slots that actually hold text are offered. Choosing an empty
-        # "Alt 7" would blank the provision in the generated lease.
-        choice_options_js = JsCode("""
-            function(params) {
-                var values = [''];
-                for (var i = 1; i <= 10; i++) {
-                    var slot = params.data['Alt ' + i];
-                    if (slot !== null && slot !== undefined && String(slot).trim() !== '') {
-                        values.push('Alt ' + i);
-                    }
-                }
-                return { values: values };
-            }
-        """)
-        # Read-only: the value mirrors the chosen alternate. Typing here would
-        # be discarded the moment the choice was re-applied, which is worse
-        # than not offering it. Edit the Alt column instead.
-        grid_builder.configure_column("Current Value", header_name="Current Value",
-                                      editable=False, width=330)
-        grid_builder.configure_column(
-            "Choice", header_name="Choice", editable=True, width=120,
-            cellEditor="agSelectCellEditor", cellEditorParams=choice_options_js,
-        )
-        # Linking is read-only: it reflects the KP: tokens found in clause text.
-        grid_builder.configure_column("Linked", header_name="Linked", editable=False, width=170)
-        for index in range(1, 11):
-            grid_builder.configure_column(f"Alt {index}", header_name=f"Alt {index}",
-                                          editable=True, width=185)
-        grid_builder.configure_column("Bookmark", hide=True)
-
-        # Saved widths win over the defaults above, matching the Tenancy tab.
-        kp_width_overrides = get_column_width_overrides(KP_TAB_KEY)
-        for column, width in kp_width_overrides.items():
-            if column in kp_df.columns:
-                grid_builder.configure_column(
-                    column, width=width, initialWidth=width, minWidth=width,
-                    suppressSizeToFit=True, suppressAutoSize=True,
-                )
-
-        # Without this the picked text only appears after Streamlit reruns, so
-        # the grid looks like the choice did nothing. This updates the cell in
-        # the browser the instant the dropdown closes.
-        on_choice_changed = JsCode("""
-            function(params) {
-                if (!params.colDef || params.colDef.field !== 'Choice') { return; }
-                var choice = params.newValue ? String(params.newValue).trim() : '';
-                var text = '';
-                var match = /^Alt\s*(\d+)$/i.exec(choice);
-                if (match) {
-                    var slot = params.data['Alt ' + match[1]];
-                    text = (slot === null || slot === undefined) ? '' : String(slot);
-                }
-                params.node.setDataValue('Current Value', text);
-            }
-        """)
-        grid_builder.configure_grid_options(
-            onCellValueChanged=on_choice_changed,
-            rowDragManaged=True,
-            animateRows=True,
-            suppressMoveWhenRowDragging=False,
-            rowDragEntireRow=False,
-        )
-        grid_result = AgGrid(
-            kp_df,
-            gridOptions=grid_builder.build(),
-            height=min(760, 96 + len(kp_df) * 42),
-            theme="streamlit",
-            update_mode=GridUpdateMode.MODEL_CHANGED,
-            data_return_mode=DataReturnMode.AS_INPUT,
-            fit_columns_on_grid_load=False,
-            allow_unsafe_jscode=True,
-            # kp_version has to be in the key. AgGrid keeps its row model in the
-            # browser and keys it on this string, so without the version an
-            # Excel import writes the new rows into draft_state, the grid hands
-            # back the rows it was already holding, and the read-back below
-            # overwrites the import with pre-import data. The import appeared to
-            # do nothing at all.
-            key=(f"lb_kp_grid_v8_{Path(template['path']).stem}"
-                 f"_{draft_state.get('kp_version', 0)}"),
-        )
-        edited_kp = grid_result.data if hasattr(grid_result, "data") else grid_result["data"]
-        if edited_kp is None:
-            edited_kp = kp_df
-        edited_rows = []
-        previous_by_bookmark = {
-            str(row.get("Bookmark", "")): row for row in draft_state["key_provisions"]
-        }
-        for row in edited_kp.drop(columns=["Drag"], errors="ignore").to_dict("records"):
-            slots = [str(row.pop(f"Alt {index}", "")).strip() for index in range(1, 11)]
-            current_value = str(row.pop("Current Value", ""))
-            choice = str(row.pop("Choice", "") or ld.NO_CHOICE)
-            row.pop("Linked", None)  # Derived for display only.
-            previous = previous_by_bookmark.get(str(row.get("Bookmark", "")), {})
-            row["Link"] = bool(previous.get("Link", False))
-            row["Section"] = previous.get("Section", section_labels[section_numbers[0]])
-            row["Value"] = current_value
-            row["Alternates"] = slots
-            row["Choice"] = choice
-            # Re-applied every edit, so retyping a chosen alternate updates the
-            # value too rather than leaving the lease on a stale copy.
-            edited_rows.append(ld.apply_choice(row))
-        draft_state["key_provisions"] = edited_rows
-        selected_count = sum(1 for row in edited_rows if bool(row.get("Include")))
-        count_col.caption(f"{len(edited_rows)} provisions · {selected_count} on by default")
-        st.caption(
-            f"Use **{KP_LINE_BREAK}** inside a value to start a new line — "
-            f"`123 Main St{KP_LINE_BREAK}Westfield, NJ{KP_LINE_BREAK}07090`. "
-            "The grid commits on Enter so it cannot hold a real line break; in Excel you can use "
-            "Alt+Enter instead and it converts on import."
-        )
-        render_column_config_editor(KP_TAB_KEY, configurable_columns)
-
-        # Adding and removing provisions is done through the Excel round trip
-        # above, so the whole list can be edited at once and reviewed offline.
-        # The importer still creates and drops rows; only the in-app buttons are
-        # gone.
-
-        # ---- Off-menu value check ----------------------------------------
-        if False:  # provision-level off-menu check retired with the two-mode split
-            off_menu_rows = [
-                row for row in edited_rows
-                if bool(row.get("Include"))
-                and str(row.get("Value", "")).strip()
-                and _lb_is_off_menu(row.get("Value", ""), [
-                    value for value in row.get("Alternates", []) if str(value).strip()
-                ])
-            ]
-            if off_menu_rows:
-                with st.expander(f"⚠️ {len(off_menu_rows)} value(s) not in the template", expanded=False):
-                    st.caption(
-                        "These values were typed for this deal and are not among the template's "
-                        "alternates. Add any that should become a standing choice."
-                    )
-                    add_target = st.selectbox(
-                        "Add to which template?", template_names, key="lb_offmenu_value_target"
-                    )
-                    for row in off_menu_rows:
-                        bookmark = str(row.get("Bookmark", ""))
-                        value_col, button_col = st.columns([4, 1.3])
-                        value_col.markdown(f"**{row.get('Field', '')}** — {row.get('Value', '')}")
-                        if button_col.button("Add as Alt", key=f"lb_offmenu_add_{bookmark}"):
-                            target = dict(saved_templates.get(add_target, {}))
-                            target_rows = [dict(item) for item in target.get("key_provisions", [])]
-                            match = next(
-                                (item for item in target_rows if str(item.get("Bookmark", "")) == bookmark), None
-                            )
-                            if match is None:
-                                st.error("That provision does not exist in the selected template.")
-                            else:
-                                slots = [str(value) for value in match.get("Alternates", [])[:10]]
-                                slots += [""] * (10 - len(slots))
-                                if str(row.get("Value", "")) in slots:
-                                    st.info("That value is already a choice in the template.")
-                                elif "" not in slots:
-                                    st.error("All ten Alt slots are full in that template.")
-                                else:
-                                    slots[slots.index("")] = str(row.get("Value", ""))
-                                    match["Alternates"] = slots
-                                    target["key_provisions"] = target_rows
-                                    target["saved_at"] = datetime.now().isoformat(timespec="seconds")
-                                    updated = dict(saved_templates)
-                                    updated[add_target] = target
-                                    if _write_gsheet_config(LEASE_TEMPLATE_SHEET, updated):
-                                        st.success(f"Added to {add_target}.")
-                                        st.rerun()
-                                    else:
-                                        st.error("Could not write to Google Sheets.")
+        # The Key Provisions grid, its Excel round trip and the alternates
+        # editor all lived here. They are gone: provisions, their values and
+        # their alternatives now come from the master .docx, which is the
+        # only thing that decides what a lease can say. What used to be six
+        # sources of truth is one, and the document view above is where you
+        # read and choose.
+        edited_rows = draft_state["key_provisions"]
 
         # ---- Rent schedule -------------------------------------------------
         if True:
