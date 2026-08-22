@@ -3955,10 +3955,15 @@ def render_reconcile_tab():
     name_map = {}  # key: "Building|YardiSpace" -> spreadsheet tenant name
     try:
         raw = _read_gsheet_config(MAPPING_TAB)
-        if raw:
-            name_map = _json.loads(raw)
+        if isinstance(raw, dict):
+            name_map = raw
+        elif isinstance(raw, str) and raw.strip():
+            # Compatibility with mappings written by the old double-JSON bug.
+            legacy = _json.loads(raw)
+            if isinstance(legacy, dict):
+                name_map = legacy
     except Exception:
-        pass
+        name_map = {}
 
     # Build spreadsheet tenant index keyed by "Building|TenantName" for lookup
     active = [t for t in tenants if t['Tenant'] not in ('-',)] if tenants else []
@@ -4068,7 +4073,9 @@ def render_reconcile_tab():
 
         if mapping_changed:
             name_map = {k: v for k, v in name_map.items() if v}
-            _write_gsheet_config(MAPPING_TAB, _json.dumps(name_map))
+            # _write_gsheet_config serializes dictionaries itself. Passing a JSON
+            # string here used to double-encode the map and made it disappear on reload.
+            _write_gsheet_config(MAPPING_TAB, name_map)
             st.rerun()
 
     # ===========================
