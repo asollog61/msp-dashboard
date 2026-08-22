@@ -1159,6 +1159,11 @@ def normalize_space(space_str, building=None):
     # Keep 3-digit units as-is (102, 104, 106, 108, 201, etc.)
     # Previously stripped leading "10" but spreadsheet now uses full 3-digit format
     
+    # Canonicalize named/apartment units so case differences do not create
+    # fake Sheet Only rows (Exterior vs EXTERIOR; 203_Apt vs 203_APT).
+    if s.upper() in {'EXTERIOR', 'ROOF', 'PARKING', 'ATM', 'PAD', 'BASEMENT', 'STORAGE', 'SIGN', 'BILLBOARD', 'EASEMENT'} or re.match(r'^\d+_APT$', s, re.I):
+        return s.upper()
+
     # For other formats (101, 201, 1286, A-1, O-1, etc.), keep as-is
     return s
 
@@ -1360,127 +1365,87 @@ def parse_yardi_rent_rolls(latest_only=True):
                 doc.close()
                 continue
             
-            # Extract text blocks - each tenant is a block
-            blocks = page.get_text("blocks")
-            
-            for block in blocks:
-                if block[6] != 0:  # Not a text block
-                    continue
-                
-                content = block[4].strip()
-                lines = [l.strip() for l in content.split('\n') if l.strip()]
-                
-                if len(lines) < 5:
-                    continue
-                
-                # First line should be unit number
-                unit = lines[0]
-                
-                # Skip header rows, totals, and summary sections
-                if unit.upper() in ('UNIT', 'TOTAL', 'SUMMARY', 'CURRENT/NOTICE/VACANT', 'FUTURE', 'OCCUPIED', 'TOTALS:', 'GROUPS'):
-                    continue
-                
-                # Skip if doesn't look like a unit number (allow named units like EXTERIOR, ROOF, PARKING)
-                NAMED_UNITS = {'EXTERIOR', 'ROOF', 'PARKING', 'ATM', 'PAD', 'BASEMENT', 'STORAGE', 'SIGN', 'BILLBOARD', 'EASEMENT'}
-                if not any(c.isdigit() for c in unit) and unit.upper() not in NAMED_UNITS:
-                    continue
-                
-                # Parse the tenant line
-                # Expected format: Unit, SqFt, Tenant Name (may be multi-line), Monthly, ..., CAM, ..., dates
-                
-                # Second item should be SqFt (numeric with .00)
-                if len(lines) < 3:
-                    continue
-                
-                # Verify second item looks like a number (SqFt)
-                sqft_str = lines[1]
+            # Yardi exports each row across multiple visual PDF blocks. Parsing
+            # individual blocks drops wrapped tenant names/rows, so parse the full
+            # rent-roll line stream between the Current and Future sections instead.
+            lines = [line.strip() for line in text.split('\n') if line.strip()]
+            try:
+                current_start = next(i for i, line in enumerate(lines)
+                                     if line.upper() == 'CURRENT/NOTICE/VACANT TENANTS') + 1
+            except StopIteration:
+                current_start = 0
+            future_start = next((i for i in range(current_start, len(lines))
+                                 if lines[i].upper().startswith('FUTURE TENANTS/')), len(lines))
+            rent_lines = lines[current_start:future_start]
+
+            named_units = {'EXTERIOR', 'ROOF', 'PARKING', 'ATM', 'PAD', 'BASEMENT',
+                           'STORAGE', 'SIGN', 'BILLBOARD', 'EASEMENT'}
+            amount_re = re.compile(r'^[\d,]+\.\d{2}$')
+            unit_re = re.compile(r'^(?:\d{1,4}(?:[-_][A-Za-z0-9]+)?|[A-Z][A-Z0-9_-]*)$', re.I)
+
+            def _amount(value):
                 try:
-                    sqft = float(sqft_str.replace(',', ''))
+                    return float(value.replace(',', ''))
                 except (ValueError, AttributeError):
+                    return None
+
+            # A real row begins with a unit and a numeric SF value directly after it.
+            starts = []
+            for i in range(len(rent_lines) - 1):
+                unit = rent_lines[i]
+                if not unit_re.match(unit):
                     continue
-                
-                # Extract tenant name (may span multiple lines for d/b/a)
-                # Start from index 2, stop when we hit monthly rent (a larger number)
-                tenant_lines = []
-                idx = 2
-                while idx < len(lines):
-                    line = lines[idx]
-                    # Check if this looks like the monthly rent (larger number, usually 3+ digits before decimal)
-                    if re.match(r'^[\d,]+\.\d{2}$', line):
-                        try:
-                            val = float(line.replace(',', ''))
-                            # If it's > 100, likely monthly rent; if < 100, might be part of tenant name
-                            if val >= 100 or (idx > 2 and val > 0):
-                                break
-                        except (ValueError, AttributeError):
-                            pass
-                    tenant_lines.append(line)
-                    idx += 1
-                
-                tenant_name = ' '.join(tenant_lines).strip()
-                
-                # Skip VACANT units
-                if tenant_name.upper() == 'VACANT':
+                if not any(ch.isdigit() for ch in unit) and unit.upper() not in named_units:
                     continue
-                
-                # Skip if tenant name is empty or looks like garbage
-                if not tenant_name or len(tenant_name) < 2:
+                sqft = _amount(rent_lines[i + 1])
+                if sqft is not None:
+                    starts.append(i)
+
+            for row_index, row_start in enumerate(starts):
+                row_end = starts[row_index + 1] if row_index + 1 < len(starts) else len(rent_lines)
+                row_lines = rent_lines[row_start:row_end]
+                if len(row_lines) < 4:
                     continue
-                
-                # Now extract monthly rent (next item after tenant name)
-                if idx >= len(lines):
+                unit = row_lines[0]
+                sqft = _amount(row_lines[1])
+                if sqft is None:
                     continue
-                
-                monthly_str = lines[idx]
-                try:
-                    monthly = float(monthly_str.replace(',', ''))
-                    # Sanity check - monthly rent should be > 0 (allow named units like easements with $0)
-                    if monthly <= 0 and unit.upper() not in NAMED_UNITS:
-                        continue
-                except (ValueError, AttributeError):
-                    continue
-                
-                # Find CAM amount - typically the 5th numeric field after monthly rent
-                # Format: Monthly, PSF, Tenant_Deposit, Other_Deposit, CAM, CAM_PSF, Misc, dates
-                # Look for a reasonable CAM value (skip PSF which is small, skip deposits which might be 0)
-                cam = 0.0
-                numeric_fields = []
-                for i in range(idx + 1, min(idx + 10, len(lines))):
-                    try:
-                        val = float(lines[i].replace(',', ''))
-                        numeric_fields.append(val)
-                    except (ValueError, AttributeError):
-                        continue
-                
-                # CAM is typically at index 3 or 4 in numeric_fields (after PSF, 2 deposits)
-                # Look for the first value > 10 that's reasonable relative to monthly rent
-                for val in numeric_fields[2:6]:  # Skip first 2 (PSF, first deposit), check next 4
-                    if val > 10 and val < monthly * 3:
-                        cam = val
+
+                # Tenant text runs from after SF through the first money value.
+                amount_index = None
+                for i in range(2, len(row_lines)):
+                    if amount_re.match(row_lines[i]):
+                        amount_index = i
                         break
-                
-                # Find lease expiration date (format: MM/DD/YYYY)
+                if amount_index is None:
+                    continue
+                tenant_name = ' '.join(row_lines[2:amount_index]).strip()
+                if not tenant_name or tenant_name.upper() == 'VACANT':
+                    continue
+                monthly = _amount(row_lines[amount_index])
+                if monthly is None:
+                    continue
+
+                trailing_numbers = []
+                for value in row_lines[amount_index:]:
+                    parsed = _amount(value)
+                    if parsed is not None:
+                        trailing_numbers.append(parsed)
+                # Column order: actual rent, PSF, tenant deposit, other deposit,
+                # CAM, CAM PSF, misc, misc PSF, balance.
+                deposit = trailing_numbers[2] if len(trailing_numbers) > 2 else 0.0
+                cam = trailing_numbers[4] if len(trailing_numbers) > 4 else 0.0
                 exp_date = None
-                for i in range(idx + 1, len(lines)):
-                    match = re.search(r'(\d{2}/\d{2}/\d{4})', lines[i])
+                for value in row_lines[amount_index:]:
+                    match = re.search(r'(\d{2}/\d{2}/\d{4})', value)
                     if match:
-                        date_str = match.group(1)
                         try:
-                            exp_date = datetime.strptime(date_str, '%m/%d/%Y').date()
-                            # Take the LAST date found (lease expiration, not move-in)
+                            exp_date = datetime.strptime(match.group(1), '%m/%d/%Y').date()
                         except ValueError:
                             pass
-                
-                # Normalize space number
-                normalized_space = normalize_space(unit, building)
-                key = f"{building}|{normalized_space}"
-                
-                # Extract security deposit (numeric_fields[1] = Tenant Deposit, after PSF)
-                deposit = 0.0
-                if len(numeric_fields) >= 2:
-                    deposit = numeric_fields[1]
 
-                yardi_data[key] = {
+                normalized_space = normalize_space(unit, building)
+                yardi_data[f"{building}|{normalized_space}"] = {
                     'monthly': monthly,
                     'cam': cam,
                     'deposit': deposit,
@@ -3976,7 +3941,7 @@ def render_reconcile_tab():
         if b and n:
             sheet_by_name[f"{b}|{n}"] = t
         if b and s:
-            sheet_by_space[f"{b}|{s}"] = t
+            sheet_by_space[f"{b}|{normalize_space(s, b)}"] = t
 
     # Get all unique spreadsheet tenant names per building for dropdown
     building_tenants = {}
