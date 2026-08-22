@@ -2002,7 +2002,21 @@ def render_tenancy_tab():
             display_df['Anniv Δ'] = display_df['Anniv Δ'].apply(
                 lambda x: int(x) if x is not None and not (isinstance(x, float) and pd.isna(x)) else None
             )
-            display_df['Escalation'] = display_df['Escalation'].apply(lambda x: f"{x:.1%}" if x and x > 0 else '-')
+            def _format_escalation(value):
+                """Safely format numeric and Excel/text percentage escalation values."""
+                if value is None or (isinstance(value, float) and pd.isna(value)):
+                    return '-'
+                try:
+                    text = str(value).strip()
+                    is_percent_text = text.endswith('%')
+                    amount = float(text.rstrip('%').replace(',', ''))
+                    if is_percent_text:
+                        amount /= 100
+                    return f"{amount:.1%}" if amount > 0 else '-'
+                except (TypeError, ValueError):
+                    return '-'
+
+            display_df['Escalation'] = display_df['Escalation'].apply(_format_escalation)
             display_df['Monthly'] = display_df['Monthly'].apply(lambda x: f"${x:,.0f}")
             display_df['Annual'] = display_df['Annual'].apply(lambda x: f"${x:,.0f}")
             display_df['PSF'] = display_df['PSF'].apply(lambda x: f"${x:,.2f}")
