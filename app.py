@@ -1259,7 +1259,9 @@ def parse_yardi_deposit_activity(latest_only=True):
                 i_line = 0
                 while i_line < len(lines):
                     line = lines[i_line]
-                    if '(Current)' in line or '(Past)' in line:
+                    # Yardi labels tenants approaching expiration as (Notice).
+                    # They are still active/current deposits and must not be dropped.
+                    if '(Current)' in line or '(Notice)' in line or '(Past)' in line:
                         tenant_name = line
                         # Collect numeric values following the tenant line
                         nums = []
@@ -1299,8 +1301,9 @@ def parse_yardi_deposit_activity(latest_only=True):
                             deposits_on_hand = nums[4]
                             normalized = normalize_space(unit, building)
                             key = f"{building}|{normalized}"
-                            # Only use (Current) entries, or add to existing if (Past)
-                            if '(Current)' in tenant_name:
+                            # Current and Notice are active tenant records; Past only fills
+                            # a missing entry (Future records never enter this parser).
+                            if '(Current)' in tenant_name or '(Notice)' in tenant_name:
                                 deposit_data[key] = deposits_on_hand
                             elif key not in deposit_data:
                                 deposit_data[key] = deposits_on_hand
