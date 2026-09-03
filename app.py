@@ -1038,6 +1038,9 @@ TENANT_ALIASES = {
     "village practice management company, llc": "City Property USA NJ, LLC",
     # 114 Central: Luna Wireless operates under the GP Mobile name on COIs.
     "gp mobile": "Luna Wireless",
+    # 114 Central: Dave Rossi's COI is issued under an abbreviated DBA name.
+    "dave rossi": "Dave Rossi Photography, LLC",
+    "dave rossi photography": "Dave Rossi Photography, LLC",
 }
 
 
@@ -1087,7 +1090,7 @@ def build_coi_url(building_name, filename):
     return f"{COI_RAW_BASE}/{quote(building_name)}/{quote(filename)}"
 
 
-@st.cache_data(ttl=3600)
+@st.cache_data(ttl=60)
 def scan_coi_files():
     """Returns (coi_data, building_coi_data, pm_coi_data): tenant certs, building-level certs, and PM certs per building."""
     coi_data = {}
@@ -6944,15 +6947,12 @@ st.caption(f"Marion Street Properties · {TODAY.strftime('%B %d, %Y')}")
 if get_gsheet() is None:
     st.warning("Google Sheets is temporarily unavailable. Local portfolio data remains visible, but Sheets-backed edits and activity may be unavailable until the connection recovers.")
 
-tab_tenancy, tab_vacancy, tab_leads, tab_covenants, tab_lease_builder, tab_insurance, tab_deposits, tab_reconcile, tab_yardi, tab_sop = st.tabs([
-    "🏠 Current Tenancy", "🏚️ Vacancy", "📋 Lead Sheet", "📜 Lease Covenants", "🧱 Lease Builder", "🛡️ Insurance", "💰 Security Deposits", "🔄 Yardi Reconcile", "📊 Yardi Reports", "📋 SOPs"
+tab_tenancy, tab_vacancy, tab_leads, tab_insurance, tab_deposits, tab_reconcile, tab_yardi, tab_sop = st.tabs([
+    "🏠 Current Tenancy", "🏚️ Vacancy", "📋 Lead Sheet", "🛡️ Insurance", "💰 Security Deposits", "🔄 Yardi Reconcile", "📊 Yardi Reports", "📋 SOPs"
 ])
 
 with tab_sop:
     render_sop_tab()
-
-with tab_lease_builder:
-    render_lease_builder_tab()
 
 with tab_tenancy:
     render_tenancy_tab()
@@ -6962,9 +6962,6 @@ with tab_vacancy:
 
 with tab_leads:
     render_lead_sheet_tab()
-
-with tab_covenants:
-    render_covenants_tab()
 
 with tab_insurance:
     render_insurance_tab()
