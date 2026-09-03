@@ -1036,6 +1036,8 @@ TENANT_ALIASES = {
     "village practice management": "City Property USA NJ, LLC",
     "village practice management company": "City Property USA NJ, LLC",
     "village practice management company, llc": "City Property USA NJ, LLC",
+    # 114 Central: Luna Wireless operates under the GP Mobile name on COIs.
+    "gp mobile": "Luna Wireless",
 }
 
 
@@ -1059,12 +1061,16 @@ def fuzzy_match_tenant(tenant_name, cert_name):
     # Normalize known aliases on BOTH sides to the canonical roster name.
     tenant_name = _apply_tenant_alias(tenant_name)
     cert_name = _apply_tenant_alias(cert_name)
-    t, c = tenant_name.upper().strip(), cert_name.upper().strip()
+    # ACORD often inserts punctuation, e.g. "LiveLoveSkin, LLC" vs the
+    # roster's "LiveLoveSkin LLC". Remove it before comparing.
+    def _clean(value):
+        return re.sub(r'[^A-Z0-9]+', ' ', str(value).upper()).strip()
+    t, c = _clean(tenant_name), _clean(cert_name)
     if t in c or c in t:
         return True
-    skip = {'LLC', 'INC', 'CORP', 'LTD', 'DBA', 'THE', 'OF', 'AND', '&', 'PDF', 'COI', 'CERTIFICATE', 'INSURANCE'}
-    t_words = [w for w in re.split(r'[\s_\-\.]+', t) if w not in skip and len(w) > 2]
-    c_words = [w for w in re.split(r'[\s_\-\.]+', c) if w not in skip and len(w) > 2]
+    skip = {'LLC', 'INC', 'CORP', 'LTD', 'DBA', 'THE', 'OF', 'AND', 'PDF', 'COI', 'CERTIFICATE', 'INSURANCE'}
+    t_words = [w for w in t.split() if w not in skip and len(w) > 2]
+    c_words = [w for w in c.split() if w not in skip and len(w) > 2]
     if t_words and c_words and t_words[0] == c_words[0]:
         return True
     return len(set(t_words) & set(c_words)) >= 1
