@@ -1041,6 +1041,10 @@ TENANT_ALIASES = {
     # 114 Central: Dave Rossi's COI is issued under an abbreviated DBA name.
     "dave rossi": "Dave Rossi Photography, LLC",
     "dave rossi photography": "Dave Rossi Photography, LLC",
+    # 36 South: the roster calls this tenant Easement, while the legal insured
+    # on the COI is PBK44NP, LLC.
+    "pbk44np": "Easement",
+    "pbk44np, llc": "Easement",
 }
 
 
