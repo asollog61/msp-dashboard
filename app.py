@@ -6945,16 +6945,15 @@ def render_lease_builder_tab():
 # MAIN APP
 # =====================
 
-# Inspector link: <app url>/?view=inspect shows only the inspection checklist.
-if st.query_params.get("view", "") == "inspect":
-    if insp.password_gate("inspector"):
-        st.markdown("## 🏢 Property Inspections")
-        st.caption(f"Marion Street Properties · {TODAY.strftime('%B %d, %Y')}")
-        insp.render_inspections_tab(get_gsheet, list(BUILDING_MAP))
+# Access: the dashboard password shows everything; the inspector password (on
+# either link) or the <app url>/?view=inspect link shows only the checklist.
+_access = insp.access_level(inspect_link=st.query_params.get("view", "") == "inspect")
+if _access is None:
     st.stop()
-
-# Full dashboard: asks for a password only when dashboard_password is set in secrets.
-if not insp.password_gate("dashboard"):
+if _access == "inspector":
+    st.markdown("## 🏢 Property Inspections")
+    st.caption(f"Marion Street Properties · {TODAY.strftime('%B %d, %Y')}")
+    insp.render_inspections_tab(get_gsheet, list(BUILDING_MAP))
     st.stop()
 
 col_title, col_toggle = st.columns([8, 2])

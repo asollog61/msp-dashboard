@@ -22,6 +22,7 @@ Secrets (all optional; the tab works without them, minus the feature)
 """
 import hmac
 import json
+import time
 from datetime import datetime
 from io import BytesIO
 
@@ -97,13 +98,44 @@ RESULTS = [OK, NEEDS, NA]
 WS_INSP = "Inspections"
 WS_ITEMS = "Inspection Items"
 INSP_HEADERS = ["Inspection ID", "Date", "Building", "Inspector", "OK",
-                "Needs Attention", "N/A", "Notes", "Submitted At"]
+                "Needs Attention", "N/A", "Notes", "Submitted At", "Report"]
+
+# Where each building's inspections are filed, relative to the Dropbox root in
+# secrets ([dropbox] root). Photos and the PDF report go to
+#   <root>/<building folder>/Inspections/<date>_<time>/
+DEFAULT_ROOT = "/ASRA Investments/Marion St Properties/ACTIVE PROPERTIES"
+BUILDING_FOLDERS = {
+    "114 Central": "114 Central Westfield/0_114Share",
+    "15 South": "15 South Street/0_15Share",
+    "36 South": "36 South Street/0_36Share",
+    "1280 Springfield": "1280-86 Springfield Ave/0_1280Share",
+}
 ITEM_HEADERS = ["Inspection ID", "Date", "Building", "Item No", "Section", "Item",
                 "Result", "Comment", "Photos", "Status", "Resolution",
                 "Resolved By", "Resolved Date"]
 
 PHOTO_MAX_PX = 1600
 PHOTO_TYPES = ["jpg", "jpeg", "png", "webp"]
+
+
+def _rerun():
+    """Rerun only the inspections fragment, so a tap here doesn't re-run every other tab."""
+    try:
+        st.rerun(scope="fragment")
+    except st.errors.StreamlitAPIException:
+        st.rerun()
+
+
+def _retry(fn, tries=5):
+    """Call fn, waiting and retrying when Google Sheets says the per-minute quota is used up."""
+    for attempt in range(tries):
+        try:
+            return fn()
+        except gspread.exceptions.APIError as exc:
+            code = getattr(getattr(exc, "response", None), "status_code", None)
+            if code not in (429, 500, 502, 503) or attempt == tries - 1:
+                raise
+            time.sleep(4 * (2 ** attempt))
 
 
 def _now():
@@ -120,35 +152,44 @@ def _secret(name):
         return ""
 
 
-def password_gate(kind):
-    """Return True when this session may proceed.
+def access_level(inspect_link=False):
+    """Decide what this session may see. Returns 'dashboard', 'inspector' or None.
 
-    kind is 'inspector' (the inspections-only link) or 'dashboard' (everything).
-    With no password configured for that kind the gate is open. The dashboard
-    password also opens the inspector link.
+    'dashboard' is everything; 'inspector' is the inspection checklist only; None
+    means a password form is showing and nothing else should render.
+
+    Either password can be typed on either link: the dashboard password always
+    gives the full dashboard, the inspector password always gives inspections
+    only. A link with no password configured for it is open.
     """
-    own = _secret("inspector_password" if kind == "inspector" else "dashboard_password")
-    if not own:
-        return True
-    if st.session_state.get("_auth_dashboard") or st.session_state.get(f"_auth_{kind}"):
-        return True
+    dash_pw = _secret("dashboard_password").strip()
+    insp_pw = _secret("inspector_password").strip()
 
-    title = "Property Inspections" if kind == "inspector" else "MSP Property Dashboard"
+    if st.session_state.get("_auth_dashboard"):
+        return "inspector" if inspect_link else "dashboard"
+    if st.session_state.get("_auth_inspector"):
+        return "inspector"
+    if inspect_link and not insp_pw:
+        return "inspector"
+    if not inspect_link and not dash_pw:
+        return "dashboard"
+
+    title = "Property Inspections" if inspect_link else "MSP Property Dashboard"
     st.markdown(f"## 🏢 {title}")
-    with st.form(f"_gate_{kind}"):
+    with st.form("_gate"):
         entered = st.text_input("Password", type="password")
         go = st.form_submit_button("Enter", type="primary")
     if go:
-        master = _secret("dashboard_password")
-        if master and hmac.compare_digest(entered, master):
+        entered = entered.strip()
+        if dash_pw and hmac.compare_digest(entered.encode(), dash_pw.encode()):
             st.session_state["_auth_dashboard"] = True
             st.rerun()
-        elif hmac.compare_digest(entered, own):
-            st.session_state[f"_auth_{kind}"] = True
+        elif insp_pw and hmac.compare_digest(entered.encode(), insp_pw.encode()):
+            st.session_state["_auth_inspector"] = True
             st.rerun()
         else:
             st.error("That password isn't right.")
-    return False
+    return None
 
 
 # --------------------------------------------------------------------------
@@ -214,6 +255,100 @@ def _shrink(raw):
         return raw
 
 
+def _inspection_folder(meta):
+    cfg = _dbx_cfg() or {}
+    root = (cfg.get("root") or DEFAULT_ROOT).rstrip("/")
+    sub = BUILDING_FOLDERS.get(meta["building"], _safe(meta["building"]))
+    return f"{root}/{sub}/Inspections/{meta['date']}_{meta['stamp']}"
+
+
+def build_report_pdf(meta, answers, photos, notes):
+    """One PDF per inspection: summary, flagged items with comments and photos, full checklist."""
+    from reportlab.lib import colors
+    from reportlab.lib.pagesizes import letter
+    from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+    from reportlab.lib.units import inch
+    from reportlab.platypus import (Image as RLImage, KeepTogether, Paragraph,
+                                    SimpleDocTemplate, Spacer, Table, TableStyle)
+    from xml.sax.saxutils import escape
+
+    ss = getSampleStyleSheet()
+    h1 = ParagraphStyle("h1", parent=ss["Title"], fontSize=16, spaceAfter=4, alignment=0)
+    h2 = ParagraphStyle("h2", parent=ss["Heading2"], fontSize=12, spaceBefore=12, spaceAfter=6)
+    body = ParagraphStyle("body", parent=ss["BodyText"], fontSize=9.5, leading=12.5)
+    small = ParagraphStyle("small", parent=body, fontSize=8.5, textColor=colors.HexColor("#555555"))
+
+    counts = {r: 0 for r in RESULTS}
+    for _, items in CHECKLIST:
+        for no, _t in items:
+            counts[answers.get(no, {}).get("result") or NA] += 1
+
+    story = [
+        Paragraph("Property Inspection Report", h1),
+        Paragraph(f"<b>{escape(meta['building'])}</b> &nbsp;·&nbsp; {meta['date']} &nbsp;·&nbsp; "
+                  f"Inspector: {escape(meta['inspector'])}", body),
+        Paragraph(f"Marion Street Properties &nbsp;·&nbsp; Inspection ID {meta['id']}", small),
+        Spacer(1, 8),
+        Paragraph(f"OK: <b>{counts[OK]}</b> &nbsp;&nbsp; Needs attention: <b>{counts[NEEDS]}</b> "
+                  f"&nbsp;&nbsp; N/A: <b>{counts[NA]}</b>", body),
+    ]
+    if notes:
+        story += [Spacer(1, 4), Paragraph(f"<b>Notes:</b> {escape(notes)}", body)]
+
+    story.append(Paragraph("Items needing attention", h2))
+    flagged = [(no, text) for _, items in CHECKLIST for no, text in items
+               if answers.get(no, {}).get("result") == NEEDS]
+    if not flagged:
+        story.append(Paragraph("None.", body))
+    for no, text in flagged:
+        block = [Paragraph(f"<b>{no}. {escape(text)}</b>", body),
+                 Paragraph(escape(answers[no].get("comment", "")), body)]
+        cells = []
+        for p in photos.get(no, []):
+            try:
+                w, h = Image.open(BytesIO(p["data"])).size
+                tw = 3.3 * inch
+                th = min(tw * h / w, 4.2 * inch)
+                tw = th * w / h
+                cells.append(RLImage(BytesIO(p["data"]), width=tw, height=th))
+            except Exception:
+                continue
+        for i in range(0, len(cells), 2):
+            row = cells[i:i + 2] + [""] * (2 - len(cells[i:i + 2]))
+            t = Table([row], colWidths=[3.45 * inch] * 2)
+            t.setStyle(TableStyle([("VALIGN", (0, 0), (-1, -1), "TOP"),
+                                   ("LEFTPADDING", (0, 0), (-1, -1), 0),
+                                   ("TOPPADDING", (0, 0), (-1, -1), 4)]))
+            block.append(t)
+        block.append(Spacer(1, 10))
+        story.append(KeepTogether(block[:3]))
+        story += block[3:]
+
+    story.append(Paragraph("Full checklist", h2))
+    rows = []
+    styles = [("FONTSIZE", (0, 0), (-1, -1), 9), ("VALIGN", (0, 0), (-1, -1), "TOP"),
+              ("LINEBELOW", (0, 0), (-1, -1), 0.25, colors.HexColor("#dddddd")),
+              ("TOPPADDING", (0, 0), (-1, -1), 3), ("BOTTOMPADDING", (0, 0), (-1, -1), 3)]
+    for section, items in CHECKLIST:
+        styles += [("BACKGROUND", (0, len(rows)), (-1, len(rows)), colors.HexColor("#eef2f7")),
+                   ("SPAN", (0, len(rows)), (-1, len(rows)))]
+        rows.append([Paragraph(f"<b>{escape(section)}</b>", body), "", ""])
+        for no, text in items:
+            res = answers.get(no, {}).get("result") or NA
+            if res == NEEDS:
+                styles.append(("TEXTCOLOR", (2, len(rows)), (2, len(rows)), colors.HexColor("#c0392b")))
+            rows.append([str(no), Paragraph(escape(text), body), res])
+    table = Table(rows, colWidths=[0.4 * inch, 5.2 * inch, 1.3 * inch], repeatRows=0)
+    table.setStyle(TableStyle(styles))
+    story.append(table)
+
+    buf = BytesIO()
+    SimpleDocTemplate(buf, pagesize=letter, leftMargin=0.75 * inch, rightMargin=0.75 * inch,
+                      topMargin=0.7 * inch, bottomMargin=0.7 * inch,
+                      title=f"Inspection {meta['building']} {meta['date']}").build(story)
+    return buf.getvalue()
+
+
 def _safe(s):
     return "".join(c if c.isalnum() or c in " -_" else "_" for c in str(s)).strip()
 
@@ -233,7 +368,7 @@ def _ws(sheet, name, headers):
 @st.cache_data(ttl=60, show_spinner=False)
 def _load(_sheet, name, headers):
     try:
-        return _ws(_sheet, name, list(headers)).get_all_records()
+        return _retry(lambda: _ws(_sheet, name, list(headers)).get_all_records(), tries=3)
     except Exception as exc:
         st.error(f"Couldn't read '{name}' from Google Sheets: {exc}")
         return []
@@ -245,7 +380,17 @@ def _load_all(sheet):
     return insps, items
 
 
-def _save_inspection(sheet, meta, answers, photo_paths, notes):
+def _ensure_headers(ws, headers):
+    """Older tabs were created before a column was added; widen the header row if so."""
+    have = _retry(lambda: ws.row_values(1))
+    if have[:len(headers)] != headers:
+        if ws.col_count < len(headers):
+            _retry(lambda: ws.add_cols(len(headers) - ws.col_count))
+        _retry(lambda: ws.update(values=[headers], range_name="A1"))
+
+
+def _save_inspection(sheet, meta, answers, photo_paths, notes, progress):
+    """progress is a dict kept in session state so a retry never writes the same rows twice."""
     insp_id = meta["id"]
     counts = {r: 0 for r in RESULTS}
     rows = []
@@ -260,21 +405,28 @@ def _save_inspection(sheet, meta, answers, photo_paths, notes):
                 "\n".join(photo_paths.get(no, [])),
                 "Open" if res == NEEDS else "", "", "", "",
             ])
-    _ws(sheet, WS_ITEMS, ITEM_HEADERS).append_rows(rows, value_input_option="RAW")
-    _ws(sheet, WS_INSP, INSP_HEADERS).append_row([
-        insp_id, meta["date"], meta["building"], meta["inspector"],
-        counts[OK], counts[NEEDS], counts[NA], notes,
-        _now().strftime("%Y-%m-%d %H:%M:%S"),
-    ], value_input_option="RAW")
+    if not progress.get("items"):
+        ws_items = _retry(lambda: _ws(sheet, WS_ITEMS, ITEM_HEADERS))
+        _retry(lambda: ws_items.append_rows(rows, value_input_option="RAW"))
+        progress["items"] = True
+    if not progress.get("header"):
+        ws_insp = _retry(lambda: _ws(sheet, WS_INSP, INSP_HEADERS))
+        _ensure_headers(ws_insp, INSP_HEADERS)
+        _retry(lambda: ws_insp.append_row([
+            insp_id, meta["date"], meta["building"], meta["inspector"],
+            counts[OK], counts[NEEDS], counts[NA], notes,
+            _now().strftime("%Y-%m-%d %H:%M:%S"), meta.get("report", ""),
+        ], value_input_option="RAW"))
+        progress["header"] = True
     _load.clear()
 
 
 def _save_resolution(sheet, insp_id, item_no, status, resolution, by, when):
-    ws = _ws(sheet, WS_ITEMS, ITEM_HEADERS)
-    values = ws.get_all_values()
+    ws = _retry(lambda: _ws(sheet, WS_ITEMS, ITEM_HEADERS))
+    values = _retry(ws.get_all_values)
     for i, row in enumerate(values[1:], start=2):
         if len(row) >= 4 and row[0] == str(insp_id) and str(row[3]) == str(item_no):
-            ws.update(values=[[status, resolution, by, when]], range_name=f"J{i}:M{i}")
+            _retry(lambda: ws.update(values=[[status, resolution, by, when]], range_name=f"J{i}:M{i}"))
             _load.clear()
             return True
     return False
@@ -377,13 +529,13 @@ def _render_item(no, text):
             photos.append({"name": f.name, "data": _shrink(f.getvalue())})
             added = True
         if added:
-            st.rerun()
+            _rerun()
         for i, p in enumerate(photos):
             c1, c2 = st.columns([3, 1])
             c1.image(p["data"], width=160)
             if c2.button("Remove", key=f"insp_rm_{no}_{i}"):
                 photos.pop(i)
-                st.rerun()
+                _rerun()
         if not photos:
             st.caption("On a phone this opens the camera or your photo library.")
 
@@ -416,11 +568,16 @@ def _render_new(sheet, buildings):
             st.write(f"{d['flagged']} item(s) need attention. They're now on the Open issues list.")
         else:
             st.write("No items flagged.")
+        if d.get("report"):
+            st.caption(f"Report and photos filed in Dropbox: {d['report'].rsplit('/', 1)[0]}")
+        if d.get("report_error"):
+            st.warning(f"The PDF report could not be saved to Dropbox ({d['report_error']}). "
+                       "The inspection itself is saved.")
         if d.get("photo_errors"):
             st.warning(f"{d['photo_errors']} photo(s) could not be saved.")
         if st.button("Start another inspection", type="primary"):
             _reset_wizard()
-            st.rerun()
+            _rerun()
         return
 
     # ---- Step 0: who / where / when
@@ -444,7 +601,7 @@ def _render_new(sheet, buildings):
                     "date_obj": when, "date": when.strftime("%Y-%m-%d"),
                 }
                 _go(1)
-                st.rerun()
+                _rerun()
         return
 
     meta = ss.insp_meta
@@ -462,7 +619,7 @@ def _render_new(sheet, buildings):
         back, nxt = st.columns(2)
         if back.button("← Back", use_container_width=True, key=f"insp_back_{step}"):
             _go(step - 1)
-            st.rerun()
+            _rerun()
         nxt_label = "Review →" if step == n_sections else "Next →"
         if nxt.button(nxt_label, type="primary", use_container_width=True, key=f"insp_next_{step}"):
             missing, no_comment = _section_problems(items)
@@ -473,7 +630,7 @@ def _render_new(sheet, buildings):
                 st.error("Add a comment for: " + ", ".join(f"#{n}" for n in no_comment))
             else:
                 _go(step + 1)
-                st.rerun()
+                _rerun()
         return
 
     # ---- Final step: review and submit
@@ -504,7 +661,7 @@ def _render_new(sheet, buildings):
     back, sub = st.columns(2)
     if back.button("← Back", use_container_width=True, key="insp_back_review"):
         _go(n_sections)
-        st.rerun()
+        _rerun()
     if sub.button("Submit inspection", type="primary", use_container_width=True):
         if n_ok + n_na + len(flagged) < total:
             st.error("Some items are unanswered. Go back and complete them.")
@@ -514,37 +671,55 @@ def _render_new(sheet, buildings):
                      "Your answers are still here; try Submit again in a minute.")
             return
         code = "".join(ch for ch in meta["building"] if ch.isalnum())[:12]
-        meta["id"] = f"{code}-{_now().strftime('%Y%m%d-%H%M%S')}"
+        meta.setdefault("id", f"{code}-{_now().strftime('%Y%m%d-%H%M%S')}")
+        meta.setdefault("stamp", _now().strftime("%H%M"))
+        progress = ss.setdefault("insp_progress", {})
+        report_error = ""
 
+        # A photo that already uploaded on an earlier attempt keeps its path.
         photo_paths, errors = {}, 0
-        all_photos = [(no, p) for no, lst in ss.insp_photos.items() for p in lst]
-        if all_photos:
-            cfg = _dbx_cfg()
-            if not cfg:
-                errors = len(all_photos)
-            else:
-                root = (cfg.get("root") or "/MSP Inspections").rstrip("/")
-                folder = f"{root}/{_safe(meta['building'])}/{meta['date']}_{meta['id']}"
+        all_photos = []
+        for no, lst in ss.insp_photos.items():
+            for p in lst:
+                if p.get("path"):
+                    photo_paths.setdefault(no, []).append(p["path"])
+                else:
+                    all_photos.append((no, p))
+        cfg = _dbx_cfg()
+        if not cfg:
+            errors = len(all_photos)
+        else:
+            folder = _inspection_folder(meta)
+            if all_photos:
                 bar = st.progress(0.0, text="Uploading photos…")
-                counter = {}
                 for i, (no, p) in enumerate(all_photos):
-                    counter[no] = counter.get(no, 0) + 1
+                    n = len(photo_paths.get(no, [])) + 1
                     try:
-                        path = dbx_upload(f"{folder}/item{no:02d}_{counter[no]}.jpg", p["data"])
+                        path = dbx_upload(f"{folder}/item{no:02d}_{n}.jpg", p["data"])
+                        p["path"] = path
                         photo_paths.setdefault(no, []).append(path)
                     except Exception:
                         errors += 1
                     bar.progress((i + 1) / len(all_photos), text="Uploading photos…")
                 bar.empty()
+            if not meta.get("report"):
+                try:
+                    pdf = build_report_pdf(meta, ans, ss.insp_photos, ss.insp_notes.strip())
+                    name = f"Inspection Report {meta['building']} {meta['date']}.pdf"
+                    meta["report"] = dbx_upload(f"{folder}/{name}", pdf)
+                except Exception as exc:
+                    report_error = f"{type(exc).__name__}: {exc}"
         try:
-            with st.spinner("Saving…"):
-                _save_inspection(sheet, meta, ans, photo_paths, ss.insp_notes.strip())
+            with st.spinner("Saving… this can take up to a minute if Google Sheets is busy."):
+                _save_inspection(sheet, meta, ans, photo_paths, ss.insp_notes.strip(), progress)
         except Exception as exc:
-            st.error(f"Couldn't save the inspection: {exc}. Your answers are still here; try again.")
+            st.error(f"Couldn't save the inspection: {exc}. Your answers and photos are still here; "
+                     "wait a minute and tap Submit again.")
             return
         ss.insp_done = {"building": meta["building"], "date": meta["date"],
-                        "flagged": len(flagged), "photo_errors": errors}
-        st.rerun()
+                        "flagged": len(flagged), "photo_errors": errors,
+                        "report": meta.get("report", ""), "report_error": report_error}
+        _rerun()
 
 
 # --------------------------------------------------------------------------
@@ -622,7 +797,7 @@ def _render_open(sheet, buildings):
                         ok = False
                         st.error(f"Couldn't save: {exc}")
                     if ok:
-                        st.rerun()
+                        _rerun()
 
 
 def _render_history(sheet, buildings):
@@ -652,6 +827,14 @@ def _render_history(sheet, buildings):
         with st.expander(f"{insp['Date']} · {insp['Building']} · {insp['Inspector']} · {tail}"):
             if insp.get("Notes"):
                 st.markdown(f"**Notes:** {insp['Notes']}")
+            rpt = str(insp.get("Report") or "")
+            if rpt and _dbx_cfg() and st.toggle("📄 Get PDF report", key=f"insp_rpt_{iid}"):
+                try:
+                    st.download_button("Download report", dbx_download(rpt),
+                                       file_name=rpt.rsplit("/", 1)[-1], mime="application/pdf",
+                                       key=f"insp_dl_{iid}")
+                except Exception:
+                    st.caption("Couldn't load the report from Dropbox.")
             if not flagged:
                 st.write("Nothing was flagged.")
             for it in flagged:
@@ -674,7 +857,19 @@ def _render_history(sheet, buildings):
 # Entry point
 # --------------------------------------------------------------------------
 def render_inspections_tab(get_gsheet, buildings):
-    """get_gsheet: callable returning the dashboard spreadsheet (or None)."""
+    """get_gsheet: callable returning the dashboard spreadsheet (or None).
+
+    Runs as a fragment: taps inside the checklist re-run only this tab, not the
+    whole dashboard (which would re-read Google Sheets on every tap and hit the
+    per-minute quota).
+    """
+    if hasattr(st, "fragment"):
+        st.fragment(_render_tab)(get_gsheet, buildings)
+    else:
+        _render_tab(get_gsheet, buildings)
+
+
+def _render_tab(get_gsheet, buildings):
     sheet = get_gsheet()
     st.markdown(_CSS, unsafe_allow_html=True)
     with st.container(key="insp_root"):
