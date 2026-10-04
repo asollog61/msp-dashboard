@@ -114,6 +114,10 @@ ITEM_HEADERS = ["Inspection ID", "Date", "Building", "Item No", "Section", "Item
                 "Result", "Comment", "Photos", "Status", "Resolution",
                 "Resolved By", "Resolved Date"]
 
+# Who gets the report by email when an inspection is submitted. Override with
+# inspection_emails = ["a@x.com", "b@y.com"] at the top of the Streamlit secrets.
+DEFAULT_EMAILS = ["asollog@gmail.com", "richard.b.angel@gmail.com"]
+
 PHOTO_MAX_PX = 1600
 PHOTO_TYPES = ["jpg", "jpeg", "png", "webp"]
 
@@ -349,6 +353,100 @@ def build_report_pdf(meta, answers, photos, notes):
     return buf.getvalue()
 
 
+def _email_recipients():
+    try:
+        val = st.secrets.get("inspection_emails", None)
+    except Exception:
+        val = None
+    if val is None:
+        return list(DEFAULT_EMAILS)
+    if isinstance(val, str):
+        val = val.replace(";", ",").split(",")
+    return [str(v).strip() for v in val if str(v).strip()]
+
+
+def email_report(meta, answers, notes, pdf_bytes):
+    """Email the inspection summary with the PDF attached. Returns (ok, message).
+
+    Uses the dashboard's existing [smtp] secrets (host, port, user, password, from).
+    """
+    import smtplib
+    from email.mime.application import MIMEApplication
+    from email.mime.multipart import MIMEMultipart
+    from email.mime.text import MIMEText
+    from html import escape
+
+    to = _email_recipients()
+    if not to:
+        return (True, "")
+    try:
+        cfg = dict(st.secrets["smtp"])
+    except Exception:
+        return (False, "email isn't set up (no [smtp] section in secrets)")
+    host = cfg.get("host", "smtp.gmail.com")
+    port = int(cfg.get("port", 587))
+    user, password = cfg.get("user"), cfg.get("password")
+    sender = cfg.get("from", user)
+    if not user or not password:
+        return (False, "email user/password missing from secrets")
+
+    flagged = [(no, text) for _, items in CHECKLIST for no, text in items
+               if answers.get(no, {}).get("result") == NEEDS]
+    n_flag = len(flagged)
+    subject = (f"Inspection: {meta['building']} {meta['date']} - "
+               + (f"{n_flag} item{'s need' if n_flag != 1 else ' needs'} attention" if n_flag else "no issues"))
+
+    lines = [f"{meta['building']} was inspected on {meta['date']} by {meta['inspector']}.", ""]
+    html = [f"<p><b>{escape(meta['building'])}</b> was inspected on {meta['date']} "
+            f"by {escape(meta['inspector'])}.</p>"]
+    if flagged:
+        lines.append("Items needing attention:")
+        html.append("<p><b>Items needing attention</b></p><ul>")
+        for no, text in flagged:
+            c = answers[no].get("comment", "")
+            lines.append(f"  {no}. {text}: {c}")
+            html.append(f"<li><b>{no}. {escape(text)}</b><br>{escape(c)}</li>")
+        html.append("</ul>")
+    else:
+        lines.append("No items were flagged.")
+        html.append("<p>No items were flagged.</p>")
+    if notes:
+        lines += ["", f"Notes: {notes}"]
+        html.append(f"<p><b>Notes:</b> {escape(notes)}</p>")
+    tail = ("The full report with photos is attached." if pdf_bytes
+            else "The PDF report could not be generated; see the dashboard for details.")
+    lines += ["", tail]
+    html.append(f"<p>{tail}</p>")
+
+    msg = MIMEMultipart("mixed")
+    msg["Subject"] = subject
+    msg["From"] = sender
+    msg["To"] = ", ".join(to)
+    alt = MIMEMultipart("alternative")
+    alt.attach(MIMEText("\n".join(lines), "plain", "utf-8"))
+    alt.attach(MIMEText("".join(html), "html", "utf-8"))
+    msg.attach(alt)
+    if pdf_bytes:
+        part = MIMEApplication(pdf_bytes, _subtype="pdf")
+        part.add_header("Content-Disposition", "attachment",
+                        filename=f"Inspection Report {meta['building']} {meta['date']}.pdf")
+        msg.attach(part)
+
+    try:
+        if port == 465:
+            with smtplib.SMTP_SSL(host, port, timeout=30) as server:
+                server.login(user, password)
+                server.sendmail(sender, to, msg.as_string())
+        else:
+            with smtplib.SMTP(host, port, timeout=30) as server:
+                server.starttls()
+                server.login(user, password)
+                server.sendmail(sender, to, msg.as_string())
+    except Exception as exc:
+        return (False, f"{type(exc).__name__}: {exc}")
+    return (True, ", ".join(to))
+
+
 def _safe(s):
     return "".join(c if c.isalnum() or c in " -_" else "_" for c in str(s)).strip()
 
@@ -570,6 +668,11 @@ def _render_new(sheet, buildings):
             st.write("No items flagged.")
         if d.get("report"):
             st.caption(f"Report and photos filed in Dropbox: {d['report'].rsplit('/', 1)[0]}")
+        if d.get("email_msg"):
+            if d.get("email_ok"):
+                st.caption(f"Report emailed to {d['email_msg']}.")
+            else:
+                st.warning(f"The inspection is saved, but the email could not be sent ({d['email_msg']}).")
         if d.get("report_error"):
             st.warning(f"The PDF report could not be saved to Dropbox ({d['report_error']}). "
                        "The inspection itself is saved.")
@@ -685,6 +788,13 @@ def _render_new(sheet, buildings):
                     photo_paths.setdefault(no, []).append(p["path"])
                 else:
                     all_photos.append((no, p))
+        if "insp_pdf" not in ss:
+            try:
+                ss.insp_pdf = build_report_pdf(meta, ans, ss.insp_photos, ss.insp_notes.strip())
+            except Exception as exc:
+                ss.insp_pdf = None
+                report_error = f"{type(exc).__name__}: {exc}"
+
         cfg = _dbx_cfg()
         if not cfg:
             errors = len(all_photos)
@@ -702,11 +812,10 @@ def _render_new(sheet, buildings):
                         errors += 1
                     bar.progress((i + 1) / len(all_photos), text="Uploading photos…")
                 bar.empty()
-            if not meta.get("report"):
+            if ss.insp_pdf and not meta.get("report"):
                 try:
-                    pdf = build_report_pdf(meta, ans, ss.insp_photos, ss.insp_notes.strip())
                     name = f"Inspection Report {meta['building']} {meta['date']}.pdf"
-                    meta["report"] = dbx_upload(f"{folder}/{name}", pdf)
+                    meta["report"] = dbx_upload(f"{folder}/{name}", ss.insp_pdf)
                 except Exception as exc:
                     report_error = f"{type(exc).__name__}: {exc}"
         try:
@@ -716,7 +825,14 @@ def _render_new(sheet, buildings):
             st.error(f"Couldn't save the inspection: {exc}. Your answers and photos are still here; "
                      "wait a minute and tap Submit again.")
             return
+        # Email after the save succeeds, and only once even if Submit is tapped again.
+        email_ok, email_msg = True, ""
+        if not progress.get("email"):
+            with st.spinner("Emailing the report…"):
+                email_ok, email_msg = email_report(meta, ans, ss.insp_notes.strip(), ss.insp_pdf)
+            progress["email"] = True
         ss.insp_done = {"building": meta["building"], "date": meta["date"],
+                        "email_ok": email_ok, "email_msg": email_msg,
                         "flagged": len(flagged), "photo_errors": errors,
                         "report": meta.get("report", ""), "report_error": report_error}
         _rerun()
