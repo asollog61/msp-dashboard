@@ -21,6 +21,7 @@ from uuid import uuid4
 import pandas as pd
 import gspread
 from google.oauth2.service_account import Credentials
+import inspections as insp
 import openpyxl
 from openpyxl.styles import Alignment, Font as _XLFont
 import json
@@ -6944,6 +6945,18 @@ def render_lease_builder_tab():
 # MAIN APP
 # =====================
 
+# Inspector link: <app url>/?view=inspect shows only the inspection checklist.
+if st.query_params.get("view", "") == "inspect":
+    if insp.password_gate("inspector"):
+        st.markdown("## 🏢 Property Inspections")
+        st.caption(f"Marion Street Properties · {TODAY.strftime('%B %d, %Y')}")
+        insp.render_inspections_tab(get_gsheet, list(BUILDING_MAP))
+    st.stop()
+
+# Full dashboard: asks for a password only when dashboard_password is set in secrets.
+if not insp.password_gate("dashboard"):
+    st.stop()
+
 col_title, col_toggle = st.columns([8, 2])
 col_title.markdown("## 🏢 MSP Property Dashboard")
 st.session_state.mobile_view = col_toggle.toggle("📱 Mobile", value=st.session_state.mobile_view)
@@ -6951,9 +6964,12 @@ st.caption(f"Marion Street Properties · {TODAY.strftime('%B %d, %Y')}")
 if get_gsheet() is None:
     st.warning("Google Sheets is temporarily unavailable. Local portfolio data remains visible, but Sheets-backed edits and activity may be unavailable until the connection recovers.")
 
-tab_tenancy, tab_vacancy, tab_leads, tab_insurance, tab_deposits, tab_reconcile, tab_yardi, tab_sop = st.tabs([
-    "🏠 Current Tenancy", "🏚️ Vacancy", "📋 Lead Sheet", "🛡️ Insurance", "💰 Security Deposits", "🔄 Yardi Reconcile", "📊 Yardi Reports", "📋 SOPs"
+tab_tenancy, tab_vacancy, tab_leads, tab_insurance, tab_deposits, tab_reconcile, tab_yardi, tab_inspect, tab_sop = st.tabs([
+    "🏠 Current Tenancy", "🏚️ Vacancy", "📋 Lead Sheet", "🛡️ Insurance", "💰 Security Deposits", "🔄 Yardi Reconcile", "📊 Yardi Reports", "🔍 Inspections", "📋 SOPs"
 ])
+
+with tab_inspect:
+    insp.render_inspections_tab(get_gsheet, list(BUILDING_MAP))
 
 with tab_sop:
     render_sop_tab()
