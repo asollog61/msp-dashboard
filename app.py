@@ -1913,7 +1913,8 @@ def render_tenancy_tab():
     st.dataframe(
         outlook_df.style.format({column: '$' + '{:,.0f}' for column in outlook_df.columns if column != 'Period'}),
         hide_index=True,
-        use_container_width=True,
+        use_container_width=False,
+        height=250,
     )
 
     wavg_net_psf = total_annual / total_sf if total_sf > 0 else 0
