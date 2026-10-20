@@ -979,6 +979,80 @@ def load_tenancy():
     return tenants, details, summaries
 
 
+def build_noi_outlook(details, summaries, expense_cfg, years=range(0, 6), as_of=None):
+    """Annualized NOI by building at each future anniversary.
+
+    Scheduled rent uses the tenancy workbook period that contains the snapshot
+    date. Once no scheduled period remains, the space contributes no rent.
+    Expenses grow 2% annually and NNN CAM reimbursement follows each tenant's
+    workbook New CAM percentage.
+    """
+    as_of = as_of or TODAY
+
+    def _date(value):
+        if isinstance(value, datetime):
+            return value.date()
+        return value if isinstance(value, date) else None
+
+    def _future_date(base_date, years_forward):
+        try:
+            return base_date.replace(year=base_date.year + years_forward)
+        except ValueError:  # February 29
+            return base_date.replace(month=2, day=28, year=base_date.year + years_forward)
+
+    def _number(value):
+        try:
+            return float(value or 0)
+        except (TypeError, ValueError):
+            return 0.0
+
+    def _key(value):
+        return str(value or '').strip().lower()
+
+    cam_pct_by_tenant = {}
+    for summary in summaries:
+        cam_pct_by_tenant[(_key(summary.get('Buidling')), _key(summary.get('Unit')), _key(summary.get('Tenant Name')))] = _number(summary.get('New CAM'))
+
+    periods = list(years)
+    outlook = {
+        offset: {building: -_number(expense_cfg.get(building)) * (1.02 ** offset)
+                 for building in BUILDING_MAP}
+        for offset in periods
+    }
+
+    for rows in details.values():
+        if not rows:
+            continue
+        first = rows[0]
+        building = first.get('Building', '')
+        if building not in BUILDING_MAP:
+            continue
+        cam_pct = cam_pct_by_tenant.get(
+            (_key(building), _key(first.get('Space')), _key(first.get('Tenant'))), 0.0
+        )
+        is_nnn = str(first.get('Type', '')).upper().startswith('NNN')
+
+        for offset in periods:
+            snapshot = _future_date(as_of, offset)
+            matching = [
+                row for row in rows
+                if _date(row.get('Start Date')) and _date(row.get('End Date'))
+                and _date(row.get('Start Date')) <= snapshot <= _date(row.get('End Date'))
+            ]
+            if not matching:
+                continue
+            scheduled = min(matching, key=lambda row: _date(row.get('End Date')))
+            gross_mod = _number(scheduled.get('Gross Mod'))
+            annual = _number(scheduled.get('Annual')) + (gross_mod * 12)
+            if annual == 0:
+                annual = (_number(scheduled.get('Monthly')) + gross_mod) * 12
+            projected_expense = _number(expense_cfg.get(building)) * (1.02 ** offset)
+            cam_reimbursement = projected_expense * cam_pct if is_nnn else 0.0
+            outlook[offset][building] += annual + cam_reimbursement
+
+    return outlook
+
+
 # --- COI SCANNING ---
 def extract_cert_info(pdf_path):
     if not HAS_PYMUPDF:
@@ -1820,6 +1894,25 @@ def render_tenancy_tab():
     total_expenses = sum(float(expense_cfg.get(b, 0) or 0) for b in BUILDING_MAP.keys())
     total_gross_rev = total_annual + total_cam_reimb
     total_noi = total_gross_rev - total_expenses
+
+    # Five-year annualized NOI outlook by building. Scheduled lease periods
+    # drive rent; expenses increase 2% annually and NNN CAM follows New CAM.
+    noi_outlook = build_noi_outlook(details, summaries, expense_cfg)
+    outlook_rows = []
+    for offset, label in enumerate(['Current', '1 Year', '2 Years', '3 Years', '4 Years', '5 Years']):
+        row = {'Period': label}
+        row.update({building: noi_outlook[offset].get(building, 0.0) for building in BUILDING_MAP})
+        row['Portfolio Total'] = sum(row[building] for building in BUILDING_MAP)
+        outlook_rows.append(row)
+    outlook_df = pd.DataFrame(outlook_rows)
+    st.markdown("#### Estimated NOI by Building")
+    st.caption("Annualized run-rate at each anniversary. Expenses grow 2% annually; NNN CAM reimbursement follows the workbook's New CAM schedule. Space without a scheduled lease period is projected at $0 rent.")
+    st.dataframe(
+        outlook_df.style.format({column: '$' + '{:,.0f}' for column in outlook_df.columns if column != 'Period'}),
+        hide_index=True,
+        use_container_width=True,
+    )
+
     wavg_net_psf = total_annual / total_sf if total_sf > 0 else 0
     wavg_gross_psf = total_gross_rev / total_sf if total_sf > 0 else 0
 
