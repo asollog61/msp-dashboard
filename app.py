@@ -1854,6 +1854,9 @@ def render_sop_tab():
 
 
 def render_tenancy_tab():
+    # Keep pandas bound before the NOI outlook is built.
+    import pandas as pd
+
     tenants, details, summaries = load_tenancy()
     if not tenants:
         st.warning("MSP Tenancy.xlsx not found.")
