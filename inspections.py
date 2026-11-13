@@ -8,7 +8,11 @@ fix for each flagged item is recorded.
 Storage
   Google Sheets  'Inspections'       one row per inspection
                  'Inspection Items'  one row per checklist item per inspection
+                 'Inspection Drafts' one row per started inspection, autosaved
+                                     after every answer so a dropped connection
+                                     can be resumed from the New inspection screen
   Dropbox        photos, under <root>/<building>/<date>_<inspection id>/
+                 (uploaded as soon as they are taken, so drafts keep them)
 
 Secrets (all optional; the tab works without them, minus the feature)
   [dropbox]
@@ -113,6 +117,14 @@ BUILDING_FOLDERS = {
 ITEM_HEADERS = ["Inspection ID", "Date", "Building", "Item No", "Section", "Item",
                 "Result", "Comment", "Photos", "Status", "Resolution",
                 "Resolved By", "Resolved Date"]
+
+# Drafts: one row per inspection in progress. Rows are never deleted by the app
+# (finished or discarded drafts just change Status), so a row number stays valid
+# for the life of the draft and each autosave is a single write.
+WS_DRAFTS = "Inspection Drafts"
+DRAFT_HEADERS = ["Inspection ID", "Building", "Inspector", "Date", "Started At",
+                 "Updated At", "Status", "Step", "Data"]
+DRAFT_OPEN, DRAFT_SUBMITTED, DRAFT_DISCARDED = "In progress", "Submitted", "Discarded"
 
 # Who gets the report by email when an inspection is submitted. Override with
 # inspection_emails = ["a@x.com", "b@y.com"] at the top of the Streamlit secrets.
@@ -234,6 +246,18 @@ def dbx_upload(path, data):
                       headers=headers, data=data, timeout=90)
     r.raise_for_status()
     return r.json().get("path_display", path)
+
+
+def dbx_delete(path):
+    """Best effort: remove a photo that was taken off a draft."""
+    try:
+        cfg = _dbx_cfg()
+        token = _dbx_token(cfg["app_key"], cfg["app_secret"], cfg["refresh_token"])
+        requests.post("https://api.dropboxapi.com/2/files/delete_v2",
+                      headers={"Authorization": f"Bearer {token}"},
+                      json={"path": path}, timeout=20)
+    except Exception:
+        pass
 
 
 @st.cache_data(ttl=3600, max_entries=200, show_spinner=False)
@@ -531,6 +555,151 @@ def _save_resolution(sheet, insp_id, item_no, status, resolution, by, when):
 
 
 # --------------------------------------------------------------------------
+# Drafts (autosave / resume)
+# --------------------------------------------------------------------------
+def _draft_payload():
+    """Everything needed to rebuild the wizard, as JSON-safe data."""
+    ss = st.session_state
+    meta = {k: v for k, v in ss.insp_meta.items() if k != "date_obj"}
+    answers = {str(no): {"result": a.get("result"), "comment": a.get("comment", "")}
+               for no, a in ss.insp_answers.items() if a.get("result") or a.get("comment")}
+    photos = {str(no): [p["path"] for p in lst if p.get("path")]
+              for no, lst in ss.insp_photos.items()}
+    photos = {k: v for k, v in photos.items() if v}
+    return {"meta": meta, "step": ss.insp_step, "answers": answers,
+            "photos": photos, "notes": ss.get("insp_notes", "")}
+
+
+def _draft_row_values(payload, started=""):
+    meta = payload["meta"]
+    return [meta.get("id", ""), meta.get("building", ""), meta.get("inspector", ""),
+            meta.get("date", ""), started, _now().strftime("%Y-%m-%d %H:%M:%S"),
+            DRAFT_OPEN, payload["step"], json.dumps(payload, sort_keys=True)]
+
+
+def _row_from_range(rng):
+    """'Inspection Drafts'!A7:I7 -> 7"""
+    import re
+    m = re.search(r"![A-Z]+(\d+)", rng or "")
+    return int(m.group(1)) if m else None
+
+
+def _draft_write(sheet, payload):
+    """Create the draft row on first save, then overwrite that same row."""
+    ss = st.session_state
+    ws = _retry(lambda: _ws(sheet, WS_DRAFTS, DRAFT_HEADERS), tries=2)
+    row = ss.get("insp_draft_row")
+    if row:
+        values = _draft_row_values(payload)
+        # One API call; column E (Started At) is left alone after the first write.
+        _retry(lambda: ws.batch_update([
+            {"range": f"A{row}:D{row}", "values": [values[:4]]},
+            {"range": f"F{row}:I{row}", "values": [values[5:]]},
+        ], value_input_option="RAW"), tries=2)
+    else:
+        resp = _retry(lambda: ws.append_row(
+            _draft_row_values(payload, started=_now().strftime("%Y-%m-%d %H:%M:%S")),
+            value_input_option="RAW"), tries=2)
+        row = _row_from_range(((resp or {}).get("updates") or {}).get("updatedRange"))
+        if not row:
+            cell = _retry(lambda: ws.find(payload["meta"]["id"], in_column=1))
+            row = cell.row if cell else None
+        ss.insp_draft_row = row
+        _load_drafts.clear()
+
+
+def _draft_set_status(sheet, row, status):
+    ws = _retry(lambda: _ws(sheet, WS_DRAFTS, DRAFT_HEADERS))
+    _retry(lambda: ws.update(values=[[_now().strftime("%Y-%m-%d %H:%M:%S"), status]],
+                             range_name=f"F{row}:G{row}"))
+    _load_drafts.clear()
+
+
+@st.cache_data(ttl=30, show_spinner=False)
+def _load_drafts(_sheet):
+    """Open drafts, newest first, each with its sheet row number."""
+    try:
+        values = _retry(lambda: _ws(_sheet, WS_DRAFTS, DRAFT_HEADERS).get_all_values(), tries=3)
+    except Exception:
+        return []
+    out = []
+    for i, row in enumerate(values[1:], start=2):
+        rec = dict(zip(DRAFT_HEADERS, row + [""] * (len(DRAFT_HEADERS) - len(row))))
+        if rec["Status"] != DRAFT_OPEN:
+            continue
+        try:
+            rec["data"] = json.loads(rec["Data"])
+        except Exception:
+            continue
+        rec["row"] = i
+        out.append(rec)
+    out.sort(key=lambda r: r["Updated At"], reverse=True)
+    return out
+
+
+def _autosave(sheet, status_slot):
+    """Save the draft if anything changed since the last save. Never raises."""
+    ss = st.session_state
+    if not ss.insp_meta.get("id"):
+        return
+    payload = _draft_payload()
+    blob = json.dumps(payload, sort_keys=True)
+    if blob != ss.get("insp_draft_saved"):
+        if not sheet:
+            status_slot.caption("⚠️ Not autosaved: Google Sheets is unavailable. "
+                                "Keep this screen open; it will save when the connection is back.")
+            return
+        try:
+            _draft_write(sheet, payload)
+            ss.insp_draft_saved = blob
+            ss.insp_draft_time = _now().strftime("%I:%M %p").lstrip("0")
+        except Exception:
+            status_slot.caption("⚠️ Not autosaved yet. It will try again on your next answer.")
+            return
+    if ss.get("insp_draft_time"):
+        status_slot.caption(f"✓ Autosaved {ss.insp_draft_time}")
+
+
+def _resume_draft(rec):
+    """Load a saved draft back into the wizard."""
+    _reset_wizard()
+    _init_wizard()
+    ss = st.session_state
+    data = rec["data"]
+    meta = dict(data.get("meta") or {})
+    try:
+        meta["date_obj"] = datetime.strptime(meta["date"], "%Y-%m-%d").date()
+    except Exception:
+        meta["date_obj"] = _now().date()
+    ss.insp_meta = meta
+    ss.insp_answers = {int(no): {"result": a.get("result"), "comment": a.get("comment", "")}
+                       for no, a in (data.get("answers") or {}).items()}
+    ss.insp_photos = {int(no): [{"name": p.rsplit("/", 1)[-1], "path": p, "data": None}
+                                for p in paths]
+                      for no, paths in (data.get("photos") or {}).items()}
+    ss.insp_notes = data.get("notes", "")
+    ss.insp_draft_row = rec["row"]
+    ss.inspector_name = meta.get("inspector", "")
+    _go(max(1, min(int(data.get("step") or 1), len(CHECKLIST) + 1)))
+    ss.insp_draft_saved = json.dumps(_draft_payload(), sort_keys=True)
+    try:
+        ss.insp_draft_time = datetime.strptime(
+            rec["Updated At"], "%Y-%m-%d %H:%M:%S").strftime("%I:%M %p").lstrip("0")
+    except Exception:
+        ss.insp_draft_time = ""
+
+
+def _photo_bytes(p):
+    """A photo's bytes; resumed drafts only have the Dropbox path until needed."""
+    if p.get("data") is None and p.get("path") and _dbx_cfg():
+        try:
+            p["data"] = dbx_download(p["path"])
+        except Exception:
+            return None
+    return p.get("data")
+
+
+# --------------------------------------------------------------------------
 # UI helpers
 # --------------------------------------------------------------------------
 _CSS = """
@@ -624,15 +793,34 @@ def _render_item(no, text):
             if sig in seen:
                 continue
             seen.add(sig)
-            photos.append({"name": f.name, "data": _shrink(f.getvalue())})
+            p = {"name": f.name, "data": _shrink(f.getvalue())}
+            # Upload now so the photo survives a dropped connection; if this
+            # fails it stays in memory and Submit tries again.
+            if _dbx_cfg() and ss.insp_meta.get("id"):
+                try:
+                    folder = _inspection_folder(ss.insp_meta)
+                    with st.spinner("Saving photo…"):
+                        p["path"] = dbx_upload(
+                            f"{folder}/item{no:02d}_{len(photos) + 1}.jpg", p["data"])
+                except Exception:
+                    pass
+            photos.append(p)
             added = True
         if added:
             _rerun()
         for i, p in enumerate(photos):
             c1, c2 = st.columns([3, 1])
-            c1.image(p["data"], width=160)
+            data = _photo_bytes(p)
+            if data:
+                c1.image(data, width=160)
+            else:
+                c1.caption(f"📷 {p.get('name', 'photo')} (saved)")
+            if not p.get("path") and _dbx_cfg():
+                c1.caption("Not uploaded yet; it will upload on Submit.")
             if c2.button("Remove", key=f"insp_rm_{no}_{i}"):
-                photos.pop(i)
+                gone = photos.pop(i)
+                if gone.get("path"):
+                    dbx_delete(gone["path"])
                 _rerun()
         if not photos:
             st.caption("On a phone this opens the camera or your photo library.")
@@ -686,6 +874,39 @@ def _render_new(sheet, buildings):
     # ---- Step 0: who / where / when
     if step == 0:
         meta = ss.insp_meta
+        if not meta.get("id") and sheet:
+            done_ids = {str(i.get("Inspection ID")) for i in _load(sheet, WS_INSP, tuple(INSP_HEADERS))}
+            drafts = [d for d in _load_drafts(sheet) if d["Inspection ID"] not in done_ids]
+            if drafts:
+                st.markdown("#### Unfinished inspections")
+                st.caption("These were saved as you went. Pick up where you left off.")
+                for rec in drafts:
+                    d = rec["data"]
+                    n_ans = sum(1 for a in (d.get("answers") or {}).values() if a.get("result"))
+                    total = sum(len(items) for _, items in CHECKLIST)
+                    with st.container(border=True):
+                        st.markdown(f"**{rec['Building']}** · {rec['Date']} · {rec['Inspector']}")
+                        st.caption(f"{n_ans} of {total} answered · last saved {rec['Updated At']}")
+                        c1, c2 = st.columns(2)
+                        if c1.button("Resume", type="primary", use_container_width=True,
+                                     key=f"insp_resume_{rec['row']}"):
+                            _resume_draft(rec)
+                            _rerun()
+                        confirm = f"insp_discard_ok_{rec['row']}"
+                        if ss.get(confirm):
+                            if c2.button("Tap again to discard", use_container_width=True,
+                                         key=f"insp_discard2_{rec['row']}"):
+                                try:
+                                    _draft_set_status(sheet, rec["row"], DRAFT_DISCARDED)
+                                except Exception as exc:
+                                    st.error(f"Couldn't discard: {exc}")
+                                ss.pop(confirm, None)
+                                _rerun()
+                        elif c2.button("Discard", use_container_width=True,
+                                       key=f"insp_discard_{rec['row']}"):
+                            ss[confirm] = True
+                            _rerun()
+                st.divider()
         st.markdown("#### New inspection")
         b_idx = buildings.index(meta["building"]) if meta.get("building") in buildings else None
         building = st.selectbox("Building", buildings, index=b_idx, placeholder="Choose a building")
@@ -699,16 +920,24 @@ def _render_new(sheet, buildings):
                 st.error("Choose a building and enter your name.")
             else:
                 ss.inspector_name = inspector.strip()
+                # The ID and folder stamp are fixed at Start (kept if the
+                # inspector comes back here), so autosaves and early photo
+                # uploads all land on the same draft and folder.
+                code = "".join(ch for ch in building if ch.isalnum())[:12]
                 ss.insp_meta = {
                     "building": building, "inspector": inspector.strip(),
                     "date_obj": when, "date": when.strftime("%Y-%m-%d"),
+                    "id": meta.get("id") or f"{code}-{_now().strftime('%Y%m%d-%H%M%S')}",
+                    "stamp": meta.get("stamp") or _now().strftime("%H%M"),
                 }
                 _go(1)
+                _autosave(sheet, st.empty())
                 _rerun()
         return
 
     meta = ss.insp_meta
     st.caption(f"{meta['building']} · {meta['date']} · {meta['inspector']}")
+    save_slot = st.empty()
 
     # ---- Steps 1..n: one section per screen
     if 1 <= step <= n_sections:
@@ -719,6 +948,7 @@ def _render_new(sheet, buildings):
             _render_item(no, text)
             st.divider()
 
+        _autosave(sheet, save_slot)
         back, nxt = st.columns(2)
         if back.button("← Back", use_container_width=True, key=f"insp_back_{step}"):
             _go(step - 1)
@@ -761,6 +991,7 @@ def _render_new(sheet, buildings):
 
     ss.insp_notes = st.text_area("General notes (optional)", value=ss.insp_notes)
 
+    _autosave(sheet, save_slot)
     back, sub = st.columns(2)
     if back.button("← Back", use_container_width=True, key="insp_back_review"):
         _go(n_sections)
@@ -789,6 +1020,9 @@ def _render_new(sheet, buildings):
                 else:
                     all_photos.append((no, p))
         if "insp_pdf" not in ss:
+            for lst in ss.insp_photos.values():
+                for p in lst:
+                    _photo_bytes(p)  # resumed photos: fetch from Dropbox for the PDF
             try:
                 ss.insp_pdf = build_report_pdf(meta, ans, ss.insp_photos, ss.insp_notes.strip())
             except Exception as exc:
@@ -831,6 +1065,12 @@ def _render_new(sheet, buildings):
             with st.spinner("Emailing the report…"):
                 email_ok, email_msg = email_report(meta, ans, ss.insp_notes.strip(), ss.insp_pdf)
             progress["email"] = True
+        if ss.get("insp_draft_row") and not progress.get("draft"):
+            try:
+                _draft_set_status(sheet, ss.insp_draft_row, DRAFT_SUBMITTED)
+                progress["draft"] = True
+            except Exception:
+                pass  # the inspection is saved; a stale draft just shows as resumable
         ss.insp_done = {"building": meta["building"], "date": meta["date"],
                         "email_ok": email_ok, "email_msg": email_msg,
                         "flagged": len(flagged), "photo_errors": errors,
